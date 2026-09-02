@@ -1,0 +1,72 @@
+# Rust
+/target/
+# Cargo.lock is intentionally tracked for binary workspaces (reproducible builds).
+# Keep it committed; only ignore for pure library crates.
+# Cargo.lock
+
+# Mutation testing (cargo-mutants)
+mutants.out/
+mutants.out.old/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.wasm
+pkg/
+
+# Node/Bun (if using for Tailwind)
+node_modules/
+bun.lockb
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Leptos
+/site/
+.rumdl_cache/
+.hypothesis/
+.benchmarks/
+
+# Python (sdks/python: hatchling + pytest/mypy/ruff)
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.whl
+
+# TypeScript (sdks/typescript: tsc -> dist/, *tsbuildinfo)
+*.tsbuildinfo
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Go (sdks/go)
+vendor/
+*.out
+*.test
+*.exe

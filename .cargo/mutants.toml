@@ -1,0 +1,6 @@
+# Mutation testing configuration for cargo-mutants.
+#
+# Binary crate entry points (e.g. `fn main`) cannot be exercised by unit
+# tests, so their injected mutants would always survive. Keep mutation
+# focused on library crates where the domain logic lives.
+exclude_globs = ["bin/longtrader-worker/src/main.rs"]

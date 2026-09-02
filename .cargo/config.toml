@@ -1,0 +1,4 @@
+[build]
+pipelining = true
+jobs = 10
+rustc-wrapper = "kache"

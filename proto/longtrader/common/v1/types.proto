@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package longtrader.common.v1;
+
+// Core shared types for the longtrader contract. Every other package imports
+// these; they must stay small, stable, and dependency-free.
+
+// High-precision decimal with a dual representation.
+//
+// Fast path: value = unscaled * 10^-scale, used whenever the value fits an
+// int64 mantissa (the overwhelming majority of market data).
+// Fallback: raw_str carries arbitrary precision (rust_decimal's mantissa is
+// 96-bit and does not always fit int64).
+//
+// Invariant: exactly one of {unscaled+scale, raw_str} is populated by writers;
+// readers MUST support both.
+message Decimal {
+  int64 unscaled = 1;
+  int32 scale = 2;
+  string raw_str = 3;
+}
+
+// Unified instrument symbol, e.g. "BTC/USDT".
+message Symbol {
+  string value = 1;
+}
+
+// Identifies one registered exchange instance on a backend.
+message ExchangeId {
+  string id = 1;
+  string label = 2;
+}
+
+// Shared pagination envelope for list methods.
+message Pagination {
+  uint64 limit = 1;
+  // Unix timestamp in milliseconds.
+  uint64 since = 2;
+  string cursor = 3;
+}
+
+// Multi-stage latency tracking attached to every streamed event.
+//
+// Clock caveat: exchange_time_ns comes from venue clocks; cross-host
+// comparisons assume NTP-disciplined clocks. Only intervals within one host
+// are treated as precise measurements.
+message EventHeader {
+  // W3C TraceContext trace id, propagated end-to-end.
+  string trace_id = 1;
+  // Monotonically increasing, gap-free per subscription.
+  uint64 sequence = 2;
+  // Venue-reported event time (resolution depends on the venue).
+  int64 exchange_time_ns = 3;
+  // Daemon receive time.
+  int64 gateway_in_time_ns = 4;
+  // Worker dispatch-to-consumer time.
+  int64 local_dispatch_time_ns = 5;
+}

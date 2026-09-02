@@ -1,0 +1,18 @@
+version: v2
+# Generates stubs for the SDK tiers. Run via `just sdk-generate` (requires
+# network access for remote plugins).
+managed:
+  enabled: true
+plugins:
+  - remote: buf.build/protocolbuffers/python:v31.1
+    out: ../sdks/python/longtrader_sdk/proto
+  - remote: buf.build/community/grpcio-python:v1.73.1
+    out: ../sdks/python/longtrader_sdk/proto
+  - remote: buf.build/bufbuild/es:v2.10.1
+    out: ../sdks/typescript/src/gen
+    opt:
+      - target=typescript
+  - remote: buf.build/protocolbuffers/go:v1.36.10
+    out: ../sdks/go/gen
+    opt:
+      - paths=source_relative

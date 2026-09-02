@@ -1,0 +1,284 @@
+syntax = "proto3";
+
+package longtrader.trading.v1;
+
+import "google/protobuf/timestamp.proto";
+import "longtrader/common/v1/types.proto";
+
+// ---- Order enums (single authority; Rust domain enums are not mirrored) ----
+
+enum OrderSide {
+  ORDER_SIDE_UNSPECIFIED = 0;
+  ORDER_SIDE_BUY = 1;
+  ORDER_SIDE_SELL = 2;
+}
+
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  ORDER_TYPE_MARKET = 1;
+  ORDER_TYPE_LIMIT = 2;
+  ORDER_TYPE_STOP = 3;
+  ORDER_TYPE_STOP_LIMIT = 4;
+  ORDER_TYPE_TAKE_PROFIT = 5;
+  ORDER_TYPE_TAKE_PROFIT_LIMIT = 6;
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_OPEN = 1;
+  ORDER_STATUS_CLOSED = 2;
+  ORDER_STATUS_CANCELED = 3;
+  ORDER_STATUS_EXPIRED = 4;
+  ORDER_STATUS_REJECTED = 5;
+  ORDER_STATUS_PARTIALLY_FILLED = 6;
+  ORDER_STATUS_FILLED = 7;
+}
+
+enum TimeInForce {
+  TIME_IN_FORCE_UNSPECIFIED = 0;
+  TIME_IN_FORCE_GTC = 1;
+  TIME_IN_FORCE_IOC = 2;
+  TIME_IN_FORCE_FOK = 3;
+  TIME_IN_FORCE_PO = 4;
+}
+
+// ---- Orders ----
+
+message OrderRequest {
+  // Mandatory ULID; the backend deduplicates on it, making retries safe.
+  string client_order_id = 1;
+  string symbol = 2;
+  OrderType type = 3;
+  OrderSide side = 4;
+  common.v1.Decimal amount = 5;
+  common.v1.Decimal price = 6;
+  common.v1.Decimal trigger_price = 7;
+  TimeInForce time_in_force = 8;
+  bool post_only = 9;
+  bool reduce_only = 10;
+  map<string, string> params = 20;
+}
+
+message Order {
+  string id = 1;
+  string client_order_id = 2;
+  string symbol = 3;
+  OrderType type = 4;
+  OrderSide side = 5;
+  OrderStatus status = 6;
+  common.v1.Decimal amount = 7;
+  common.v1.Decimal price = 8;
+  common.v1.Decimal filled = 9;
+  common.v1.Decimal remaining = 10;
+  common.v1.Decimal cost = 11;
+  common.v1.Decimal average = 12;
+  common.v1.Decimal fee = 13;
+  string fee_currency = 14;
+  TimeInForce time_in_force = 15;
+  google.protobuf.Timestamp timestamp = 16;
+  google.protobuf.Timestamp last_trade_timestamp = 17;
+  bool post_only = 18;
+  bool reduce_only = 19;
+  map<string, string> info = 30;
+  // ---- Terminal extensions (additive) ----
+  optional common.v1.Decimal take_profit = 20;
+  optional common.v1.Decimal stop_loss = 21;
+  // Creation / last update, Unix milliseconds.
+  int64 created_at_ms = 22;
+  int64 updated_at_ms = 23;
+}
+
+message CreateOrderRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  OrderRequest order = 2;
+}
+
+message CreateOrderResponse {
+  Order order = 1;
+}
+
+message CreateOrdersRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  repeated OrderRequest orders = 2;
+}
+
+message CreateOrdersResponse {
+  repeated Order orders = 1;
+}
+
+message CancelOrderRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  string order_id = 2;
+  string symbol = 3;
+}
+
+message CancelOrderResponse {
+  Order order = 1;
+}
+
+message FetchOpenOrdersRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  string symbol = 2;
+  common.v1.Pagination pagination = 3;
+}
+
+message FetchOpenOrdersResponse {
+  repeated Order orders = 1;
+}
+
+// ---- Fills & positions ----
+
+message Trade {
+  string id = 1;
+  string order_id = 2;
+  string symbol = 3;
+  OrderSide side = 4;
+  common.v1.Decimal price = 5;
+  common.v1.Decimal amount = 6;
+  common.v1.Decimal cost = 7;
+  common.v1.Decimal fee = 8;
+  string fee_currency = 9;
+  google.protobuf.Timestamp timestamp = 10;
+  bool maker = 11;
+}
+
+message Position {
+  string id = 1;
+  string symbol = 2;
+  common.v1.Decimal contracts = 3;
+  common.v1.Decimal contract_size = 4;
+  OrderSide side = 5;
+  common.v1.Decimal entry_price = 6;
+  common.v1.Decimal mark_price = 7;
+  common.v1.Decimal notional = 8;
+  common.v1.Decimal leverage = 9;
+  common.v1.Decimal unrealized_pnl = 10;
+  common.v1.Decimal liquidation_price = 11;
+  google.protobuf.Timestamp timestamp = 12;
+  map<string, string> info = 30;
+  // ---- Terminal extensions (additive) ----
+  // Owning order id (position lifecycle tracking).
+  optional string order_id = 13;
+  // Latest mark/last price seen by the venue.
+  optional common.v1.Decimal current_price = 14;
+  optional common.v1.Decimal take_profit = 15;
+  optional common.v1.Decimal stop_loss = 16;
+  // Position open time, Unix milliseconds.
+  int64 opened_at_ms = 17;
+}
+
+// Position side as seen from the holder's perspective.
+enum PositionSide {
+  POSITION_SIDE_UNSPECIFIED = 0;
+  POSITION_SIDE_LONG = 1;
+  POSITION_SIDE_SHORT = 2;
+}
+
+// Why a position was closed.
+enum CloseReason {
+  CLOSE_REASON_UNSPECIFIED = 0;
+  CLOSE_REASON_MANUAL = 1;
+  CLOSE_REASON_TAKE_PROFIT = 2;
+  CLOSE_REASON_STOP_LOSS = 3;
+  CLOSE_REASON_STOP_OUT = 4;
+}
+
+message ClosedPosition {
+  string id = 1;
+  string order_id = 2;
+  string symbol = 3;
+  PositionSide side = 4;
+  common.v1.Decimal quantity = 5;
+  common.v1.Decimal entry_price = 6;
+  common.v1.Decimal exit_price = 7;
+  common.v1.Decimal realized_pnl = 8;
+  int64 opened_at_ms = 9;
+  int64 closed_at_ms = 10;
+  CloseReason close_reason = 11;
+}
+
+// ---- Account / history queries (unified surface) ----
+
+message Account {
+  common.v1.Decimal balance = 1;
+  common.v1.Decimal equity = 2;
+  common.v1.Decimal margin_used = 3;
+  common.v1.Decimal free_margin = 4;
+  common.v1.Decimal margin_frozen = 5;
+}
+
+message GetAccountRequest {
+  common.v1.ExchangeId exchange_id = 1;
+}
+
+message GetAccountResponse {
+  Account account = 1;
+}
+
+message GetPositionsRequest {
+  common.v1.ExchangeId exchange_id = 1;
+}
+
+message GetPositionsResponse {
+  repeated Position positions = 1;
+}
+
+message GetOrderHistoryRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  uint32 limit = 2;
+}
+
+message GetOrderHistoryResponse {
+  repeated Order orders = 1;
+}
+
+message GetClosedPositionsRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  uint32 limit = 2;
+}
+
+message GetClosedPositionsResponse {
+  repeated ClosedPosition positions = 1;
+}
+
+message ClosePositionRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  string position_id = 2;
+}
+
+message ClosePositionResponse {}
+
+message CloseAllPositionsRequest {
+  common.v1.ExchangeId exchange_id = 1;
+}
+
+message CloseAllPositionsResponse {}
+
+// ---- Unified trading service ----
+//
+// Served by the worker as a thin proxy over its backend adapter, and (after
+// convergence) natively by the terminal API.
+
+service TradingService {
+  rpc CreateOrder(CreateOrderRequest) returns (CreateOrderResponse);
+  rpc CreateOrders(CreateOrdersRequest) returns (CreateOrdersResponse);
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+  rpc CancelAllOrders(CancelAllOrdersRequest) returns (CancelAllOrdersResponse);
+  rpc FetchOpenOrders(FetchOpenOrdersRequest) returns (FetchOpenOrdersResponse);
+  rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
+  rpc GetPositions(GetPositionsRequest) returns (GetPositionsResponse);
+  rpc GetOrderHistory(GetOrderHistoryRequest) returns (GetOrderHistoryResponse);
+  rpc GetClosedPositions(GetClosedPositionsRequest) returns (GetClosedPositionsResponse);
+  rpc ClosePosition(ClosePositionRequest) returns (ClosePositionResponse);
+  rpc CloseAllPositions(CloseAllPositionsRequest) returns (CloseAllPositionsResponse);
+}
+
+message CancelAllOrdersRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  // Empty cancels across all symbols.
+  string symbol = 2;
+}
+
+message CancelAllOrdersResponse {
+  repeated Order orders = 1;
+}

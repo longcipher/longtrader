@@ -1,0 +1,29 @@
+[package]
+name = "longtrader-contract"
+repository.workspace = true
+version.workspace = true
+description = "Single-source-of-truth protobuf contract: generated types and ConnectRPC traits for the longtrader platform"
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.cargo-shear]
+ignored = ["buffa", "buffa-types", "http-body", "serde", "serde_json"]
+
+[dependencies]
+buffa = { workspace = true, features = ["json"] }
+buffa-types = { workspace = true, features = ["json"] }
+connectrpc = { workspace = true, features = ["axum"] }
+http-body = { workspace = true }
+rust_decimal.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror.workspace = true
+
+[build-dependencies]
+connectrpc-build = { workspace = true }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

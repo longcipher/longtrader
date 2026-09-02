@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package longtrader.common.v1;
+
+import "google/protobuf/duration.proto";
+
+// Structured error detail carried alongside standard Connect/gRPC status
+// codes via the error-details mechanism. Futu-style uniform result envelope,
+// expressed idiomatically for Connect.
+message ErrorDetail {
+  // Stable machine-readable reason, e.g. "INSUFFICIENT_BALANCE".
+  string reason = 1;
+  // Producing component, e.g. "longtrader.worker".
+  string domain = 2;
+  bool retryable = 3;
+  google.protobuf.Duration retry_after = 4;
+  // Set for reasons like AUTH_EXPIRED / SESSION_REVOKED where the client
+  // should cancel its open orders before exiting.
+  bool kill_switch_recommended = 5;
+  // Verbatim venue error code/text preserved for triage.
+  string native_exchange_code = 6;
+  // Echoes client_order_id / request id / trace_id for correlation.
+  string correlation_id = 7;
+}

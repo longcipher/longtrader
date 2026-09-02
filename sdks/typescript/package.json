@@ -1,0 +1,25 @@
+{
+  "name": "@longtrader/sdk",
+  "version": "0.1.0",
+  "description": "Thin TypeScript wrapper over the longtrader Connect contract",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "example:grid": "tsx examples/grid_strategy.ts"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2",
+    "undici": "^7"
+  },
+  "devDependencies": {
+    "@bufbuild/protoc-gen-es": "^2",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}

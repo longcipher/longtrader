@@ -1,0 +1,17 @@
+version: v2
+modules:
+  - path: .
+lint:
+  except:
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_STANDARD_NAME
+    - PACKAGE_VERSION_SUFFIX
+  use:
+    - STANDARD
+breaking:
+  except:
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_STANDARD_NAME
+    - PACKAGE_VERSION_SUFFIX
+  use:
+    - FILE

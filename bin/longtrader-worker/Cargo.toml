@@ -1,0 +1,49 @@
+[package]
+name = "longtrader-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local strategy host running portable strategies against pluggable backends (exchange daemon / terminal API / mock)"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# Enable hotpath performance profiling (zero-cost when disabled)
+hotpath = ["hotpath/hotpath"]
+# Enable memory allocation tracking in hotpath
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+
+[dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+buffa.workspace = true
+buffa-types.workspace = true
+clap = { workspace = true, features = ["derive"] }
+color-eyre.workspace = true
+connectrpc = { workspace = true, features = ["axum"] }
+futures-util.workspace = true
+hotpath.workspace = true
+hpx.workspace = true
+longtrader-contract.workspace = true
+rust_decimal.workspace = true
+rust_decimal_macros.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["full"] }
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+ulid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
