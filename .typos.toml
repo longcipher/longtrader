@@ -1,2 +1,5 @@
 [files]
 extend-exclude = ["specs/**"]
+
+[default]
+extend-ignore-identifiers-re = ["PnL"]

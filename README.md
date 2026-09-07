@@ -20,6 +20,7 @@ Local strategy host for portable trading strategies over a contract-first Connec
 proto/                        # buf v2, single source of truth (longtrader.*.v1)
 crates/longtrader-contract/   # generated types + ConnectRPC traits (build.rs → buffa/connectrpc)
 bin/longtrader-worker/        # strategy host: ports, session, adapters, envelope, strategies
+bin/longtrader-cli/           # CLI client for Terminal API (binary: longtrader)
 sdks/{python,typescript,go}/  # thin wrappers over generated stubs (contract/session/ports/...)
 ```
 
@@ -33,6 +34,42 @@ Canonical layout per language:
 | `adapters/` | `src/adapters/{remote,mock}.rs` | Connect-over-httpx in `session.py` | Connect-over-undici in `session.ts` | Connect-over-http in `session/` |
 | `strategies/` | `src/strategies/` | `examples/grid_strategy.py` | `examples/grid_strategy.ts` | `strategies/` |
 | `examples/` | `examples/` / `docs/` | `sdks/python/examples/` | `sdks/typescript/examples/` | `sdks/go/examples/` |
+
+## CLI (`longtrader-cli`)
+
+The `longtrader-cli` binary provides a command-line interface to the LongTrader Terminal API. Binary name: `longtrader`.
+
+```bash
+# Build
+cargo build -p longtrader-cli
+
+# Global flags
+--endpoint <url>    # Terminal API endpoint (default: http://127.0.0.1:8810)
+--token <token>     # Bearer token for authentication
+--venue <name>      # Venue name (default: mock)
+--format <format>   # Output format: table, json (default: table)
+
+# Commands
+longtrader health                                    # Health check
+longtrader venues                                    # List connected venues
+longtrader symbols --venue mock                      # List tradeable symbols
+longtrader candles <SYMBOL> --timeframe M1 --limit 100 # OHLCV candles
+longtrader book <SYMBOL> --depth 10                  # Order book snapshot
+longtrader search <QUERY> --limit 50                 # Search symbols
+longtrader account                                   # Account balances
+longtrader positions                                 # Open positions
+longtrader orders --symbol <SYMBOL>                  # Open orders
+longtrader history --limit 100                       # Order history
+longtrader buy <SYMBOL> <QTY> --price <PRICE>        # Place buy order
+longtrader sell <SYMBOL> <QTY> --price <PRICE>       # Place sell order
+longtrader cancel <ORDER_ID>                         # Cancel order
+longtrader close <POSITION_ID>                       # Close position
+longtrader stream --topics MARKET_LITE,TRADING       # Stream live updates
+longtrader strategies                                # List strategies
+```
+
+Timeframes: `M1`, `M5`, `M15`, `M30`, `H1`, `H4`, `D1`, `W1`.
+Topics: `MARKET_LITE`, `MARKET_HEAVY`, `TRADING`, `RUNTIME`, `FUNDING`, `DERIVATIVES`.
 
 ## Quick Start
 
@@ -52,6 +89,13 @@ just sdk-generate   # local stub generation (offline-safe via scripts/gen-proto.
 
 # Run worker (example)
 cargo run -p longtrader-worker -- --config config.toml
+
+# Build and run CLI
+cargo run -p longtrader-cli -- --help
+longtrader health                    # health check
+longtrader symbols --venue mock      # list symbols
+longtrader candles BTCUSDT --timeframe M1 --limit 100
+longtrader buy BTCUSDT 0.001 --price 95000
 ```
 
 Minimal `config.toml`:

@@ -20,6 +20,7 @@
 proto/                        # buf v2，唯一事实来源 (longtrader.*.v1)
 crates/longtrader-contract/   # 生成类型 + ConnectRPC 特征 (build.rs → buffa/connectrpc)
 bin/longtrader-worker/        # 策略宿主：ports、session、adapters、envelope、strategies
+bin/longtrader-cli/           # Terminal API CLI 客户端（二进制：longtrader）
 sdks/{python,typescript,go}/  # 生成桩之上的轻量封装 (contract/session/ports/...)
 ```
 
@@ -33,6 +34,42 @@ sdks/{python,typescript,go}/  # 生成桩之上的轻量封装 (contract/session
 | `adapters/` | `src/adapters/{remote,mock}.rs` | Connect-over-httpx 于 `session.py` | Connect-over-undici 于 `session.ts` | Connect-over-http 于 `session/` |
 | `strategies/` | `src/strategies/` | `examples/grid_strategy.py` | `examples/grid_strategy.ts` | `strategies/` |
 | `examples/` | `examples/` / `docs/` | `sdks/python/examples/` | `sdks/typescript/examples/` | `sdks/go/examples/` |
+
+## CLI（`longtrader-cli`）
+
+`longtrader-cli` 二进制提供 LongTrader Terminal API 的命令行接口。二进制名称：`longtrader`。
+
+```bash
+# 构建
+cargo build -p longtrader-cli
+
+# 全局标志
+--endpoint <url>    # Terminal API 端点（默认：http://127.0.0.1:8810）
+--token <token>     # Bearer token 认证
+--venue <name>      # 交易所名称（默认：mock）
+--format <format>   # 输出格式：table, json（默认：table）
+
+# 命令
+longtrader health                                    # 健康检查
+longtrader venues                                    # 列出已连接交易所
+longtrader symbols --venue mock                      # 列出可交易品种
+longtrader candles <SYMBOL> --timeframe M1 --limit 100 # K线数据
+longtrader book <SYMBOL> --depth 10                  # 订单簿快照
+longtrader search <QUERY> --limit 50                 # 搜索品种
+longtrader account                                   # 账户余额
+longtrader positions                                 # 当前持仓
+longtrader orders --symbol <SYMBOL>                  # 当前挂单
+longtrader history --limit 100                       # 历史订单
+longtrader buy <SYMBOL> <QTY> --price <PRICE>        # 下限买单
+longtrader sell <SYMBOL> <QTY> --price <PRICE>       # 下限卖单
+longtrader cancel <ORDER_ID>                         # 取消订单
+longtrader close <POSITION_ID>                       # 平仓
+longtrader stream --topics MARKET_LITE,TRADING       # 订阅实时更新
+longtrader strategies                                # 列出策略
+```
+
+时间周期：`M1`、`M5`、`M15`、`M30`、`H1`、`H4`、`D1`、`W1`。
+主题：`MARKET_LITE`、`MARKET_HEAVY`、`TRADING`、`RUNTIME`、`FUNDING`、`DERIVATIVES`。
 
 ## 快速开始
 
@@ -52,6 +89,13 @@ just sdk-generate   # 本地桩生成（通过 scripts/gen-proto.sh 离线安全
 
 # 运行 worker（示例）
 cargo run -p longtrader-worker -- --config config.toml
+
+# 构建并运行 CLI
+cargo run -p longtrader-cli -- --help
+longtrader health                    # 健康检查
+longtrader symbols --venue mock      # 列出品种
+longtrader candles BTCUSDT --timeframe M1 --limit 100
+longtrader buy BTCUSDT 0.001 --price 95000
 ```
 
 最小 `config.toml`：

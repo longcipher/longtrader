@@ -1,0 +1,25 @@
+[package]
+name = "longtrader-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Connect-RPC CLI client for longtrader-api (longtrader.terminal.v1)"
+
+[[bin]]
+name = "longtrader"
+path = "src/main.rs"
+
+[dependencies]
+buffa.workspace = true
+clap = { workspace = true, features = ["derive"] }
+color-eyre.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tradingcharts-proto = { workspace = true, features = ["client-native"] }
+ulid.workspace = true
+
+[lints]
+workspace = true
