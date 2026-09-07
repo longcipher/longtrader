@@ -21,6 +21,7 @@ lint:
   cargo +nightly fmt --all -- --check
   RUSTC_WRAPPER= cargo +nightly clippy --all -- -D warnings
   cargo shear
+  cargo workspace-inheritance-check
 
 # Run tests
 test:
@@ -41,6 +42,7 @@ build:
 # Check all targets compile
 check:
   cargo check --all-targets --all-features
+  cargo workspace-inheritance-check
 
 # Publish all crates to crates.io (dry run)
 publish-check:
