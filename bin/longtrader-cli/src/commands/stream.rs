@@ -1,5 +1,5 @@
 use futures_util::StreamExt;
-use tradingcharts_proto::{client::TerminalClient, proto::longtrader::terminal::v1::TopicClass};
+use longtrader_proto::{client::TerminalClient, proto::longtrader::terminal::v1::TopicClass};
 
 use crate::output::Renderer;
 
@@ -70,9 +70,9 @@ fn topic_name(topic: buffa::EnumValue<TopicClass>) -> &'static str {
 }
 
 fn describe_payload(
-    payload: &tradingcharts_proto::proto::longtrader::terminal::v1::update_envelope::Payload,
+    payload: &longtrader_proto::proto::longtrader::terminal::v1::update_envelope::Payload,
 ) -> String {
-    use tradingcharts_proto::proto::longtrader::terminal::v1::update_envelope::Payload;
+    use longtrader_proto::proto::longtrader::terminal::v1::update_envelope::Payload;
     match payload {
         Payload::Tick(t) => format!("Tick {} @ {}", t.symbol, t.price),
         Payload::Book(b) => {

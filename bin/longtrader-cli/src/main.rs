@@ -39,9 +39,9 @@ async fn main() -> color_eyre::Result<()> {
 
     let cli = Cli::parse();
     let client = if let Some(token) = &cli.token {
-        tradingcharts_proto::client::TerminalClient::new_with_token(&cli.endpoint, token)
+        longtrader_proto::client::TerminalClient::new_with_token(&cli.endpoint, token)
     } else {
-        tradingcharts_proto::client::TerminalClient::new(&cli.endpoint)
+        longtrader_proto::client::TerminalClient::new(&cli.endpoint)
     };
 
     let output = output::Renderer::new(cli.format);

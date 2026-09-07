@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package longtrader.terminal.v1;
+
+import "longtrader/terminal/v1/messages.proto";
+
+// 行情数据服务：symbols / candles / book / tickers / funding rates。
+service MarketDataService {
+  rpc GetSymbols(GetSymbolsRequest) returns (GetSymbolsResponse);
+  rpc GetCandles(GetCandlesRequest) returns (GetCandlesResponse);
+  rpc GetBook(GetBookRequest) returns (GetBookResponse);
+  rpc GetTickers(GetTickersRequest) returns (GetTickersResponse);
+  rpc GetFundingRates(GetFundingRatesRequest) returns (GetFundingRatesResponse);
+  rpc SearchSymbols(SearchSymbolsRequest) returns (SearchSymbolsResponse);
+}
+
+message GetSymbolsRequest {
+  string venue = 1;   // 空 = 全部已连接 venue
+}
+
+message GetSymbolsResponse {
+  repeated Symbol symbols = 1;
+}
+
+message GetCandlesRequest {
+  string venue = 1;
+  string symbol = 2;
+  Timeframe timeframe = 3;
+  optional int64 start_ms = 4;
+  optional int64 end_ms = 5;
+  uint32 limit = 6;
+}
+
+message GetCandlesResponse {
+  repeated Candle candles = 1;
+}
+
+message GetBookRequest {
+  string venue = 1;
+  string symbol = 2;
+  uint32 depth = 3;
+}
+
+message GetBookResponse {
+  Book book = 1;
+}
+
+message GetTickersRequest {
+  string venue = 1;
+  repeated string symbols = 2;   // 空 = 全部
+}
+
+message GetTickersResponse {
+  repeated Ticker tickers = 1;
+}
+
+message GetFundingRatesRequest {
+  string venue = 1;
+  repeated string symbols = 2;
+}
+
+message GetFundingRatesResponse {
+  repeated FundingRate funding_rates = 1;
+}
+
+message SearchSymbolsRequest {
+  string venue = 1;
+  string query = 2;
+  uint32 limit = 3;
+}
+
+message SearchSymbolsResponse {
+  repeated Symbol symbols = 1;
+}

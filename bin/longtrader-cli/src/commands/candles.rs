@@ -1,4 +1,4 @@
-use tradingcharts_proto::{client::TerminalClient, proto::longtrader::terminal::v1::Timeframe};
+use longtrader_proto::{client::TerminalClient, proto::longtrader::terminal::v1::Timeframe};
 
 use crate::output::Renderer;
 

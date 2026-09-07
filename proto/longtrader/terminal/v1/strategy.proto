@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package longtrader.terminal.v1;
+
+import "longtrader/terminal/v1/messages.proto";
+import "longtrader/terminal/v1/trading.proto";
+
+// 策略生命周期与动作（worker 自动化）。
+service StrategyService {
+  rpc ListStrategies(ListStrategiesRequest) returns (ListStrategiesResponse);
+  rpc StartStrategy(StartStrategyRequest) returns (StrategyStatus);
+  rpc PauseStrategy(PauseStrategyRequest) returns (StrategyStatus);
+  rpc ResumeStrategy(ResumeStrategyRequest) returns (StrategyStatus);
+  rpc StopStrategy(StopStrategyRequest) returns (StrategyStatus);
+  rpc GetStrategyStatus(GetStrategyStatusRequest) returns (StrategyStatus);
+  rpc SubmitAction(SubmitActionRequest) returns (ActionReceipt);
+  rpc StreamStrategyEvents(StreamStrategyEventsRequest) returns (stream StrategyEvent);
+}
+
+message StrategyStatus {
+  string strategy_id = 1;
+  string name = 2;
+  string status = 3;   // REGISTERED / RUNNING / PAUSED / STOPPED / ERROR
+  string error = 4;
+}
+
+message ListStrategiesRequest {}
+
+message ListStrategiesResponse {
+  repeated StrategyStatus strategies = 1;
+}
+
+message StartStrategyRequest {
+  string strategy_id = 1;
+  string name = 2;
+  // 策略参数（JSON 字符串，由 worker 与 API 约定 schema）。
+  string params_json = 3;
+}
+
+message PauseStrategyRequest {
+  string strategy_id = 1;
+}
+
+message ResumeStrategyRequest {
+  string strategy_id = 1;
+}
+
+message StopStrategyRequest {
+  string strategy_id = 1;
+  bool cancel_all_orders = 2;
+}
+
+message GetStrategyStatusRequest {
+  string strategy_id = 1;
+}
+
+message SubmitActionRequest {
+  string strategy_id = 1;
+  oneof action {
+    PlaceOrderRequest place_order = 10;
+    CancelOrderRequest cancel_order = 11;
+    CancelAllRequest cancel_all = 12;
+    SetKillSwitch set_kill_switch = 13;
+  }
+}
+
+message SetKillSwitch {
+  bool enabled = 1;
+}
+
+message ActionReceipt {
+  string strategy_id = 1;
+  string receipt_id = 2;
+  string message = 3;
+}
+
+message StreamStrategyEventsRequest {
+  repeated string strategy_ids = 1;   // 空 = 全部
+}

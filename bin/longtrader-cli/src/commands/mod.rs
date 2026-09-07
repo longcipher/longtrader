@@ -10,7 +10,7 @@ pub(crate) mod symbols;
 pub(crate) mod venues;
 
 use clap::Subcommand;
-use tradingcharts_proto::client::TerminalClient;
+use longtrader_proto::client::TerminalClient;
 
 use crate::output::Renderer;
 
@@ -142,7 +142,7 @@ pub(crate) async fn dispatch(
                 client,
                 venue,
                 &symbol,
-                tradingcharts_proto::proto::longtrader::terminal::v1::Side::Buy,
+                longtrader_proto::proto::longtrader::terminal::v1::Side::Buy,
                 &quantity,
                 price.as_deref(),
                 take_profit.as_deref(),
@@ -156,7 +156,7 @@ pub(crate) async fn dispatch(
                 client,
                 venue,
                 &symbol,
-                tradingcharts_proto::proto::longtrader::terminal::v1::Side::Sell,
+                longtrader_proto::proto::longtrader::terminal::v1::Side::Sell,
                 &quantity,
                 price.as_deref(),
                 take_profit.as_deref(),

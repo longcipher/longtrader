@@ -15,10 +15,10 @@ buffa.workspace = true
 clap = { workspace = true, features = ["derive"] }
 color-eyre.workspace = true
 futures-util.workspace = true
+longtrader-proto = { workspace = true, features = ["client-native"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-tradingcharts-proto = { workspace = true, features = ["client-native"] }
 ulid.workspace = true
 
 [lints]

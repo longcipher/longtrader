@@ -1741,10 +1741,10 @@ dependencies = [
  "clap",
  "color-eyre",
  "futures-util",
+ "longtrader-proto",
  "serde_json",
  "tokio",
  "tracing-subscriber",
- "tradingcharts-proto",
  "ulid",
 ]
 
@@ -1762,6 +1762,23 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "longtrader-proto"
+version = "0.1.0"
+dependencies = [
+ "buffa",
+ "connectrpc",
+ "connectrpc-build",
+ "futures-util",
+ "hpx",
+ "http",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3053,37 +3070,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tradingcharts-common"
-version = "0.1.0"
-source = "git+https://github.com/akjong/tradingcharts.git?rev=0f7726cfb0c47dee044fe79958af541f4d270b50#0f7726cfb0c47dee044fe79958af541f4d270b50"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "thiserror",
- "ulid",
-]
-
-[[package]]
-name = "tradingcharts-proto"
-version = "0.1.0"
-source = "git+https://github.com/akjong/tradingcharts.git?rev=0f7726cfb0c47dee044fe79958af541f4d270b50#0f7726cfb0c47dee044fe79958af541f4d270b50"
-dependencies = [
- "buffa",
- "connectrpc",
- "connectrpc-build",
- "futures-util",
- "hpx",
- "http",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "tradingcharts-common",
-]
-
-[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3102,7 +3088,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "947dde63b6d514cc5e044edad4e0ca7261afd1099d16c83d942cb2b2f348689c"
 dependencies = [
  "rand 0.10.2",
- "serde",
  "web-time",
 ]
 

@@ -5,6 +5,7 @@
 #![allow(clippy::pedantic)]
 #![allow(clippy::use_self)]
 #![allow(elided_lifetimes_in_paths)]
+#![allow(clippy::derive_partial_eq_without_eq)]
 
 pub mod ext;
 

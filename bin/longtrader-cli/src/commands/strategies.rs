@@ -1,4 +1,4 @@
-use tradingcharts_proto::client::TerminalClient;
+use longtrader_proto::client::TerminalClient;
 
 use crate::output::Renderer;
 

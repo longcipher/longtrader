@@ -1,0 +1,120 @@
+syntax = "proto3";
+
+package longtrader.terminal.v1;
+
+import "longtrader/terminal/v1/messages.proto";
+
+// 交易服务：账户 / 持仓 / 订单。
+service TradingService {
+  rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
+  rpc GetPositions(GetPositionsRequest) returns (GetPositionsResponse);
+  rpc GetOpenOrders(GetOpenOrdersRequest) returns (GetOpenOrdersResponse);
+  rpc GetOrderHistory(GetOrderHistoryRequest) returns (GetOrderHistoryResponse);
+  rpc GetClosedPositions(GetClosedPositionsRequest) returns (GetClosedPositionsResponse);
+  rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse);
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+  rpc CancelAll(CancelAllRequest) returns (CancelAllResponse);
+  rpc ClosePosition(ClosePositionRequest) returns (ClosePositionResponse);
+  rpc CloseAllPositions(CloseAllPositionsRequest) returns (CloseAllPositionsResponse);
+}
+
+message GetAccountRequest {
+  string venue = 1;
+}
+
+message GetAccountResponse {
+  Account account = 1;
+}
+
+message GetPositionsRequest {
+  string venue = 1;
+  repeated string symbols = 2;
+}
+
+message GetPositionsResponse {
+  repeated Position positions = 1;
+}
+
+message GetOpenOrdersRequest {
+  string venue = 1;
+  optional string symbol = 2;
+}
+
+message GetOpenOrdersResponse {
+  repeated Order orders = 1;
+}
+
+message GetOrderHistoryRequest {
+  string venue = 1;
+  uint32 limit = 2;
+}
+
+message GetOrderHistoryResponse {
+  repeated Order orders = 1;
+}
+
+message GetClosedPositionsRequest {
+  string venue = 1;
+  uint32 limit = 2;
+}
+
+message GetClosedPositionsResponse {
+  repeated ClosedPosition positions = 1;
+}
+
+message PlaceOrderRequest {
+  string venue = 1;
+  string symbol = 2;
+  Side side = 3;
+  OrderType order_type = 4;
+  string quantity = 5;                 // 字符串小数
+  optional string price = 6;
+  optional string stop_price = 7;
+  optional string take_profit = 8;
+  optional string stop_loss = 9;
+  bool reduce_only = 10;
+  string client_order_id = 11;         // 幂等键
+  optional string strategy_id = 12;
+}
+
+message PlaceOrderResponse {
+  Order order = 1;
+}
+
+message CancelOrderRequest {
+  string venue = 1;
+  string order_id = 2;
+}
+
+message CancelOrderResponse {
+  Order order = 1;
+}
+
+message CancelAllRequest {
+  string venue = 1;
+  optional string symbol = 2;
+}
+
+message CancelAllResponse {
+  repeated Order orders = 1;
+}
+
+message ClosePositionRequest {
+  string venue = 1;
+  string position_id = 2;
+  uint32 close_bps = 3;                // 平仓比例 basis points（10000 = 100%）
+  oneof price_choice {
+    string limit_price = 4;
+    bool market = 5;
+  }
+}
+
+message ClosePositionResponse {
+  Position position = 1;
+}
+
+message CloseAllPositionsRequest {
+  string venue = 1;
+}
+
+message CloseAllPositionsResponse {}

@@ -1,5 +1,5 @@
 use clap::ValueEnum;
-use tradingcharts_proto::proto::longtrader::terminal::v1::{
+use longtrader_proto::proto::longtrader::terminal::v1::{
     Account, Candle, Order, Position, Symbol, VenueStatus,
 };
 
@@ -85,8 +85,12 @@ impl Renderer {
                 println!("{}", "-".repeat(80));
                 for p in positions {
                     let side = match p.side {
-                        buffa::EnumValue::Known(tradingcharts_proto::proto::longtrader::terminal::v1::PositionSide::Long) => "Long",
-                        buffa::EnumValue::Known(tradingcharts_proto::proto::longtrader::terminal::v1::PositionSide::Short) => "Short",
+                        buffa::EnumValue::Known(
+                            longtrader_proto::proto::longtrader::terminal::v1::PositionSide::Long,
+                        ) => "Long",
+                        buffa::EnumValue::Known(
+                            longtrader_proto::proto::longtrader::terminal::v1::PositionSide::Short,
+                        ) => "Short",
                         _ => "-",
                     };
                     println!(
@@ -118,29 +122,29 @@ impl Renderer {
                 for o in orders {
                     let side = match o.side {
                         buffa::EnumValue::Known(
-                            tradingcharts_proto::proto::longtrader::terminal::v1::Side::Buy,
+                            longtrader_proto::proto::longtrader::terminal::v1::Side::Buy,
                         ) => "Buy",
                         buffa::EnumValue::Known(
-                            tradingcharts_proto::proto::longtrader::terminal::v1::Side::Sell,
+                            longtrader_proto::proto::longtrader::terminal::v1::Side::Sell,
                         ) => "Sell",
                         _ => "-",
                     };
                     let otype = match o.order_type {
                         buffa::EnumValue::Known(
-                            tradingcharts_proto::proto::longtrader::terminal::v1::OrderType::Market,
+                            longtrader_proto::proto::longtrader::terminal::v1::OrderType::Market,
                         ) => "Market",
                         buffa::EnumValue::Known(
-                            tradingcharts_proto::proto::longtrader::terminal::v1::OrderType::Limit,
+                            longtrader_proto::proto::longtrader::terminal::v1::OrderType::Limit,
                         ) => "Limit",
                         buffa::EnumValue::Known(
-                            tradingcharts_proto::proto::longtrader::terminal::v1::OrderType::Stop,
+                            longtrader_proto::proto::longtrader::terminal::v1::OrderType::Stop,
                         ) => "Stop",
                         _ => "-",
                     };
                     let status = match o.status {
-                        buffa::EnumValue::Known(tradingcharts_proto::proto::longtrader::terminal::v1::OrderStatus::Pending) => "Pending",
-                        buffa::EnumValue::Known(tradingcharts_proto::proto::longtrader::terminal::v1::OrderStatus::Filled) => "Filled",
-                        buffa::EnumValue::Known(tradingcharts_proto::proto::longtrader::terminal::v1::OrderStatus::Canceled) => "Canceled",
+                        buffa::EnumValue::Known(longtrader_proto::proto::longtrader::terminal::v1::OrderStatus::Pending) => "Pending",
+                        buffa::EnumValue::Known(longtrader_proto::proto::longtrader::terminal::v1::OrderStatus::Filled) => "Filled",
+                        buffa::EnumValue::Known(longtrader_proto::proto::longtrader::terminal::v1::OrderStatus::Canceled) => "Canceled",
                         _ => "-",
                     };
                     println!(

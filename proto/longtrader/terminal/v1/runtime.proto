@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package longtrader.terminal.v1;
+
+import "longtrader/terminal/v1/messages.proto";
+
+// 运行时状态与订阅。
+service RuntimeService {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc ListVenues(ListVenuesRequest) returns (ListVenuesResponse);
+  rpc StreamUpdates(StreamUpdatesRequest) returns (stream UpdateEnvelope);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+  int64 uptime_secs = 2;
+  repeated VenueStatus venues = 3;
+}
+
+message VenueStatus {
+  string name = 1;
+  bool connected = 2;
+  uint64 symbol_count = 3;
+}
+
+message ListVenuesRequest {}
+
+message ListVenuesResponse {
+  repeated VenueStatus venues = 1;
+}
+
+message StreamUpdatesRequest {
+  repeated string venues = 1;          // 空 = 全部
+  repeated string symbols = 2;         // 空 = 全部
+  repeated TopicClass topics = 3;      // 空 = 全部
+}

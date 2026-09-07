@@ -1,4 +1,4 @@
-use tradingcharts_proto::{client::TerminalClient, proto::longtrader::terminal::v1::Side};
+use longtrader_proto::{client::TerminalClient, proto::longtrader::terminal::v1::Side};
 
 use crate::output::Renderer;
 
@@ -14,9 +14,9 @@ pub(crate) async fn place_order(
     output: &Renderer,
 ) {
     let order_type = if price.is_some() {
-        tradingcharts_proto::proto::longtrader::terminal::v1::OrderType::Limit
+        longtrader_proto::proto::longtrader::terminal::v1::OrderType::Limit
     } else {
-        tradingcharts_proto::proto::longtrader::terminal::v1::OrderType::Market
+        longtrader_proto::proto::longtrader::terminal::v1::OrderType::Market
     };
 
     let client_order_id = format!("cli-{}", ulid::Ulid::generate());
