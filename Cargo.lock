@@ -3055,6 +3055,7 @@ dependencies = [
 [[package]]
 name = "tradingcharts-common"
 version = "0.1.0"
+source = "git+https://github.com/akjong/tradingcharts.git?rev=0f7726cfb0c47dee044fe79958af541f4d270b50#0f7726cfb0c47dee044fe79958af541f4d270b50"
 dependencies = [
  "async-trait",
  "serde",
@@ -3066,6 +3067,7 @@ dependencies = [
 [[package]]
 name = "tradingcharts-proto"
 version = "0.1.0"
+source = "git+https://github.com/akjong/tradingcharts.git?rev=0f7726cfb0c47dee044fe79958af541f4d270b50#0f7726cfb0c47dee044fe79958af541f4d270b50"
 dependencies = [
  "buffa",
  "connectrpc",

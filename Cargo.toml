@@ -37,7 +37,7 @@ tokio = "1.53.1"
 toml = "1.1.5"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
-tradingcharts-proto = { path = "../../akjong/longtrader-group/tradingcharts/crates/tradingcharts-proto" }
+tradingcharts-proto = { git = "https://github.com/akjong/tradingcharts.git", rev = "0f7726cfb0c47dee044fe79958af541f4d270b50" }
 ulid = "3.0.0"
 
 [workspace.lints.clippy]
