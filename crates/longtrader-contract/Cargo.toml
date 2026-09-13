@@ -5,7 +5,7 @@ version.workspace = true
 description = "Single-source-of-truth protobuf contract: generated types and ConnectRPC traits for the longtrader platform"
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
+
 authors.workspace = true
 homepage = "https://docs.rs/longtrader-contract"
 readme = "../../README.md"

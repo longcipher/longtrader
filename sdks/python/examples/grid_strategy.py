@@ -84,8 +84,11 @@ def fetch_mid(base_url: str, exchange_id: str, symbol: str) -> float:
         exchange_id=types_pb2.ExchangeId(id=exchange_id), symbol=symbol
     )
     resp = market_pb2.FetchTickerResponse()
-    resp.ParseFromString(post_unary(base_url, MARKET_SERVICE, "FetchTicker", req.SerializeToString()))
+    resp.ParseFromString(
+        post_unary(base_url, MARKET_SERVICE, "FetchTicker", req.SerializeToString())
+    )
     t = resp.ticker
+
     # Fall back through bid/ask/last; unset Decimals carry empty raw_str.
     def f(d) -> float | None:
         return float(d.raw_str) if d.raw_str else None
@@ -98,7 +101,9 @@ def fetch_mid(base_url: str, exchange_id: str, symbol: str) -> float:
     raise RuntimeError(f"ticker for {symbol} has no usable price")
 
 
-def make_limit(symbol: str, side: int, price: float, amount: str) -> trading_pb2.OrderRequest:
+def make_limit(
+    symbol: str, side: int, price: float, amount: str
+) -> trading_pb2.OrderRequest:
     """One grid rung as an OrderRequest (ULID client_order_id mandatory)."""
     return trading_pb2.OrderRequest(
         client_order_id=ulid_like_id(),
@@ -134,15 +139,25 @@ def refresh_grid(session: Session, args, live_ids: list[str]) -> list[str]:
     orders = []
     for i in range(1, args.levels + 1):
         step = args.step_pct / 100.0 * i
-        orders.append(make_limit(args.symbol, trading_pb2.ORDER_SIDE_BUY, mid * (1 - step), args.amount))
-        orders.append(make_limit(args.symbol, trading_pb2.ORDER_SIDE_SELL, mid * (1 + step), args.amount))
+        orders.append(
+            make_limit(
+                args.symbol, trading_pb2.ORDER_SIDE_BUY, mid * (1 - step), args.amount
+            )
+        )
+        orders.append(
+            make_limit(
+                args.symbol, trading_pb2.ORDER_SIDE_SELL, mid * (1 + step), args.amount
+            )
+        )
 
     req = trading_pb2.CreateOrdersRequest(
         exchange_id=types_pb2.ExchangeId(id=args.exchange_id), orders=orders
     )
     resp = trading_pb2.CreateOrdersResponse()
     resp.ParseFromString(
-        post_unary(session._base_url, TRADING_SERVICE, "CreateOrders", req.SerializeToString())
+        post_unary(
+            session._base_url, TRADING_SERVICE, "CreateOrders", req.SerializeToString()
+        )
     )
     print(f"[grid] placed {len(resp.orders)} rungs")
     return [o.id for o in resp.orders]
@@ -155,31 +170,43 @@ def main() -> None:
     p.add_argument("--exchange-id", default="", help="registered exchange instance id")
     p.add_argument("--symbol", default="BTC/USDT")
     p.add_argument("--levels", type=int, default=3, help="rungs per side")
-    p.add_argument("--step-pct", type=float, default=0.1, help="spacing between rungs, %%")
+    p.add_argument(
+        "--step-pct", type=float, default=0.1, help="spacing between rungs, %%"
+    )
     p.add_argument("--amount", default="0.001", help="order size per rung")
     p.add_argument("--refresh-secs", type=float, default=30.0)
-    p.add_argument("--lease-timeout-secs", type=int, default=0,
-                   help="kill-switch lease budget; 0 keeps server default (3x heartbeat)")
+    p.add_argument(
+        "--lease-timeout-secs",
+        type=int,
+        default=0,
+        help="kill-switch lease budget; 0 keeps server default (3x heartbeat)",
+    )
     args = p.parse_args()
 
     # Kill-switch policy: cancel-on-disconnect scope defaults to this
     # session's orders only (SESSION_ORDERS).
-    policy = worker_pb2.KillSwitchPolicy(scope=worker_pb2.KillSwitchPolicy.SCOPE_SESSION_ORDERS)
+    policy = worker_pb2.KillSwitchPolicy(
+        scope=worker_pb2.KillSwitchPolicy.SCOPE_SESSION_ORDERS
+    )
     if args.lease_timeout_secs > 0:
         from google.protobuf.duration_pb2 import Duration
 
         policy.lease_timeout.CopyFrom(Duration(seconds=args.lease_timeout_secs))
 
     session = Session.attach(args.base_url, args.token, policy=policy)
-    print(f"attached session={session.session_id} "
-          f"heartbeat_ms={session.heartbeat_interval_ms} state={session.state}")
+    print(
+        f"attached session={session.session_id} "
+        f"heartbeat_ms={session.heartbeat_interval_ms} state={session.state}"
+    )
     session.start_heartbeat()
 
     # Recovery gate: authoritative snapshot before any order submission.
     snapshot = session.reconcile_state()
-    print(f"reconciled seq={snapshot.snapshot_sequence} "
-          f"balances={len(snapshot.balances)} positions={len(snapshot.positions)} "
-          f"open_orders={len(snapshot.open_orders)} state={session.state}")
+    print(
+        f"reconciled seq={snapshot.snapshot_sequence} "
+        f"balances={len(snapshot.balances)} positions={len(snapshot.positions)} "
+        f"open_orders={len(snapshot.open_orders)} state={session.state}"
+    )
 
     live_ids: list[str] = []
     try:
@@ -195,7 +222,12 @@ def main() -> None:
                 symbol=args.symbol,
             )
             try:
-                post_unary(session._base_url, TRADING_SERVICE, "CancelOrder", req.SerializeToString())
+                post_unary(
+                    session._base_url,
+                    TRADING_SERVICE,
+                    "CancelOrder",
+                    req.SerializeToString(),
+                )
             except RuntimeError as err:
                 print(f"cancel {order_id} failed: {err}")
     finally:

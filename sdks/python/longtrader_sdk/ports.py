@@ -42,7 +42,9 @@ class TradingPort(ABC):
         """Cancel by venue order id."""
 
     @abstractmethod
-    def fetch_open_orders(self, symbol: str | None = None, limit: int | None = None) -> Any:
+    def fetch_open_orders(
+        self, symbol: str | None = None, limit: int | None = None
+    ) -> Any:
         """List currently open orders, optionally filtered by symbol."""
 
     @abstractmethod

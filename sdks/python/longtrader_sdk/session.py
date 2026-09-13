@@ -77,7 +77,9 @@ class Session:
     # -- lifecycle ---------------------------------------------------------
 
     @classmethod
-    def attach(cls, base_url: str, token: str, policy: Any = None, **kwargs: Any) -> "Session":
+    def attach(
+        cls, base_url: str, token: str, policy: Any = None, **kwargs: Any
+    ) -> "Session":
         """Validate the terminal API token and negotiate lease parameters.
 
         ``policy`` is an optional generated ``KillSwitchPolicy`` message;
@@ -93,7 +95,9 @@ class Session:
         if policy is not None:
             req.policy.CopyFrom(policy)
         session = cls(base_url, **kwargs)
-        resp = session._unary("AttachSession", req.SerializeToString(), pb.AttachSessionResponse)
+        resp = session._unary(
+            "AttachSession", req.SerializeToString(), pb.AttachSessionResponse
+        )
         session.session_id = resp.session_id
         session.heartbeat_interval_ms = resp.heartbeat_interval_ms
         session._last_keepalive_ok = time.monotonic()
@@ -103,7 +107,9 @@ class Session:
     def keep_alive(self) -> Any:
         """Feed the lease watchdog; call at the negotiated interval."""
         pb = _pb()
-        req = pb.KeepAliveRequest(session_id=self.session_id, client_time_ns=time.time_ns())
+        req = pb.KeepAliveRequest(
+            session_id=self.session_id, client_time_ns=time.time_ns()
+        )
         resp = self._unary("KeepAlive", req.SerializeToString(), pb.KeepAliveResponse)
         self._last_keepalive_ok = time.monotonic()
         return resp
@@ -118,7 +124,9 @@ class Session:
         """
         pb = _pb()
         req = pb.ReconcileStateRequest(session_id=self.session_id)
-        resp = self._unary("ReconcileState", req.SerializeToString(), pb.ReconcileStateResponse)
+        resp = self._unary(
+            "ReconcileState", req.SerializeToString(), pb.ReconcileStateResponse
+        )
         self._state = ACTIVE
         return resp
 
@@ -128,7 +136,9 @@ class Session:
         req = pb.SetKillSwitchPolicyRequest(session_id=self.session_id)
         req.policy.CopyFrom(policy)
         self._unary(
-            "SetKillSwitchPolicy", req.SerializeToString(), pb.SetKillSwitchPolicyResponse
+            "SetKillSwitchPolicy",
+            req.SerializeToString(),
+            pb.SetKillSwitchPolicyResponse,
         )
 
     @property
@@ -152,7 +162,9 @@ class Session:
                     pass
 
         self._stop.clear()
-        self._heartbeat = threading.Thread(target=loop, name="longtrader-heartbeat", daemon=True)
+        self._heartbeat = threading.Thread(
+            target=loop, name="longtrader-heartbeat", daemon=True
+        )
         self._heartbeat.start()
 
     def stop(self) -> None:
@@ -171,14 +183,23 @@ class Session:
         elif cur is self._watchdog:
             self._watchdog = None
 
-    def spawn_lease_watchdog(self, lease_timeout_ms: int | None = None) -> threading.Thread:
-        """Strategy-side lease timeout simulation: spawn 定时任务，每 heartbeat_interval 检查 lease 是否超时，超时则触发 cancel.
+    def spawn_lease_watchdog(
+        self, lease_timeout_ms: int | None = None
+    ) -> threading.Thread:
+        """Strategy-side lease timeout simulation.
 
-        Mirrors the Rust `spawn_strategy_lease_guard` helper (session/daemon/exchange 三级看门狗中的 L_session).
-        Wakes every `heartbeat_interval_ms` and checks elapsed time since last `KeepAlive`;
-        on `lease_timeout` (default 3x heartbeat) it closes the session locally.
+        Spawns 定时任务 that checks every heartbeat_interval whether the lease
+        has timed out; on timeout it triggers cancel. Mirrors the Rust
+        `spawn_strategy_lease_guard` helper (the L_session tier of the
+        session/daemon/exchange 三级看门狗). Wakes every `heartbeat_interval_ms`
+        and checks elapsed time since the last `KeepAlive`; on `lease_timeout`
+        (default 3x heartbeat) it closes the session locally.
         """
-        lease_ms = lease_timeout_ms if lease_timeout_ms is not None else max(self.heartbeat_interval_ms * 3, 1500)
+        lease_ms = (
+            lease_timeout_ms
+            if lease_timeout_ms is not None
+            else max(self.heartbeat_interval_ms * 3, 1500)
+        )
         interval = max(self.heartbeat_interval_ms / 1000.0, 0.5)
         self._watchdog_stop.clear()
 
@@ -193,7 +214,9 @@ class Session:
                         pass
                     break
 
-        t = threading.Thread(target=watchdog, name="longtrader-lease-watchdog", daemon=True)
+        t = threading.Thread(
+            target=watchdog, name="longtrader-lease-watchdog", daemon=True
+        )
         self._watchdog = t
         t.start()
         return t
@@ -213,7 +236,9 @@ class Session:
     def _unary(self, method: str, req_bytes: bytes, resp_type: Type[Any]) -> Any:
         """One Connect unary call: POST application/proto, parse proto reply."""
         url = f"{self._base_url}/{SERVICE}/{method}"
-        resp = self._http.post(url, content=req_bytes, headers={"Content-Type": "application/proto"})
+        resp = self._http.post(
+            url, content=req_bytes, headers={"Content-Type": "application/proto"}
+        )
         if resp.status_code != 200:
             raise _error_from_response(resp)
         msg = resp_type()

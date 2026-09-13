@@ -1,0 +1,6 @@
+# Generated protobuf/Connect stubs (buf-managed; never hand-edited)
+src/gen
+
+# Build output and dependencies
+dist
+node_modules
