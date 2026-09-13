@@ -48,9 +48,22 @@ check:
 publish-check:
   cargo publish --workspace --dry-run --allow-dirty --registry crates-io
 
-# Publish all Rust crates to crates.io (in dependency order)
+# Publish all Rust crates to crates.io in dependency order.
+#
+# We publish per-crate (not `cargo publish --workspace`) because path-dependency
+# siblings must already be resolvable from the registry when the next crate is
+# verified. `--config source.crates-io.replace-with=crates-io` disables any local
+# crates.io mirror so the just-published sibling is found immediately on the real
+# crates.io index (the default `cargo publish --workspace` flow breaks behind a
+# mirror that lags the upload).
 publish-rs:
-  cargo publish --workspace --registry crates-io
+  cargo publish --registry crates-io  -p longtrader-contract
+  sleep 20
+  cargo publish --registry crates-io  -p longtrader-proto
+  sleep 20
+  cargo publish --registry crates-io  -p longtrader-cli
+  sleep 20
+  cargo publish --registry crates-io  -p longtrader-worker
 
 # Build sdist+wheel and upload to PyPI
 publish-py: sdk-generate
