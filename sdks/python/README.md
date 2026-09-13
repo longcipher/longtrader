@@ -57,7 +57,7 @@ from longtrader_sdk import Session
 
 s = Session.attach("http://127.0.0.1:8080", token="YOUR_TERMINAL_TOKEN")
 s.start_heartbeat()
-snapshot = s.reconcile_state()   # gate to ACTIVE; pre-ACTIVE orders are rejected
+snapshot = s.reconcile_state()  # gate to ACTIVE; pre-ACTIVE orders are rejected
 print(s.session_id, s.state, snapshot.snapshot_sequence)
 s.close()
 ```
