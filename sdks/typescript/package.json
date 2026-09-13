@@ -1,5 +1,5 @@
 {
-  "name": "@longtrader/sdk",
+  "name": "@longcipher/longtrader-sdk",
   "version": "0.1.0",
   "description": "Thin TypeScript wrapper over the longtrader Connect contract",
   "license": "Apache-2.0",

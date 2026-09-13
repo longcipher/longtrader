@@ -15,7 +15,7 @@ Local strategy host for portable trading strategies over a contract-first Connec
 | Rust (CLI) | [`longtrader-cli`](https://crates.io/crates/longtrader-cli) | [![crates.io](https://img.shields.io/crates/v/longtrader-cli.svg)](https://crates.io/crates/longtrader-cli) |
 | Rust (worker) | [`longtrader-worker`](https://crates.io/crates/longtrader-worker) | [![crates.io](https://img.shields.io/crates/v/longtrader-worker.svg)](https://crates.io/crates/longtrader-worker) |
 | Python | [`longtrader-sdk`](https://pypi.org/project/longtrader-sdk/) | [![PyPI](https://img.shields.io/pypi/v/longtrader-sdk.svg)](https://pypi.org/project/longtrader-sdk/) |
-| TypeScript | [`@longtrader/sdk`](https://www.npmjs.com/package/@longtrader/sdk) | [![npm](https://img.shields.io/npm/v/@longtrader/sdk.svg)](https://www.npmjs.com/package/@longtrader/sdk) |
+| TypeScript | [`@longcipher/longtrader-sdk`](https://www.npmjs.com/package/@longcipher/longtrader-sdk) | [![npm](https://img.shields.io/npm/v/@longcipher/longtrader-sdk.svg)](https://www.npmjs.com/package/@longcipher/longtrader-sdk) |
 | Go | [`sdks/go`](https://pkg.go.dev/github.com/longcipher/longtrader/sdks/go) | [![Go Reference](https://pkg.go.dev/badge/github.com/longcipher/longtrader/sdks/go.svg)](https://pkg.go.dev/github.com/longcipher/longtrader/sdks/go) |
 
 ## Features
@@ -161,7 +161,7 @@ s.close()
 ```
 
 ```ts
-import { Session } from "@longtrader/sdk";
+import { Session } from "@longcipher/longtrader-sdk";
 const s = await Session.attach("http://127.0.0.1:8080", "YOUR_TERMINAL_TOKEN");
 s.startHeartbeat();
 const snap = await s.reconcileState();

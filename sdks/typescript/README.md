@@ -1,4 +1,4 @@
-# @longtrader/sdk (TypeScript)
+# @longcipher/longtrader-sdk (TypeScript)
 
 Tier-2 thin wrapper over the generated longtrader Connect stubs. Hand-written
 code stays minimal — session handling plus overflow policies — while all
@@ -7,7 +7,7 @@ trading semantics live in the contract (`proto/`, buf-managed).
 ## Installation
 
 ```bash
-npm install @longtrader/sdk
+npm install @longcipher/longtrader-sdk
 ```
 
 The published package bundles the generated protobuf stubs, so no code-generation
@@ -53,7 +53,7 @@ npx tsx examples/grid_strategy.ts --help
 Minimal use:
 
 ```ts
-import { Session } from "@longtrader/sdk";
+import { Session } from "@longcipher/longtrader-sdk";
 
 const s = await Session.attach("http://127.0.0.1:8080", "YOUR_TERMINAL_TOKEN");
 s.startHeartbeat();
