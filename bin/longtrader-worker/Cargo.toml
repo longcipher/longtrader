@@ -29,6 +29,7 @@ futures-util.workspace = true
 hotpath.workspace = true
 hpx.workspace = true
 longtrader-contract.workspace = true
+longtrader-proto = { workspace = true, features = ["client-native"] }
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 serde = { workspace = true, features = ["derive"] }

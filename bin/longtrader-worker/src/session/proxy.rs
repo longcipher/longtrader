@@ -10,8 +10,6 @@
 //! - orderbook → `OverflowPolicy::Coalesce` (`OVERFLOW_ORDERBOOK`)
 //! - orders / balances / positions → `OverflowPolicy::Block` (`OVERFLOW_ORDERS`)
 //!
-//! 每 session 独立 mpsc channel 与不同 OverflowPolicy（ticker DropOldest, book Coalesce, orders
-//! Block）
 //! Each `subscribe_market_data` below returns one independent bounded mpsc per
 //! session wrapped by `policy_channel`; HTTP/2 flow control is per-stream so
 //! one slow strategy cannot block another.
@@ -24,9 +22,6 @@
 use std::sync::Arc;
 
 use connectrpc::{PreEncoded, RequestContext, Response, ServiceRequest};
-
-#[rustfmt::skip]
-const _DOC_BACKPRESSURE: &str = "每 session 独立 mpsc channel 与不同 OverflowPolicy（ticker DropOldest, book Coalesce, orders Block）";
 
 use crate::{
     ports::{MarketDataSource, TradingGateway},
@@ -129,72 +124,80 @@ impl trading::TradingService for TradingProxy {
 
     // ---- Account / history queries ----
     //
-    // The worker's gateway port does not surface these yet; they are served
-    // natively by the terminal API. Reply `unimplemented` instead of failing
-    // the whole service registration.
+    // These mirror the `TradingGateway` port one-to-one; the worker proxies
+    // them to the backend so external-language strategies get the same surface
+    // as native strategies.
 
-    #[allow(clippy::unused_async_trait_impl)] // passthrough stub
     async fn get_account(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, trading::GetAccountRequest>,
+        request: ServiceRequest<'_, trading::GetAccountRequest>,
     ) -> connectrpc::ServiceResult<PreEncoded<trading::GetAccountResponse>> {
-        Err(connectrpc::ConnectError::unimplemented("GetAccount is not proxied by the worker yet"))
+        let mut req = request.to_owned_message();
+        req.exchange_id =
+            buffa::MessageField::some(resolved_exchange(&req.exchange_id, &self.default_exchange));
+        let resp = self.gateway.get_account(req).await.map_err(internal)?;
+        Response::ok(PreEncoded::from_message(&resp))
     }
 
-    #[allow(clippy::unused_async_trait_impl)] // passthrough stub
     async fn get_positions(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, trading::GetPositionsRequest>,
+        request: ServiceRequest<'_, trading::GetPositionsRequest>,
     ) -> connectrpc::ServiceResult<PreEncoded<trading::GetPositionsResponse>> {
-        Err(connectrpc::ConnectError::unimplemented(
-            "GetPositions is not proxied by the worker yet",
-        ))
+        let mut req = request.to_owned_message();
+        req.exchange_id =
+            buffa::MessageField::some(resolved_exchange(&req.exchange_id, &self.default_exchange));
+        let resp = self.gateway.get_positions(req).await.map_err(internal)?;
+        Response::ok(PreEncoded::from_message(&resp))
     }
 
-    #[allow(clippy::unused_async_trait_impl)] // passthrough stub
     async fn get_order_history(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, trading::GetOrderHistoryRequest>,
+        request: ServiceRequest<'_, trading::GetOrderHistoryRequest>,
     ) -> connectrpc::ServiceResult<PreEncoded<trading::GetOrderHistoryResponse>> {
-        Err(connectrpc::ConnectError::unimplemented(
-            "GetOrderHistory is not proxied by the worker yet",
-        ))
+        let mut req = request.to_owned_message();
+        req.exchange_id =
+            buffa::MessageField::some(resolved_exchange(&req.exchange_id, &self.default_exchange));
+        let resp = self.gateway.get_order_history(req).await.map_err(internal)?;
+        Response::ok(PreEncoded::from_message(&resp))
     }
 
-    #[allow(clippy::unused_async_trait_impl)] // passthrough stub
     async fn get_closed_positions(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, trading::GetClosedPositionsRequest>,
+        request: ServiceRequest<'_, trading::GetClosedPositionsRequest>,
     ) -> connectrpc::ServiceResult<PreEncoded<trading::GetClosedPositionsResponse>> {
-        Err(connectrpc::ConnectError::unimplemented(
-            "GetClosedPositions is not proxied by the worker yet",
-        ))
+        let mut req = request.to_owned_message();
+        req.exchange_id =
+            buffa::MessageField::some(resolved_exchange(&req.exchange_id, &self.default_exchange));
+        let resp = self.gateway.get_closed_positions(req).await.map_err(internal)?;
+        Response::ok(PreEncoded::from_message(&resp))
     }
 
-    #[allow(clippy::unused_async_trait_impl)] // passthrough stub
     async fn close_position(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, trading::ClosePositionRequest>,
+        request: ServiceRequest<'_, trading::ClosePositionRequest>,
     ) -> connectrpc::ServiceResult<PreEncoded<trading::ClosePositionResponse>> {
-        Err(connectrpc::ConnectError::unimplemented(
-            "ClosePosition is not proxied by the worker yet",
-        ))
+        let mut req = request.to_owned_message();
+        req.exchange_id =
+            buffa::MessageField::some(resolved_exchange(&req.exchange_id, &self.default_exchange));
+        let resp = self.gateway.close_position(req).await.map_err(internal)?;
+        Response::ok(PreEncoded::from_message(&resp))
     }
 
-    #[allow(clippy::unused_async_trait_impl)] // passthrough stub
     async fn close_all_positions(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, trading::CloseAllPositionsRequest>,
+        request: ServiceRequest<'_, trading::CloseAllPositionsRequest>,
     ) -> connectrpc::ServiceResult<PreEncoded<trading::CloseAllPositionsResponse>> {
-        Err(connectrpc::ConnectError::unimplemented(
-            "CloseAllPositions is not proxied by the worker yet",
-        ))
+        let mut req = request.to_owned_message();
+        req.exchange_id =
+            buffa::MessageField::some(resolved_exchange(&req.exchange_id, &self.default_exchange));
+        let resp = self.gateway.close_all_positions(req).await.map_err(internal)?;
+        Response::ok(PreEncoded::from_message(&resp))
     }
 }
 

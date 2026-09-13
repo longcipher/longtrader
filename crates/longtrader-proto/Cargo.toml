@@ -11,22 +11,17 @@ ignored = ["serde", "serde_json"]
 
 [features]
 default = []
-client-native = ["dep:hpx", "dep:futures-util", "dep:tokio", "dep:http"]
+client-native = ["dep:hpx", "dep:futures-util"]
 
 [dependencies]
 buffa = { workspace = true, features = ["json"] }
-connectrpc = { workspace = true, features = ["axum"] }
 futures-util = { workspace = true, optional = true }
 hpx = { workspace = true, optional = true }
-http = { version = "1.1.0", optional = true }
+longtrader-contract = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, optional = true }
 tracing.workspace = true
-
-[build-dependencies]
-connectrpc-build.workspace = true
 
 [lints]
 workspace = true

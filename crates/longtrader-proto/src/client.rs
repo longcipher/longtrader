@@ -16,6 +16,7 @@ use thiserror::Error;
 use crate::{
     client_core::{SERVICE_MARKET, SERVICE_RUNTIME, SERVICE_TRADING, service_url, trim_base_url},
     proto::longtrader::terminal::v1 as proto,
+    transport::TransportError,
 };
 
 /// Client errors.
@@ -88,30 +89,20 @@ impl TerminalClient {
         method: &str,
         req: Q,
     ) -> Result<R, TerminalClientError> {
-        let url = self.url(service, method);
-        let body = req.encode_to_vec();
-        let resp = self
-            .request(&url, body, "application/proto")
-            .send()
-            .await
-            .map_err(|e| TerminalClientError::Http(e.to_string()))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body_bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| TerminalClientError::Http(format!("read error: {e}")))?;
-            let text = String::from_utf8_lossy(&body_bytes).to_string();
-            return Err(TerminalClientError::Rpc { code: status.as_u16().into(), message: text });
-        }
-
-        let body_bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| TerminalClientError::Http(format!("read error: {e}")))?;
-        R::decode_from_slice(&body_bytes)
-            .map_err(|e| TerminalClientError::Decode(format!("decode {method}: {e}")))
+        crate::transport::unary(
+            &self.http,
+            &self.base_url,
+            service,
+            method,
+            self.auth_token.as_deref().unwrap_or(""),
+            req,
+        )
+        .await
+        .map_err(|e| match e {
+            TransportError::Http(m) => TerminalClientError::Http(m),
+            TransportError::Rpc { code, message } => TerminalClientError::Rpc { code, message },
+            TransportError::Decode(m) => TerminalClientError::Decode(m),
+        })
     }
 
     // ---- MarketDataService ----

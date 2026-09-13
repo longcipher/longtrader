@@ -13,8 +13,6 @@
 //! (one per logical stream) so a slow consumer never blocks another session
 //! or the worker↔daemon ingress. Policies above map per-channel:
 //! ticker→`DropOldest`, book→`Coalesce`, orders→`Block`.
-//! 每 session 独立 mpsc channel 与不同 OverflowPolicy（ticker DropOldest, book Coalesce, orders
-//! Block）
 
 use std::{
     collections::VecDeque,
@@ -28,9 +26,6 @@ use std::{
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use crate::ports::OverflowPolicy;
-
-#[rustfmt::skip]
-const _DOC_BACKPRESSURE: &str = "每 session 独立 mpsc channel 与不同 OverflowPolicy（ticker DropOldest, book Coalesce, orders Block）";
 
 struct PipeState<T, K> {
     tx: mpsc::Sender<T>,

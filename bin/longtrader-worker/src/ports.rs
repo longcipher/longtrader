@@ -11,51 +11,14 @@ use tokio::sync::mpsc;
 use crate::proto::{common, market, trading, worker};
 
 // ---------------------------------------------------------------------------
-// Decimal v2 dual-representation helpers (design doc §6.1; proto/common/v1/types.proto:Decimal)
+// Decimal dual-representation
 //
-// The contract's `Decimal` carries both `unscaled+scale` (fast path, int64)
-// and `raw_str` (fallback, arbitrary precision). Writers MUST populate exactly
-// one representation; readers MUST handle both. The 96-bit mantissa of
-// rust_decimal does not always fit int64, so fallback is mandatory, not
-// optional.
+// The authoritative encode/decode lives in `longtrader_contract::ext`
+// (`decimal_to_common` / `common_to_decimal`). The previous duplicate helpers
+// here were removed so the representation split has a single owner; the old
+// fast path silently zeroed an out-of-range `scale`, a latent data-corruption
+// bug. Strategy code should call `longtrader_contract::ext::decimal_to_common`.
 // ---------------------------------------------------------------------------
-
-/// Try the fast path: encode `value` as `unscaled * 10^-scale` when the
-/// 96-bit mantissa fits `int64`. Returns `Some(Decimal{unscaled,scale})`
-/// with empty `raw_str` on success, `None` when fallback is required.
-///
-/// This mirrors `longtrader_contract::ext::decimal_to_common` split but is
-/// exposed here so strategies can reason about the representation without
-/// importing contract internals directly.
-#[inline]
-pub fn decimal_try_fast_path(value: Decimal) -> Option<common::Decimal> {
-    let mantissa = value.mantissa();
-    let unscaled = i64::try_from(mantissa).ok()?;
-    Some(common::Decimal {
-        unscaled,
-        scale: i32::try_from(value.scale()).unwrap_or_default(),
-        raw_str: String::new(),
-        ..Default::default()
-    })
-}
-
-/// Fallback encoding: always uses `raw_str` carrying the canonical decimal
-/// string. Use when [`decimal_try_fast_path`] returns `None` or when the
-/// caller prefers correctness over the fast path.
-///
-/// Ponytail note: this exists because `rust_decimal` mantissa is 96-bit and
-/// cannot be losslessly squeezed into `int64` in all cases.
-#[inline]
-pub fn decimal_fallback(value: Decimal) -> common::Decimal {
-    common::Decimal { unscaled: 0, scale: 0, raw_str: value.to_string(), ..Default::default() }
-}
-
-/// Dual helper: prefers `try_fast_path`, falls back to `raw_str`.
-/// Canonical entry point for encoding strategy-side decimals into proto.
-#[inline]
-pub fn decimal_to_proto(value: Decimal) -> common::Decimal {
-    decimal_try_fast_path(value).unwrap_or_else(|| decimal_fallback(value))
-}
 
 // ---------------------------------------------------------------------------
 // Sequence gap detection (design doc §6.1: per-stream gap-free `EventHeader.sequence`)

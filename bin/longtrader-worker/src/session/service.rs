@@ -294,8 +294,8 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
         // internally; this path only deals with typed `StrategyEvent`s.
         let req = request.to_owned_message();
         let handle = self.manager.get(&req.session_id).await?;
-        // resume_token is the opaque cursor (sequence as string) for
-        // 断点续传: replay from ring buffer after `after_seq`.
+        // resume_token is the opaque cursor (sequence as string) for resuming
+        // from the ring buffer after `after_seq`.
         // Sequence is gap-free per subscription; gaps trigger resync
         // (see `crate::ports::is_sequence_gap`).
         let after_seq: u64 = req.resume_token.parse().unwrap_or(0);

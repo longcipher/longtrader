@@ -22,8 +22,9 @@ pub struct Config {
     /// Whether to cancel active orders when the session lease expires.
     #[serde(default)]
     pub kill_switch_on_disconnect: Option<bool>,
-    /// Backend selection: `"api"` — the longtrader-api unified endpoint.
-    /// Defaults to `"daemon"`.
+    /// Backend selection. `"api"` — the longtrader-api unified endpoint served
+    /// by the terminal/daemon. `"terminal"` is selected implicitly when
+    /// `api_endpoint` is set. Defaults to `"api"`.
     #[serde(default)]
     pub backend: Option<String>,
     /// Optional bind address for the control-plane RPC server
@@ -82,11 +83,19 @@ impl StrategyParams {
 
 impl Config {
     /// Effective backend, honouring the legacy `api_endpoint` override.
+    ///
+    /// Resolves to `"terminal"` when `api_endpoint` is set, otherwise to the
+    /// configured `backend` (defaulting to `"api"`). The previously documented
+    /// `"daemon"` backend has no adapter implementation, so it is no longer a
+    /// valid default — callers relying on it must configure a real backend.
     pub fn resolved_backend(&self) -> String {
         if self.api_endpoint.is_some() {
             return "terminal".to_string();
         }
-        self.backend.clone().unwrap_or_else(|| "daemon".to_string())
+        self.backend
+            .clone()
+            .filter(|b| !b.is_empty() && b != "daemon")
+            .unwrap_or_else(|| "api".to_string())
     }
 
     /// Terminal API token loaded from `api_token_file` (empty when unset).

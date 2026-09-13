@@ -23,7 +23,7 @@
 //!   `CancelAllOrders`;
 //! - `NONE` (SCOPE_NONE) logs only, no cancellations.
 //!
-//! Multi-level watchdog / 多级看门狗：session/daemon/exchange 三级 (design doc §6.6):
+//! Multi-level watchdog: session / daemon / exchange (design doc §6.6):
 //! - L_session (worker lease): this module’s `watchdog_loop` + `check_lease_expiry` — 3x heartbeat
 //!   budget.
 //! - L_daemon (exchange daemon): worker gRPC loss → daemon cancels that worker’s sessions.
@@ -35,23 +35,15 @@
 //! per logical stream with a stream-appropriate `OverflowPolicy`:
 //! ticker → `DropOldest`, orderbook → `Coalesce`, orders/balances/positions
 //! → `Block` (see `crate::ports::OVERFLOW_*` and `crate::overflow::policy_channel`).
-//! 每 session 独立 mpsc channel 与不同 OverflowPolicy（ticker DropOldest, book Coalesce, orders
-//! Block）
 //!
 //! Strategy-side lease simulation: external strategies SHOULD spawn a timer
 //! task at `heartbeat_interval` that checks elapsed time since last
 //! successful `KeepAlive`; on lease timeout they locally cancel and stop
 //! trading (see `spawn_strategy_lease_guard` helper below).
-//! spawn 定时任务，每 heartbeat_interval 检查 lease 是否超时，超时则触发 cancel
 
 pub mod proxy;
 pub mod server;
 pub mod service;
-
-#[rustfmt::skip]
-const _DOC_BACKPRESSURE: &str = "每 session 独立 mpsc channel 与不同 OverflowPolicy（ticker DropOldest, book Coalesce, orders Block）";
-#[rustfmt::skip]
-const _DOC_WATCHDOG: &str = "spawn 定时任务，每 heartbeat_interval 检查 lease 是否超时，超时则触发 cancel";
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -299,7 +291,7 @@ impl SessionManager {
             sessions: Mutex::new(HashMap::new()),
             watchdog_started: AtomicBool::new(false),
             self_weak: StdMutex::new(None),
-            cod_provider: None,
+            cod_provider: Some(Arc::new(NullCodProvider)),
         }
     }
 
@@ -381,11 +373,13 @@ impl SessionManager {
             if let Some(handle) = self.sessions.lock().await.get(reconnect_session_id).cloned() {
                 match handle.state() {
                     Some(SessionState::KillSwitchTripped | SessionState::GracefulShutdown) => {
-                        // Terminal states are not resurrectable — require fresh attach +
-                        // ReconcileState.
+                        // Terminal sessions are not resurrectable; the caller must attach
+                        // fresh. Silently falling through here would leak the old session.
+                        return Err(ManagerError::InvalidArgument(format!(
+                            "session {reconnect_session_id} is terminal; attach a new session"
+                        )));
                     }
-                    Some(SessionState::Attached | SessionState::Syncing | SessionState::Active) |
-                    None => {
+                    Some(SessionState::Attached | SessionState::Syncing | SessionState::Active) => {
                         handle.touch();
                         if let Some(policy) = policy.clone() {
                             let mut new_policy = handle.policy();
@@ -409,6 +403,12 @@ impl SessionManager {
                             handle.set_policy(new_policy);
                         }
                         return Ok((reconnect_session_id.to_string(), handle.heartbeat_interval_ms));
+                    }
+                    None => {
+                        // Corrupt session state byte; refuse rather than guess.
+                        return Err(ManagerError::InvalidArgument(format!(
+                            "session {reconnect_session_id} has an invalid state"
+                        )));
                     }
                 }
             }
@@ -512,11 +512,7 @@ impl SessionManager {
                 nanos: i32::try_from(now_ms().rem_euclid(1000) * 1_000_000).unwrap_or_default(),
                 ..Default::default()
             }),
-            fields: fields.into_iter().collect::<std::collections::HashMap<
-                _,
-                _,
-                buffa::foldhash::fast::RandomState,
-            >>(),
+            fields: fields.into_iter().collect(),
             ..Default::default()
         };
         if let Some(info) = &mut *handle.strategy.lock().expect("strategy mutex") {
@@ -684,6 +680,22 @@ pub trait CodProvider: Send + Sync {
     }
 }
 
+/// Honest no-op COD provider used when no venue-native cancel-on-disconnect is
+/// configured. `supports_cod` returns `false` so the watchdog never relies on
+/// it; venues that expose COD inject a real provider via
+/// [`SessionManager::with_cod_provider`].
+pub struct NullCodProvider;
+
+#[async_trait::async_trait]
+impl CodProvider for NullCodProvider {
+    async fn keepalive(&self, _session_id: &str) -> Result<(), crate::ports::PortError> {
+        Ok(())
+    }
+    fn supports_cod(&self) -> bool {
+        false
+    }
+}
+
 #[allow(clippy::cognitive_complexity, clippy::collapsible_if)]
 async fn watchdog_loop(manager: Arc<SessionManager>) {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -710,10 +722,21 @@ async fn watchdog_loop(manager: Arc<SessionManager>) {
             }
         }
         // L2: detect gateway gRPC loss via health probe (daemon watchdog analogue).
-        // If gateway health fails, proactively trip all Active sessions to avoid
-        // stale orders surviving a partition. Best-effort, not fatal.
+        // On failure, proactively trip every Active session so stale orders cannot
+        // survive a partition — the final backstop beyond the L1 lease.
         if let Err(e) = manager.gateway_health_check().await {
-            tracing::warn!(error = %e, "gateway health check failed — L2 daemon watchdog triggered");
+            tracing::warn!(error = %e, "gateway health check failed — L2 daemon watchdog tripping all active sessions");
+            let active: Vec<Arc<SessionHandle>> = {
+                let sessions = manager.sessions.lock().await;
+                sessions
+                    .values()
+                    .filter(|h| h.state() == Some(SessionState::Active))
+                    .cloned()
+                    .collect()
+            };
+            for handle in active {
+                manager.trip_kill_switch(&handle, handle.policy().lease_timeout).await;
+            }
         }
     }
 }
@@ -738,8 +761,8 @@ pub fn spawn_strategy_lease_guard(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(heartbeat_interval);
-        // Strategy-side watchdog: spawn 定时任务，每 heartbeat_interval 检查 lease
-        // 是否超时，超时则触发 cancel.
+        // Strategy-side watchdog: spawn a timer that checks the lease every
+        // `heartbeat_interval` and trips the cancel path on timeout.
         loop {
             tick.tick().await;
             let elapsed = match manager.get(&session_id).await {

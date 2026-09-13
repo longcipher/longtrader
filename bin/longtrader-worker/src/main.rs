@@ -7,32 +7,13 @@ use color_eyre::{Result, eyre::bail};
 use longtrader_worker::{
     adapters::RemoteAdapter,
     config::Config,
-    ports::{MarketDataSource, TradingGateway},
+    ports::{FundingRateSource, MarketDataSource, TradingGateway, VenueOpInvoker, WalletGateway},
     session::SessionManager,
-    strategies::{
-        Strategy,
-        autoborrow::{Autoborrow, AutoborrowConfig},
-        balance_align::BalanceAlign,
-        boll_grid::{BollGrid, BollGridConfig},
-        convert::{Convert, ConvertConfig},
-        cross_depth_maker::CrossDepthMaker,
-        cross_fixed_maker::CrossFixedMaker,
-        cross_maker::CrossMaker,
-        dca_scheduler::{DcaScheduler, DcaSchedulerConfig},
-        deposit_transfer::{DepositTransfer, DepositTransferConfig},
-        ema_cross::{EmaCross, EmaCrossConfig},
-        fixed_maker::{FixedMaker, FixedMakerConfig},
-        hedge_grid::HedgeGrid,
-        irr::{Irr, IrrConfig},
-        market_cap::{MarketCap, MarketCapConfig},
-        random_entry::{RandomEntry, RandomEntryConfig},
-        rebalance::{Rebalance, RebalanceConfig},
-        sentinel::{Sentinel, SentinelConfig},
-        simple_grid::{SimpleGrid, SimpleGridConfig},
-        supertrend::{Supertrend, SupertrendConfig},
-        xfunding_lite::{XfundingLite, XfundingLiteConfig},
-    },
+    strategies::{self, StrategyContext},
 };
+
+/// Default control-plane / terminal API endpoint when none is configured.
+const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:7888";
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -58,149 +39,42 @@ async fn main() -> Result<()> {
         "starting worker"
     );
 
+    // A single `RemoteAdapter` implements every strategy-facing port, so the
+    // worker keeps exactly one backend connection per session (no per-port
+    // adapter sprawl, no split session state).
+    let endpoint = config.api_endpoint.clone().unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
+    let adapter = Arc::new(RemoteAdapter::new(&endpoint, &config.api_token()));
+    tracing::info!(endpoint = %endpoint, "connected to terminal API");
+
     match backend.as_str() {
-        "api" | "terminal" => {
-            let endpoint =
-                config.api_endpoint.clone().unwrap_or_else(|| "http://127.0.0.1:7888".to_string());
-            let adapter = Arc::new(RemoteAdapter::new(&endpoint, &config.api_token()));
-            tracing::info!(endpoint = %endpoint, "connected to terminal API");
+        "api" | "terminal" => start_with(adapter, &config).await,
+        // Historically documented but never implemented; map to the unified
+        // endpoint with a warning rather than crashing on a valid-looking config.
+        "daemon" => {
+            tracing::warn!("backend 'daemon' is not implemented; using the unified 'api' endpoint");
             start_with(adapter, &config).await
         }
-        other => bail!("unknown backend: {other}"),
-    }
-}
-
-/// Builds a fresh remote adapter for extended-port strategies.
-fn adapter_for(config: &Config) -> Result<Arc<RemoteAdapter>> {
-    let endpoint =
-        config.api_endpoint.clone().unwrap_or_else(|| "http://127.0.0.1:7888".to_string());
-    Ok(Arc::new(RemoteAdapter::new(&endpoint, &config.api_token())))
-}
-
-/// Builds the configured strategy over the shared adapter.
-fn build_strategy(
-    config: &Config,
-    gateway: Arc<dyn TradingGateway>,
-    market: Arc<dyn MarketDataSource>,
-) -> Result<Box<dyn Strategy>> {
-    let kind = config.strategy.strategy_type.as_str();
-    let params = config.strategy.params.table();
-    // Backwards compatibility: an empty type selects the original grid.
-    let kind = if kind.is_empty() { "simple_grid" } else { kind };
-    match kind {
-        "simple_grid" => {
-            let grid_config: SimpleGridConfig = config.grid_config()?;
-            Ok(Box::new(SimpleGrid::new(grid_config, gateway, market)))
-        }
-        "ema_cross" => {
-            let cfg = EmaCrossConfig::from_params(params)?;
-            Ok(Box::new(EmaCross::new(cfg, gateway, market)))
-        }
-        "supertrend" => {
-            let cfg = SupertrendConfig::from_params(params)?;
-            Ok(Box::new(Supertrend::new(cfg, gateway, market)))
-        }
-        "boll_grid" => {
-            let cfg = BollGridConfig::from_params(params)?;
-            Ok(Box::new(BollGrid::new(cfg, gateway, market)))
-        }
-        "dca_scheduler" | "dca" => {
-            let cfg = DcaSchedulerConfig::from_params(params)?;
-            Ok(Box::new(DcaScheduler::new(cfg, gateway)))
-        }
-        "fixed_maker" => {
-            let cfg = FixedMakerConfig::from_params(params)?;
-            Ok(Box::new(FixedMaker::new(cfg, gateway, market)))
-        }
-        "random_entry" => {
-            let cfg = RandomEntryConfig::from_params(params)?;
-            Ok(Box::new(RandomEntry::new(cfg, gateway)))
-        }
-        "xfunding_lite" => {
-            let cfg = XfundingLiteConfig::from_params(params)?;
-            let funding: Arc<dyn longtrader_worker::ports::FundingRateSource> =
-                adapter_for(config)?;
-            Ok(Box::new(XfundingLite::new(cfg, gateway, funding)))
-        }
-        "sentinel" => {
-            let cfg = SentinelConfig::from_params(params)?;
-            Ok(Box::new(Sentinel::new(cfg, gateway, market)))
-        }
-        "autoborrow" => {
-            let cfg = AutoborrowConfig::from_params(params)?;
-            let ops: Arc<dyn longtrader_worker::ports::VenueOpInvoker> = adapter_for(config)?;
-            Ok(Box::new(Autoborrow::new(cfg, gateway, ops)))
-        }
-        "convert" => {
-            let cfg = ConvertConfig::from_params(params)?;
-            let ops: Arc<dyn longtrader_worker::ports::VenueOpInvoker> = adapter_for(config)?;
-            Ok(Box::new(Convert::new(cfg, ops)))
-        }
-        "deposit_transfer" => {
-            let cfg = DepositTransferConfig::from_params(params)?;
-            let wallet: Arc<dyn longtrader_worker::ports::WalletGateway> = adapter_for(config)?;
-            Ok(Box::new(DepositTransfer::new(cfg, wallet)))
-        }
-        "cross_fixed_maker" => {
-            let cfg = longtrader_worker::strategies::params_from_table(params)?;
-            Ok(Box::new(CrossFixedMaker::new(cfg, gateway, market)))
-        }
-        "cross_depth_maker" => {
-            let cfg = longtrader_worker::strategies::params_from_table(params)?;
-            Ok(Box::new(CrossDepthMaker::new(cfg, gateway, market)))
-        }
-        "cross_maker" => {
-            let cfg = longtrader_worker::strategies::params_from_table(params)?;
-            Ok(Box::new(CrossMaker::new(cfg, gateway, market)))
-        }
-        "hedge_grid" => {
-            let cfg = longtrader_worker::strategies::params_from_table(params)?;
-            Ok(Box::new(HedgeGrid::new(cfg, gateway, market)))
-        }
-        "balance_align" => {
-            let cfg = longtrader_worker::strategies::params_from_table(params)?;
-            let wallet: Arc<dyn longtrader_worker::ports::WalletGateway> = adapter_for(config)?;
-            Ok(Box::new(BalanceAlign::new(cfg, gateway, wallet)))
-        }
-        "premium_monitor" => {
-            let cfg: longtrader_worker::strategies::premium_monitor::PremiumMonitorConfig =
-                longtrader_worker::strategies::params_from_table(params)?;
-            Ok(Box::new(longtrader_worker::strategies::premium_monitor::PremiumMonitor::new(
-                cfg, market,
-            )))
-        }
-        "nav_recorder" => {
-            let cfg = longtrader_worker::strategies::nav_recorder::NavRecorderConfig::from_params(
-                params,
-            )?;
-            Ok(Box::new(longtrader_worker::strategies::nav_recorder::NavRecorder::new(
-                cfg, gateway, market,
-            )))
-        }
-        "rebalance" => {
-            let cfg = RebalanceConfig::from_params(params)?;
-            Ok(Box::new(Rebalance::new(cfg, gateway, market)))
-        }
-        "market_cap" => {
-            let cfg = MarketCapConfig::from_params(params)?;
-            Ok(Box::new(MarketCap::new(cfg, gateway, market)))
-        }
-        "irr" => {
-            let cfg = IrrConfig::from_params(params)?;
-            Ok(Box::new(Irr::new(cfg, gateway)))
-        }
-        other => bail!("unknown strategy type: {other}"),
+        other => bail!("unknown backend: {other} (expected 'api' or 'terminal')"),
     }
 }
 
 /// Start the optional control plane and then run the strategy loop.
-async fn start_with<A>(adapter: Arc<A>, config: &Config) -> Result<()>
-where
-    A: TradingGateway + MarketDataSource + 'static,
-{
+async fn start_with(adapter: Arc<RemoteAdapter>, config: &Config) -> Result<()> {
     let gateway: Arc<dyn TradingGateway> = adapter.clone();
-    let market: Arc<dyn MarketDataSource> = adapter;
-    let strategy = build_strategy(config, gateway.clone(), market.clone())?;
+    let market: Arc<dyn MarketDataSource> = adapter.clone();
+    let funding: Arc<dyn FundingRateSource> = adapter.clone();
+    let ops: Arc<dyn VenueOpInvoker> = adapter.clone();
+    let wallet: Arc<dyn WalletGateway> = adapter.clone();
+
+    let ctx = StrategyContext {
+        config: config.clone(),
+        gateway: gateway.clone(),
+        market: market.clone(),
+        funding,
+        ops,
+        wallet,
+    };
+    let strategy = strategies::build_strategy(&ctx)?;
 
     if let Some(bind) = &config.listen_endpoint {
         let token = config.api_token();
