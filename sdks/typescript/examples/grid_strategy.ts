@@ -17,27 +17,39 @@
  *   just sdk-generate && cd sdks/typescript && npm install
  *   npx tsx examples/grid_strategy.ts --help
  */
-import { create, fromBinary, toBinary, type DescMessage, type MessageShape } from "@bufbuild/protobuf";
+import {
+  create,
+  fromBinary,
+  toBinary,
+  type DescMessage,
+  type MessageShape,
+} from "@bufbuild/protobuf";
 import { fetch } from "undici";
 import { Session } from "../src/index.js";
 import {
   CancelOrderRequestSchema,
+  CancelOrderResponseSchema,
   CreateOrdersRequestSchema,
   CreateOrdersResponseSchema,
+  Order,
   OrderRequest,
+  OrderRequestSchema,
   OrderSide,
   OrderType,
   TimeInForce,
-} from "../gen/longtrader/trading/v1/trading_pb.js";
+} from "../src/gen/longtrader/trading/v1/trading_pb.js";
 import {
   FetchTickerRequestSchema,
   FetchTickerResponseSchema,
-} from "../gen/longtrader/market/v1/market_pb.js";
-import { DecimalSchema, ExchangeIdSchema } from "../gen/longtrader/common/v1/types_pb.js";
+} from "../src/gen/longtrader/market/v1/market_pb.js";
+import {
+  DecimalSchema,
+  ExchangeIdSchema,
+} from "../src/gen/longtrader/common/v1/types_pb.js";
 import {
   KillSwitchPolicySchema,
   KillSwitchPolicy_Scope,
-} from "../gen/longtrader/worker/v1/worker_pb.js";
+} from "../src/gen/longtrader/worker/v1/worker_pb.js";
 
 // Trading/market unary RPCs ride the identical Connect convention as the
 // worker control plane; service names come from the deployed contract.
@@ -46,7 +58,8 @@ const TRADING_SERVICE = "longtrader.trading.v1.TradingService";
 
 // Minimal argv parsing to keep the example dependency-free.
 const args = new Map<string, string>();
-for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i], process.argv[i + 1] ?? "");
+for (let i = 2; i < process.argv.length; i += 2)
+  args.set(process.argv[i], process.argv[i + 1] ?? "");
 const baseUrl = args.get("--base-url") ?? "http://127.0.0.1:8080";
 const token = args.get("--token") ?? "";
 const exchangeId = args.get("--exchange-id") ?? "";
@@ -56,7 +69,9 @@ const stepPct = Number(args.get("--step-pct") ?? 0.1);
 const amount = args.get("--amount") ?? "0.001";
 const refreshSecs = Number(args.get("--refresh-secs") ?? 30);
 if (!token) {
-  console.error("usage: tsx examples/grid_strategy.ts --base-url URL --token TOKEN");
+  console.error(
+    "usage: tsx examples/grid_strategy.ts --base-url URL --token TOKEN",
+  );
   process.exit(1);
 }
 
@@ -72,35 +87,40 @@ function dec(text: string) {
 }
 
 /** Raw Connect unary call — the whole wire protocol in six lines. */
-async function postUnary<S extends DescMessage>(
+async function postUnary<R extends DescMessage, S extends DescMessage>(
   service: string,
   method: string,
-  schema: S,
-  req: MessageShape<S>,
+  reqSchema: R,
+  req: MessageShape<R>,
+  respSchema: S,
 ): Promise<MessageShape<S>> {
   const res = await fetch(`${baseUrl}/${service}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/proto" },
-    body: toBinary(schema, req),
+    body: toBinary(reqSchema, req),
   });
   if (res.status !== 200) {
-    throw new Error(`connect error ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    throw new Error(
+      `connect error ${res.status}: ${(await res.text()).slice(0, 200)}`,
+    );
   }
-  return fromBinary(schema, new Uint8Array(await res.arrayBuffer()));
+  return fromBinary(respSchema, new Uint8Array(await res.arrayBuffer()));
 }
 
 async function fetchMid(): Promise<number> {
   const resp = await postUnary(
     MARKET_SERVICE,
     "FetchTicker",
-    FetchTickerResponseSchema,
+    FetchTickerRequestSchema,
     create(FetchTickerRequestSchema, {
       exchangeId: create(ExchangeIdSchema, { id: exchangeId }),
       symbol,
     }),
+    FetchTickerResponseSchema,
   );
   const num = (s: string): number | undefined => (s ? Number(s) : undefined);
   const t = resp.ticker;
+  if (t === undefined) throw new Error(`ticker for ${symbol} missing`);
   const bid = num(t.bid.rawStr);
   const ask = num(t.ask.rawStr);
   const last = num(t.last.rawStr);
@@ -133,12 +153,13 @@ async function refreshGrid(mid: number): Promise<void> {
     await postUnary(
       TRADING_SERVICE,
       "CancelOrder",
-      CancelOrderResponseSchema,
+      CancelOrderRequestSchema,
       create(CancelOrderRequestSchema, {
         exchangeId: create(ExchangeIdSchema, { id: exchangeId }),
         orderId,
         symbol,
       }),
+      CancelOrderResponseSchema,
     ).catch((err) => console.error(`cancel ${orderId} failed: ${err}`));
   }
 
@@ -151,13 +172,14 @@ async function refreshGrid(mid: number): Promise<void> {
   const resp = await postUnary(
     TRADING_SERVICE,
     "CreateOrders",
-    CreateOrdersResponseSchema,
+    CreateOrdersRequestSchema,
     create(CreateOrdersRequestSchema, {
       exchangeId: create(ExchangeIdSchema, { id: exchangeId }),
       orders,
     }),
+    CreateOrdersResponseSchema,
   );
-  liveIds = resp.orders.map((o) => o.id);
+  liveIds = resp.orders.map((o: Order) => o.id);
   console.log(`[grid] placed ${liveIds.length} rungs`);
 }
 
@@ -168,7 +190,9 @@ const policy = create(KillSwitchPolicySchema, {
 });
 
 const session = await Session.attach(baseUrl, token, policy);
-console.log(`attached session=${session.sessionId} heartbeat_ms=${session.heartbeatIntervalMs} state=${session.state}`);
+console.log(
+  `attached session=${session.sessionId} heartbeat_ms=${session.heartbeatIntervalMs} state=${session.state}`,
+);
 session.startHeartbeat();
 
 // Recovery gate: authoritative snapshot before any order submission.
@@ -185,12 +209,13 @@ process.on("SIGINT", () => {
       postUnary(
         TRADING_SERVICE,
         "CancelOrder",
-        CancelOrderResponseSchema,
+        CancelOrderRequestSchema,
         create(CancelOrderRequestSchema, {
           exchangeId: create(ExchangeIdSchema, { id: exchangeId }),
           orderId,
           symbol,
         }),
+        CancelOrderResponseSchema,
       ),
     ),
   ).then(() => {

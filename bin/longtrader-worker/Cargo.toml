@@ -4,7 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+homepage = "https://docs.rs/longtrader-worker"
+readme = "../../README.md"
 description = "Local strategy host running portable strategies against pluggable backends (exchange daemon / terminal API / mock)"
+documentation = "https://docs.rs/longtrader-worker"
+keywords = ["trading", "strategy", "connectrpc", "finance", "backtesting"]
+categories = ["finance", "api-bindings"]
 
 [lib]
 path = "src/lib.rs"

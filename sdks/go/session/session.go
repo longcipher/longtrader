@@ -11,4 +11,3 @@ type Session struct {
 	HeartbeatIntervalMs uint32
 	baseURL             string
 }
-

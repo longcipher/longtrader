@@ -25,7 +25,7 @@ import {
   SetKillSwitchPolicyRequestSchema,
   SetKillSwitchPolicyResponseSchema,
   type KillSwitchPolicy,
-} from "../gen/longtrader/worker/v1/worker_pb.js";
+} from "./gen/longtrader/worker/v1/worker_pb.js";
 
 export const WORKER_SERVICE = "longtrader.worker.v1.WorkerSessionService";
 
@@ -109,8 +109,12 @@ export class Session {
    * stamped with snapshot_sequence. A successful reconcile is the local gate
    * out of syncing; pre-ACTIVE orders are rejected SYNC_IN_PROGRESS.
    */
-  async reconcileState(): Promise<MessageShape<typeof ReconcileStateResponseSchema>> {
-    const req = create(ReconcileStateRequestSchema, { sessionId: this.sessionId });
+  async reconcileState(): Promise<
+    MessageShape<typeof ReconcileStateResponseSchema>
+  > {
+    const req = create(ReconcileStateRequestSchema, {
+      sessionId: this.sessionId,
+    });
     const resp = await this.unary(
       "ReconcileState",
       ReconcileStateResponseSchema,
@@ -166,7 +170,8 @@ export class Session {
    * Wakes every `heartbeatIntervalMs` and checks elapsed since last KeepAlive; on `leaseTimeout` (default 3x heartbeat) it stops.
    */
   spawnLeaseWatchdog(leaseTimeoutMs?: number): ReturnType<typeof setInterval> {
-    const leaseMs = leaseTimeoutMs ?? Math.max(this.heartbeatIntervalMs * 3, 1500);
+    const leaseMs =
+      leaseTimeoutMs ?? Math.max(this.heartbeatIntervalMs * 3, 1500);
     const intervalMs = Math.max(this.heartbeatIntervalMs, 500);
     if (this.watchdogTimer !== undefined) {
       clearInterval(this.watchdogTimer);
@@ -203,7 +208,11 @@ async function toConnectError(res: Response): Promise<ConnectError> {
   let messageText = "";
   let details: unknown;
   try {
-    const body = (await res.json()) as { code?: string; message?: string; details?: unknown };
+    const body = (await res.json()) as {
+      code?: string;
+      message?: string;
+      details?: unknown;
+    };
     code = body.code ?? code;
     messageText = body.message ?? "";
     details = body.details;

@@ -7,8 +7,8 @@ type OverflowPolicy int
 
 const (
 	DropOldest OverflowPolicy = iota // ticker/trades/ohlcv
-	Coalesce                          // orderbook
-	Block                             // orders/balances/positions
+	Coalesce                         // orderbook
+	Block                            // orders/balances/positions
 )
 
 // TradingPort is the order management surface (mirrors longtrader.trading.v1).

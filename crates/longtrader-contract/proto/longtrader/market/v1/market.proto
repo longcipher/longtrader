@@ -1,0 +1,186 @@
+syntax = "proto3";
+
+package longtrader.market.v1;
+
+import "google/protobuf/timestamp.proto";
+import "longtrader/common/v1/types.proto";
+
+// ---- Market data messages (unified contract) ----
+
+message Ticker {
+  common.v1.EventHeader header = 1;
+  string symbol = 2;
+  google.protobuf.Timestamp timestamp = 3;
+  common.v1.Decimal bid = 4;
+  common.v1.Decimal bid_volume = 5;
+  common.v1.Decimal ask = 6;
+  common.v1.Decimal ask_volume = 7;
+  common.v1.Decimal last = 8;
+  common.v1.Decimal high = 9;
+  common.v1.Decimal low = 10;
+  common.v1.Decimal open = 11;
+  common.v1.Decimal close = 12;
+  common.v1.Decimal base_volume = 13;
+  common.v1.Decimal quote_volume = 14;
+  common.v1.Decimal change = 15;
+  common.v1.Decimal percentage = 16;
+  common.v1.Decimal vwap = 17;
+  common.v1.Decimal average = 18;
+}
+
+message PriceLevel {
+  common.v1.Decimal price = 1;
+  common.v1.Decimal amount = 2;
+}
+
+message OrderBook {
+  common.v1.EventHeader header = 1;
+  string symbol = 2;
+  google.protobuf.Timestamp timestamp = 3;
+  repeated PriceLevel bids = 4;
+  repeated PriceLevel asks = 5;
+}
+
+message PublicTrade {
+  common.v1.EventHeader header = 1;
+  string id = 2;
+  string symbol = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  TradeSide side = 5;
+  common.v1.Decimal price = 6;
+  common.v1.Decimal amount = 7;
+}
+
+// Side as seen from the taker's perspective.
+enum TradeSide {
+  TRADE_SIDE_UNSPECIFIED = 0;
+  TRADE_SIDE_BUY = 1;
+  TRADE_SIDE_SELL = 2;
+}
+
+message OHLCV {
+  common.v1.EventHeader header = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  common.v1.Decimal open = 3;
+  common.v1.Decimal high = 4;
+  common.v1.Decimal low = 5;
+  common.v1.Decimal close = 6;
+  common.v1.Decimal volume = 7;
+}
+
+// ---- Streaming ----
+
+enum StreamChannel {
+  STREAM_CHANNEL_UNSPECIFIED = 0;
+  STREAM_CHANNEL_TICKER = 1;
+  STREAM_CHANNEL_ORDERBOOK = 2;
+  STREAM_CHANNEL_TRADES = 3;
+  STREAM_CHANNEL_OHLCV = 4;
+}
+
+message StreamSubscription {
+  StreamChannel channel = 1;
+  string symbol = 2;
+  map<string, string> params = 3;
+}
+
+message StreamMarketDataRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  repeated StreamSubscription subscriptions = 2;
+  // Opaque token from a previous stream's last event; empty starts fresh.
+  string resume_token = 3;
+}
+
+// One streamed market data event. `sequence` inside `header` increments by 1
+// per subscription; a detected gap requires snapshot resync (orderbook) or
+// reconciliation (private streams).
+message MarketDataEvent {
+  common.v1.EventHeader header = 1;
+  oneof event {
+    Ticker ticker = 2;
+    OrderBook orderbook = 3;
+    PublicTrade trade = 4;
+    OHLCV ohlcv = 5;
+  }
+  // Opaque cursor for reconnect-with-replay.
+  string resume_token = 6;
+}
+
+// OHLCV candle with millisecond Unix timestamp.
+message Candle {
+  int64 timestamp_ms = 1;
+  common.v1.Decimal open = 2;
+  common.v1.Decimal high = 3;
+  common.v1.Decimal low = 4;
+  common.v1.Decimal close = 5;
+  common.v1.Decimal volume = 6;
+}
+
+// ---- Unary fetches (unified surface) ----
+
+message FetchTickerRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  string symbol = 2;
+}
+
+message FetchTickerResponse {
+  Ticker ticker = 1;
+}
+
+message FetchOrderBookRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  string symbol = 2;
+  uint32 limit = 3;
+}
+
+message FetchOrderBookResponse {
+  OrderBook orderbook = 1;
+}
+
+message GetCandlesRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  string symbol = 2;
+  // Timeframe string, e.g. "100s", "1s", "1m", "5m", "15m", "30m",
+  // "1h", "4h", "1d", "1w".
+  string timeframe = 3;
+  uint32 limit = 4;
+}
+
+message GetCandlesResponse {
+  repeated Candle candles = 1;
+}
+
+// Instrument metadata for one tradable symbol.
+message SymbolInfo {
+  // Unique symbol identifier (e.g. "BTCUSDT").
+  string name = 1;
+  // Human-readable display name.
+  string display_name = 2;
+  string base_asset = 3;
+  string quote_asset = 4;
+  common.v1.Decimal contract_size = 5;
+  // Minimum price increment.
+  common.v1.Decimal tick_size = 6;
+}
+
+message ListSymbolsRequest {
+  common.v1.ExchangeId exchange_id = 1;
+}
+
+message ListSymbolsResponse {
+  repeated SymbolInfo symbols = 1;
+}
+
+// ---- Unified market data service ----
+//
+// Served by the worker as a thin proxy over its backend adapter, and (after
+// convergence) natively by the terminal API.
+
+service MarketDataService {
+  rpc FetchTicker(FetchTickerRequest) returns (FetchTickerResponse);
+  rpc FetchOrderBook(FetchOrderBookRequest) returns (FetchOrderBookResponse);
+  rpc GetCandles(GetCandlesRequest) returns (GetCandlesResponse);
+  rpc ListSymbols(ListSymbolsRequest) returns (ListSymbolsResponse);
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc StreamMarketData(StreamMarketDataRequest) returns (stream MarketDataEvent);
+}

@@ -4,6 +4,18 @@ Tier-2 thin wrapper over the generated longtrader Connect stubs. Hand-written
 code stays minimal — session handling plus overflow policies — while all
 trading semantics live in the contract (`proto/`, buf-managed).
 
+## Installation
+
+```bash
+pip install longtrader-sdk
+```
+
+The published wheel bundles the generated protobuf stubs, so no code-generation
+step is required for end users. Generate stubs locally only when building from
+source (repo `just sdk-generate`).
+
+**Requirements:** Python >= 3.10.
+
 ## Canonical layout (design doc §6.8)
 
 | Canonical dir | This SDK |
@@ -62,3 +74,7 @@ s.close()
 - `OverflowPolicy` governs event-queue behavior under slow consumers
   (`DROP_OLDEST` preserves newest, `COALESCE` last-writer-wins, `BLOCK`
   applies backpressure); sequence gaps require snapshot resync/reconcile.
+
+## License
+
+Apache-2.0 — see the repository `LICENSE`.

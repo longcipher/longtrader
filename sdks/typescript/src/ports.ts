@@ -6,9 +6,12 @@ import type {
   MarketDataEvent,
   StreamSubscription,
   Ticker,
-} from "../gen/longtrader/market/v1/market_pb.js";
-import type { Order, OrderRequest } from "../gen/longtrader/trading/v1/trading_pb.js";
-import type { ReconcileStateResponse } from "../gen/longtrader/worker/v1/worker_pb.js";
+} from "./gen/longtrader/market/v1/market_pb.js";
+import type {
+  Order,
+  OrderRequest,
+} from "./gen/longtrader/trading/v1/trading_pb.js";
+import type { ReconcileStateResponse } from "./gen/longtrader/worker/v1/worker_pb.js";
 
 /** How a full event queue behaves under a slow consumer. */
 export enum OverflowPolicy {
@@ -42,5 +45,7 @@ export abstract class MarketPort {
    * Stream MarketDataEvent for the given subscriptions; events carry
    * resume_token for reconnect-with-replay and gap-free header.sequence.
    */
-  abstract subscribeMarketData(subscriptions: StreamSubscription[]): AsyncIterable<MarketDataEvent>;
+  abstract subscribeMarketData(
+    subscriptions: StreamSubscription[],
+  ): AsyncIterable<MarketDataEvent>;
 }

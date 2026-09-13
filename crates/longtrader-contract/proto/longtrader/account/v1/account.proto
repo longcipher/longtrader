@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package longtrader.account.v1;
+
+import "google/protobuf/timestamp.proto";
+import "longtrader/common/v1/types.proto";
+
+message Balance {
+  string currency = 1;
+  common.v1.Decimal free = 2;
+  common.v1.Decimal used = 3;
+  common.v1.Decimal total = 4;
+}
+
+message AccountInfo {
+  string id = 1;
+  string type = 2;
+  string code = 3;
+  repeated Balance balances = 4;
+}
+
+message LedgerEntry {
+  string id = 1;
+  string currency = 2;
+  // "in" or "out".
+  string direction = 3;
+  string type = 4;
+  common.v1.Decimal amount = 5;
+  google.protobuf.Timestamp timestamp = 6;
+  string status = 7;
+}

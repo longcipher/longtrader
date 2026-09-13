@@ -6,12 +6,46 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "engines": {
     "node": ">=18"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/longcipher/longtrader.git",
+    "directory": "sdks/typescript"
+  },
+  "homepage": "https://github.com/longcipher/longtrader#readme",
+  "bugs": {
+    "url": "https://github.com/longcipher/longtrader/issues"
+  },
+  "author": "LongCipher",
+  "keywords": [
+    "trading",
+    "connectrpc",
+    "protobuf",
+    "finance",
+    "grpc"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "example:grid": "tsx examples/grid_strategy.ts"
+    "format": "prettier --write \"src/**/*.ts\" \"examples/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"examples/**/*.ts\"",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "example:grid": "tsx examples/grid_strategy.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2",
@@ -19,6 +53,8 @@
   },
   "devDependencies": {
     "@bufbuild/protoc-gen-es": "^2",
+    "@types/node": "^22",
+    "prettier": "^3",
     "tsx": "^4",
     "typescript": "^5"
   }

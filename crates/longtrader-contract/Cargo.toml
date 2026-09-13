@@ -5,6 +5,13 @@ version.workspace = true
 description = "Single-source-of-truth protobuf contract: generated types and ConnectRPC traits for the longtrader platform"
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+homepage = "https://docs.rs/longtrader-contract"
+readme = "../../README.md"
+documentation = "https://docs.rs/longtrader-contract"
+keywords = ["trading", "protobuf", "connectrpc", "finance", "grpc"]
+categories = ["api-bindings", "finance"]
 
 [package.metadata.cargo-shear]
 ignored = ["buffa", "buffa-types", "http-body", "serde", "serde_json"]

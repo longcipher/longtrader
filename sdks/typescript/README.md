@@ -4,6 +4,18 @@ Tier-2 thin wrapper over the generated longtrader Connect stubs. Hand-written
 code stays minimal — session handling plus overflow policies — while all
 trading semantics live in the contract (`proto/`, buf-managed).
 
+## Installation
+
+```bash
+npm install @longtrader/sdk
+```
+
+The published package bundles the generated protobuf stubs, so no code-generation
+step is required for end users. Generate stubs locally only when building from
+source (repo `just sdk-generate`).
+
+**Requirements:** Node.js >= 18.
+
 ## Canonical layout (design doc §6.8)
 
 | Canonical dir | This SDK |
@@ -41,7 +53,7 @@ npx tsx examples/grid_strategy.ts --help
 Minimal use:
 
 ```ts
-import { Session } from "./src/index.js";
+import { Session } from "@longtrader/sdk";
 
 const s = await Session.attach("http://127.0.0.1:8080", "YOUR_TERMINAL_TOKEN");
 s.startHeartbeat();
@@ -62,3 +74,7 @@ s.stop();
 - `OverflowPolicy` governs event-queue behavior under slow consumers
   (`DropOldest` preserves newest, `Coalesce` last-writer-wins, `Block`
   applies backpressure); sequence gaps require snapshot resync/reconcile.
+
+## License
+
+Apache-2.0 — see the repository `LICENSE`.

@@ -1,0 +1,204 @@
+syntax = "proto3";
+
+package longtrader.worker.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "longtrader/account/v1/account.proto";
+import "longtrader/common/v1/types.proto";
+import "longtrader/market/v1/market.proto";
+import "longtrader/trading/v1/trading.proto";
+
+// Control plane of the local strategy host. External-language strategies are
+// just sessions: they attach, reconcile, subscribe and trade through the same
+// contract embedded Rust strategies use internally.
+//
+// Lifecycle (server-enforced):
+//   DISCONNECTED --AttachSession--> ATTACHED --StartSync--> SYNCING --> ACTIVE
+//   ACTIVE --lease expired / policy trip--> KILL_SWITCH_TRIPPED
+//   ACTIVE --StopStrategy--> GRACEFUL_SHUTDOWN
+// Orders submitted before ACTIVE are rejected with reason SYNC_IN_PROGRESS.
+service WorkerSessionService {
+  // Futu InitConnect equivalent: validate token, negotiate lease parameters.
+  rpc AttachSession(AttachSessionRequest) returns (AttachSessionResponse);
+  // Futu KeepAlive equivalent; feeds the session lease watchdog.
+  rpc KeepAlive(KeepAliveRequest) returns (KeepAliveResponse);
+  // One-shot authoritative snapshot for deterministic state recovery.
+  rpc ReconcileState(ReconcileStateRequest) returns (ReconcileStateResponse);
+  // Parameterize this session's cancel-on-disconnect behavior.
+  rpc SetKillSwitchPolicy(SetKillSwitchPolicyRequest) returns (SetKillSwitchPolicyResponse);
+
+  // Strategy lifecycle & observability (FMZ model).
+  rpc RegisterStrategy(RegisterStrategyRequest) returns (RegisterStrategyResponse);
+  rpc StrategyStatus(StrategyStatusRequest) returns (StrategyStatusResponse);
+  rpc StopStrategy(StopStrategyRequest) returns (StopStrategyResponse);
+  // First-class log channel from strategies to the host.
+  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+  rpc ReportLog(stream LogEvent) returns (ReportLogResponse);
+  // Unified event stream: private updates + strategy events, replayable via
+  // resume_token after reconnect.
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc StreamStrategyEvents(StreamStrategyEventsRequest) returns (stream StrategyEvent);
+}
+
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_ATTACHED = 1;
+  SESSION_STATE_SYNCING = 2;
+  SESSION_STATE_ACTIVE = 3;
+  SESSION_STATE_KILL_SWITCH_TRIPPED = 4;
+  SESSION_STATE_GRACEFUL_SHUTDOWN = 5;
+}
+
+message KillSwitchPolicy {
+  enum Scope {
+    SCOPE_UNSPECIFIED = 0;
+    // Cancel orders submitted by this session only (default).
+    SCOPE_SESSION_ORDERS = 1;
+    // Cancel all orders of the bound account(s).
+    SCOPE_ALL_ORDERS = 2;
+    // Log only; no cancellations.
+    SCOPE_NONE = 3;
+  }
+  // Missed-heartbeat budget; defaults to 3x negotiated heartbeat interval.
+  google.protobuf.Duration lease_timeout = 1;
+  Scope scope = 2;
+}
+
+message AttachSessionRequest {
+  // Existing terminal API token; no separate credential system.
+  // Reuses the longtrader-api/longtrader-terminal `api_token` (constant-time
+  // comparison on the server). See `SessionManager::attach`.
+  string token = 1;
+  string client_name = 2;
+  string client_version = 3;
+  KillSwitchPolicy policy = 4;
+  // Optional: for reconnect, client may send the previously issued session_id.
+  // If non-empty and the session still exists, the server reuses it (after
+  // token validation) and refreshes its lease; otherwise a new session is
+  // created.
+  string session_id = 5;
+}
+
+message AttachSessionResponse {
+  string session_id = 1;
+  uint32 heartbeat_interval_ms = 2;
+  google.protobuf.Timestamp server_time = 3;
+  repeated string capabilities = 4;
+}
+
+message KeepAliveRequest {
+  string session_id = 1;
+  int64 client_time_ns = 2;
+}
+
+message KeepAliveResponse {
+  int64 server_time_ns = 1;
+  uint32 heartbeat_interval_ms = 2;
+}
+
+message ReconcileStateRequest {
+  string session_id = 1;
+}
+
+// One atomic snapshot stamped with the stream watermark at snapshot time,
+// avoiding multi-RPC watermark races during recovery.
+message ReconcileStateResponse {
+  uint64 snapshot_sequence = 1;
+  google.protobuf.Timestamp snapshot_time = 2;
+  repeated account.v1.Balance balances = 3;
+  repeated trading.v1.Position positions = 4;
+  repeated trading.v1.Order open_orders = 5;
+}
+
+message SetKillSwitchPolicyRequest {
+  string session_id = 1;
+  KillSwitchPolicy policy = 2;
+}
+
+message SetKillSwitchPolicyResponse {}
+
+message RegisterStrategyRequest {
+  string session_id = 1;
+  string name = 2;
+  map<string, string> params = 3;
+}
+
+message RegisterStrategyResponse {
+  string strategy_id = 1;
+}
+
+message StrategyStatusRequest {
+  string session_id = 1;
+}
+
+message StrategyStatusResponse {
+  SessionState state = 2;
+  string strategy_id = 3;
+  string name = 4;
+  google.protobuf.Timestamp started_at = 5;
+  uint64 orders_submitted = 6;
+  uint64 log_events = 7;
+}
+
+message StopStrategyRequest {
+  string session_id = 1;
+  bool cancel_open_orders = 2;
+}
+
+message StopStrategyResponse {
+  SessionState final_state = 1;
+}
+
+enum LogLevel {
+  LOG_LEVEL_UNSPECIFIED = 0;
+  LOG_LEVEL_DEBUG = 1;
+  LOG_LEVEL_INFO = 2;
+  LOG_LEVEL_WARN = 3;
+  LOG_LEVEL_ERROR = 4;
+}
+
+message LogEvent {
+  string session_id = 1;
+  LogLevel level = 2;
+  string message = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  map<string, string> fields = 5;
+}
+
+message ReportLogResponse {
+  uint64 accepted = 1;
+}
+
+message StreamStrategyEventsRequest {
+  string session_id = 1;
+  // Opaque token from a previous stream's last event; empty starts fresh.
+  string resume_token = 2;
+}
+
+message StateChange {
+  SessionState from = 1;
+  SessionState to = 2;
+  string reason = 3;
+}
+
+message OrderUpdate {
+  trading.v1.Order order = 1;
+  // "new" | "fill" | "canceled" | "rejected".
+  string update_type = 2;
+}
+
+message StrategyEvent {
+  common.v1.EventHeader header = 1;
+  oneof event {
+    OrderUpdate order_update = 2;
+    account.v1.Balance balance_update = 3;
+    trading.v1.Position position_update = 4;
+    trading.v1.Trade trade_update = 5;
+    LogEvent log = 6;
+    StateChange state_change = 7;
+    market.v1.Ticker ticker = 8;
+  }
+  // Opaque cursor for reconnect-with-replay.
+  string resume_token = 9;
+}

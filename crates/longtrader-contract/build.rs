@@ -21,8 +21,15 @@ fn collect_protos(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
-    let proto_root = Path::new(&manifest_dir).join("../../proto");
-    let proto_root = proto_root.canonicalize().unwrap_or(proto_root);
+    // In the workspace the canonical contract lives at `<workspace>/proto`.
+    // In a published crate that directory is outside the package, so fall back
+    // to the vendored copy shipped under this crate's `proto/` directory.
+    let repo_proto = Path::new(&manifest_dir).join("../../proto");
+    let proto_root = if repo_proto.exists() {
+        repo_proto.canonicalize().unwrap_or(repo_proto)
+    } else {
+        Path::new(&manifest_dir).join("proto")
+    };
 
     let mut protos = Vec::new();
     collect_protos(&proto_root, &mut protos);

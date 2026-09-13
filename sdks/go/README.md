@@ -4,6 +4,18 @@ Tier-2 thin wrapper over the generated longtrader Connect stubs. Hand-written
 code stays minimal — session handling plus overflow policies — while all
 trading semantics live in the contract (`proto/`, buf-managed).
 
+## Installation
+
+```bash
+go get github.com/longcipher/longtrader/sdks/go
+```
+
+The module is served from the repository via pkg.go.dev — no separate registry
+account is required. Regenerate the stubs with `just sdk-generate` only when
+working from source.
+
+**Requirements:** Go >= 1.23.
+
 ## Canonical layout (design doc §6.8)
 
 | Canonical dir | This SDK |
@@ -82,3 +94,7 @@ bash scripts/gen-proto.sh
 ```
 
 Output is `sdks/go/gen` (quarantined contract, never hand-edited).
+
+## License
+
+Apache-2.0 — see the repository `LICENSE`.

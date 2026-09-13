@@ -1,0 +1,213 @@
+syntax = "proto3";
+
+package longtrader.stream.v1;
+
+import "longtrader/common/v1/types.proto";
+
+// Unified real-time streaming contract.
+//
+// One server-streaming RPC fans every update class (market data, private
+// trading, account) to a consumer as tagged `UpdateEnvelope` messages.
+// Values use `common.v1.Decimal` (dual representation) and millisecond
+// Unix timestamps; reconnect/replay is negotiated through the envelope's
+// `resume_token`.
+
+// Side as seen from the taker's perspective (public trades, liquidations,
+// own-order projections). `UNKNOWN` degrades consumers to two-column totals.
+enum TradeSide {
+  TRADE_SIDE_UNSPECIFIED = 0;
+  TRADE_SIDE_BUY = 1;
+  TRADE_SIDE_SELL = 2;
+  TRADE_SIDE_UNKNOWN = 3;
+}
+
+enum PositionSide {
+  POSITION_SIDE_UNSPECIFIED = 0;
+  POSITION_SIDE_LONG = 1;
+  POSITION_SIDE_SHORT = 2;
+}
+
+enum CloseReason {
+  CLOSE_REASON_UNSPECIFIED = 0;
+  CLOSE_REASON_TAKE_PROFIT = 1;
+  CLOSE_REASON_STOP_LOSS = 2;
+  CLOSE_REASON_STOP_OUT = 3;
+  CLOSE_REASON_MANUAL = 4;
+}
+
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  ORDER_TYPE_MARKET = 1;
+  ORDER_TYPE_LIMIT = 2;
+  ORDER_TYPE_STOP = 3;
+}
+
+enum OrderSide {
+  ORDER_SIDE_UNSPECIFIED = 0;
+  ORDER_SIDE_BUY = 1;
+  ORDER_SIDE_SELL = 2;
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_PENDING = 1;
+  ORDER_STATUS_FILLED = 2;
+  ORDER_STATUS_CANCELED = 3;
+}
+
+// Best bid/ask + last trade snapshot for one symbol.
+message Tick {
+  string symbol = 1;
+  common.v1.Decimal last = 2;
+  common.v1.Decimal bid = 3;
+  common.v1.Decimal ask = 4;
+  common.v1.Decimal volume = 5;
+  int64 timestamp_ms = 6;
+}
+
+// One price level in an order book.
+message BookLevel {
+  common.v1.Decimal price = 1;
+  common.v1.Decimal amount = 2;
+}
+
+// Full order book snapshot for one symbol.
+message BookSnapshot {
+  string symbol = 1;
+  repeated BookLevel bids = 2;
+  repeated BookLevel asks = 3;
+  int64 timestamp_ms = 4;
+  // True when this is a full snapshot; false marks an incremental update.
+  bool snapshot = 5;
+}
+
+// Public trade print with aggressor direction.
+message Trade {
+  string id = 1;
+  string symbol = 2;
+  TradeSide side = 3;
+  common.v1.Decimal price = 4;
+  common.v1.Decimal amount = 5;
+  int64 timestamp_ms = 6;
+  bool maker = 7;
+}
+
+// Liquidation event (derivatives).
+message Liquidation {
+  string exchange = 1;
+  string symbol = 2;
+  TradeSide side = 3;
+  common.v1.Decimal amount = 4;
+  common.v1.Decimal price = 5;
+  int64 timestamp_ms = 6;
+}
+
+// Order-book incremental update (qty=0 removes a level). A gap in `seq`
+// means data discontinuity and requires a snapshot resync.
+message OrderbookDelta {
+  string symbol = 1;
+  uint64 seq = 2;
+  bool is_snapshot = 3;
+  repeated BookLevel bids = 4;
+  repeated BookLevel asks = 5;
+}
+
+// Own (market-making) order projection; the gateway-pushed queue position
+// is authoritative over local estimation.
+message MyOrderPosition {
+  string order_id = 1;
+  string symbol = 2;
+  TradeSide side = 3;
+  common.v1.Decimal price = 4;
+  common.v1.Decimal quantity = 5;
+  uint32 queue_position = 6;
+  uint32 total_in_queue = 7;
+  int64 updated_at_ms = 8;
+}
+
+// Account margin snapshot.
+message Account {
+  common.v1.Decimal balance = 1;
+  common.v1.Decimal equity = 2;
+  common.v1.Decimal margin_used = 3;
+  common.v1.Decimal free_margin = 4;
+  common.v1.Decimal margin_frozen = 5;
+}
+
+// Open position projection.
+message Position {
+  string id = 1;
+  string order_id = 2;
+  string symbol = 3;
+  PositionSide side = 4;
+  common.v1.Decimal quantity = 5;
+  common.v1.Decimal entry_price = 6;
+  common.v1.Decimal current_price = 7;
+  common.v1.Decimal unrealized_pnl = 8;
+  common.v1.Decimal take_profit = 9;
+  common.v1.Decimal stop_loss = 10;
+  int64 opened_at_ms = 11;
+}
+
+// Recently closed position with its realized outcome.
+message ClosedPosition {
+  string id = 1;
+  string order_id = 2;
+  string symbol = 3;
+  PositionSide side = 4;
+  common.v1.Decimal quantity = 5;
+  common.v1.Decimal entry_price = 6;
+  common.v1.Decimal exit_price = 7;
+  common.v1.Decimal realized_pnl = 8;
+  int64 opened_at_ms = 9;
+  int64 closed_at_ms = 10;
+  CloseReason close_reason = 11;
+}
+
+// Order state projection.
+message Order {
+  string id = 1;
+  string client_order_id = 2;
+  string symbol = 3;
+  OrderType type = 4;
+  OrderSide side = 5;
+  OrderStatus status = 6;
+  common.v1.Decimal amount = 7;
+  common.v1.Decimal price = 8;
+  common.v1.Decimal filled = 9;
+  common.v1.Decimal avg_price = 10;
+  int64 created_at_ms = 11;
+  int64 updated_at_ms = 12;
+}
+
+// One streamed update. Exactly one `payload` variant is populated per
+// message; `resume_token` carries the replay cursor for reconnects.
+message UpdateEnvelope {
+  oneof payload {
+    Tick tick = 1;
+    BookSnapshot book = 2;
+    Trade trade = 3;
+    Liquidation liquidation = 4;
+    OrderbookDelta book_delta = 5;
+    MyOrderPosition my_order = 6;
+    Position position = 7;
+    ClosedPosition position_closed = 8;
+    Order order = 9;
+    Account account = 10;
+  }
+  // Opaque token from a previous stream's last event; empty starts fresh.
+  string resume_token = 20;
+}
+
+message StreamUpdatesRequest {
+  // Venue selector; empty resolves to the backend's single active venue.
+  common.v1.ExchangeId exchange_id = 1;
+  // Symbol filter; empty subscribes to every symbol the venue streams.
+  repeated string symbols = 2;
+}
+
+service StreamService {
+  // Stream all update classes as tagged envelopes.
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc StreamUpdates(StreamUpdatesRequest) returns (stream UpdateEnvelope);
+}

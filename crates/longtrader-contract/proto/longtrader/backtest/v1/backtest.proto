@@ -1,0 +1,118 @@
+// Backtesting service.
+//
+// Mode A (built-in): replay a dataset through a built-in benchmark strategy
+// and stream progress plus a final metrics report.
+// Mode B (replay session): allocate an isolated endpoint that serves the
+// unified market/trading contract from historical data, so an external
+// strategy runs byte-identically against the past.
+syntax = "proto3";
+
+package longtrader.backtest.v1;
+
+import "google/protobuf/struct.proto";
+
+service BacktestService {
+  rpc Start(StartRequest) returns (stream BacktestEvent);
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  rpc GetReport(GetReportRequest) returns (GetReportResponse);
+  rpc StartReplaySession(StartReplaySessionRequest)
+      returns (StartReplaySessionResponse);
+}
+
+message DatasetRef {
+  string dataset_id = 1; // registered via data.v1
+  string path = 2;       // direct path (advanced); overrides dataset_id
+}
+
+message StartRequest {
+  DatasetRef dataset = 1;
+  string strategy_kind = 2; // e.g. "benchmark_buy_hold"
+  google.protobuf.Struct params = 3;
+  double initial_capital = 4;
+  double fee_bps = 5;
+  double slippage_bps = 6;
+  string from = 7; // optional YYYY-MM-DD filter
+  string to = 8;
+}
+
+message Progress {
+  uint64 ticks_done = 1;
+  double percent = 2;
+  double equity = 3;
+}
+
+message LogLine {
+  string level = 1;
+  string message = 2;
+}
+
+message Fill {
+  string order_id = 1;
+  string symbol = 2;
+  string side = 3; // buy | sell
+  double price = 4;
+  double quantity = 5;
+  int64 timestamp_ms = 6;
+}
+
+message FinalReport {
+  double total_return = 1;
+  double sharpe = 2;
+  double max_drawdown = 3;
+  double win_rate = 4;
+  uint64 trades = 5;
+  string equity_curve_json = 6;
+  string report_path = 7;
+}
+
+message BacktestEvent {
+  string run_id = 10;
+  oneof e {
+    Progress progress = 1;
+    LogLine log = 2;
+    Fill fill = 3;
+    FinalReport report = 4;
+  }
+}
+
+message CancelRequest {
+  string run_id = 1;
+}
+
+message CancelResponse {
+  bool canceled = 1;
+}
+
+message ListRunsRequest {}
+
+message RunSummary {
+  string run_id = 1;
+  string strategy_kind = 2;
+  string dataset_id = 3;
+  double total_return = 4;
+  string started_at = 5;
+}
+
+message ListRunsResponse {
+  repeated RunSummary runs = 1;
+}
+
+message GetReportRequest {
+  string run_id = 1;
+}
+
+message GetReportResponse {
+  FinalReport report = 1;
+}
+
+message StartReplaySessionRequest {
+  DatasetRef dataset = 1;
+  string symbols = 2;
+}
+
+message StartReplaySessionResponse {
+  string session_id = 1;
+  string endpoint = 2;
+  string token = 3;
+}

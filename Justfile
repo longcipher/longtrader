@@ -46,11 +46,26 @@ check:
 
 # Publish all crates to crates.io (dry run)
 publish-check:
-  cargo publish --workspace --dry-run --allow-dirty
+  cargo publish --workspace --dry-run --allow-dirty --registry crates-io
 
-# Publish all crates to crates.io
-publish:
-  cargo publish --workspace
+# Publish all Rust crates to crates.io (in dependency order)
+publish-rs:
+  cargo publish --workspace --registry crates-io
+
+# Build sdist+wheel and upload to PyPI
+publish-py: sdk-generate
+  cd sdks/python && rm -rf dist && \
+    pip install --quiet build twine && \
+    python -m build && \
+    twine upload dist/*
+
+# Build and publish the TypeScript SDK to npm (npmjs.com)
+publish-ts: sdk-generate
+  cd sdks/typescript && npm install && npm run build && \
+    npm publish --access public --registry https://registry.npmjs.org/
+
+# Publish every language package (Rust -> PyPI -> npm)
+publish-all: publish-rs publish-py publish-ts
 
 # Check for Chinese characters
 check-cn:

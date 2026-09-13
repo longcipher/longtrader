@@ -1,0 +1,91 @@
+// Dataset management service backed by the HDS toolchain.
+//
+// Datasets are immutable, content-addressed archives produced by the
+// downloader (currently Binance klines/aggTrades). Each dataset has a
+// manifest (`<id>.json`) stored under the API's `[storage].data_root`.
+//
+// --- §15 ChartDrawing proto placeholder (v1.2, no codegen yet) ---
+// The chart drawing pack is currently exported as JSON via
+// `tradingcharts_common::{export_pack,import_pack}` and `AppState::{export_drawings,import_drawings}`.
+// When cross-service sync is needed, add `proto/longtrader/chart/v1/chart.proto`:
+//
+//   package longtrader.chart.v1;
+//   message Anchor { int64 timestamp = 1; uint64 index = 2; optional double price = 3; float bar_ratio = 4; }
+//   message ChartDrawing { string id = 1; string kind = 2; bytes payload_json = 3; repeated Anchor anchors = 4; bytes style_json = 5; bool locked = 6; bool hidden = 7; string scope = 8; bool behind_chart = 9; int32 z = 10; optional bytes alert_json = 11; }
+//   message ChartDrawingPack { repeated ChartDrawing drawings = 1; string version = 2; }
+//   // RPC: ChartService { rpc SyncDrawings(SyncRequest) returns (SyncResponse); rpc ExportPack(ExportRequest) returns (ExportResponse); }
+//
+// See `docs/drawing-objects-and-chart-ui-redesign.md §15` for persistence semantics.
+// Until the service is needed, JSON remains the canonical format (no `protoc` generation).
+syntax = "proto3";
+
+package longtrader.data.v1;
+
+service DataService {
+  // Download a dataset, streaming per-day progress until completion.
+  rpc Download(DownloadRequest) returns (stream DownloadProgress);
+  rpc ListDatasets(ListDatasetsRequest) returns (ListDatasetsResponse);
+  rpc GetDataset(GetDatasetRequest) returns (GetDatasetResponse);
+  rpc ValidateDataset(ValidateDatasetRequest) returns (ValidateDatasetResponse);
+  rpc DeleteDataset(DeleteDatasetRequest) returns (DeleteDatasetResponse);
+}
+
+message DownloadRequest {
+  string venue = 1;
+  string symbol = 2;
+  string timeframe = 3;
+  string from = 4; // YYYY-MM-DD
+  string to = 5;   // inclusive, YYYY-MM-DD
+}
+
+message DownloadProgress {
+  uint64 rows_done = 1;
+  uint64 bytes_done = 2;
+  string stage = 3; // e.g. "download", "decompress", "manifest"
+  double percent = 4;
+  string dataset_id = 5; // set on the final event
+}
+
+message ListDatasetsRequest {}
+
+message Dataset {
+  string id = 1;
+  string venue = 2;
+  string symbol = 3;
+  string timeframe = 4;
+  string from = 5;
+  string to = 6;
+  uint64 rows = 7;
+  uint64 size_bytes = 8;
+  string path = 9;
+}
+
+message ListDatasetsResponse {
+  repeated Dataset datasets = 1;
+}
+
+message GetDatasetRequest {
+  string dataset_id = 1;
+}
+
+message GetDatasetResponse {
+  Dataset dataset = 1;
+}
+
+message ValidateDatasetRequest {
+  string dataset_id = 1;
+}
+
+message ValidateDatasetResponse {
+  bool valid = 1;
+  uint64 rows = 2;
+  string message = 3;
+}
+
+message DeleteDatasetRequest {
+  string dataset_id = 1;
+}
+
+message DeleteDatasetResponse {
+  bool deleted = 1;
+}

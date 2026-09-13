@@ -5,12 +5,19 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_RUSTC_WRAPPER: ""
 
 jobs:
-  ci:
+  # ---------------------------------------------------------------------------
+  # Rust: format + lint + test + build (mirrors `just ci`)
+  # ---------------------------------------------------------------------------
+  rust:
+    name: Rust (fmt + lint + test + build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -29,3 +36,84 @@ jobs:
           tool: just,cargo-shear,cargo-sort,typos-cli,rumdl,cargo-workspace-inheritance-check
 
       - run: just ci
+
+  # ---------------------------------------------------------------------------
+  # Go: gofmt + go vet + go build
+  # ---------------------------------------------------------------------------
+  go:
+    name: Go (fmt + vet + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l sdks/go)
+          if [ -n "$unformatted" ]; then
+            echo "The following Go files are not gofmt-ed:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: cd sdks/go && go vet ./...
+
+      - name: go build
+        run: cd sdks/go && go build ./...
+
+  # ---------------------------------------------------------------------------
+  # Python: ruff format + ruff lint
+  # ---------------------------------------------------------------------------
+  python:
+    name: Python (fmt + lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: ruff format check
+        run: ruff format --check sdks/python
+
+      - name: ruff lint
+        run: ruff check --select E,F sdks/python
+
+  # ---------------------------------------------------------------------------
+  # TypeScript: prettier format + tsc --noEmit (after stub generation)
+  # ---------------------------------------------------------------------------
+  typescript:
+    name: TypeScript (fmt + lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - uses: bufbuild/buf-setup-action@v1
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Install dependencies
+        run: cd sdks/typescript && npm ci
+
+      - name: Generate Connect stubs
+        run: just sdk-generate
+
+      - name: prettier format check
+        run: cd sdks/typescript && npx prettier --check "src/**/*.ts" "examples/**/*.ts"
+
+      - name: tsc --noEmit
+        run: cd sdks/typescript && npx tsc --noEmit -p tsconfig.json

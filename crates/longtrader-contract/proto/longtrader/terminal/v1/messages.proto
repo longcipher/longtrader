@@ -1,0 +1,289 @@
+syntax = "proto3";
+
+package longtrader.terminal.v1;
+
+// ========== 通用枚举 ==========
+
+enum Timeframe {
+  TIMEFRAME_UNSPECIFIED = 0;
+  TIMEFRAME_S100 = 9;
+  TIMEFRAME_S1 = 10;
+  TIMEFRAME_M1 = 1;
+  TIMEFRAME_M5 = 2;
+  TIMEFRAME_M15 = 3;
+  TIMEFRAME_M30 = 4;
+  TIMEFRAME_H1 = 5;
+  TIMEFRAME_H4 = 6;
+  TIMEFRAME_D1 = 7;
+  TIMEFRAME_W1 = 8;
+  // Tick/Volume/Range/Renko are non-time periods aggregated locally, mapped to M1 on wire.
+  // Reserved for future parameterized variants.
+  reserved 11, 12, 13, 14;
+}
+
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_BUY = 1;
+  SIDE_SELL = 2;
+}
+
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  ORDER_TYPE_MARKET = 1;
+  ORDER_TYPE_LIMIT = 2;
+  ORDER_TYPE_STOP = 3;
+  ORDER_TYPE_STOP_LIMIT = 4;
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_PENDING = 1;
+  ORDER_STATUS_FILLED = 2;
+  ORDER_STATUS_CANCELED = 3;
+}
+
+enum PositionSide {
+  POSITION_SIDE_UNSPECIFIED = 0;
+  POSITION_SIDE_LONG = 1;
+  POSITION_SIDE_SHORT = 2;
+}
+
+enum CloseReason {
+  CLOSE_REASON_UNSPECIFIED = 0;
+  CLOSE_REASON_MANUAL = 1;
+  CLOSE_REASON_TAKE_PROFIT = 2;
+  CLOSE_REASON_STOP_LOSS = 3;
+  CLOSE_REASON_STOP_OUT = 4;
+}
+
+// 流订阅的分类桶，用于服务端分桶广播（慢客户端只影响其所订阅的桶）。
+enum TopicClass {
+  TOPIC_CLASS_UNSPECIFIED = 0;
+  TOPIC_CLASS_MARKET_LITE = 1;   // tick / ticker
+  TOPIC_CLASS_MARKET_HEAVY = 2;  // book / trade
+  TOPIC_CLASS_TRADING = 3;       // position / order / execution / account
+  TOPIC_CLASS_RUNTIME = 4;       // runtime_status
+  TOPIC_CLASS_FUNDING = 5;       // funding_rate / basis（低频）
+  TOPIC_CLASS_DERIVATIVES = 6;   // liquidation / open_interest（清算峰值）
+}
+
+// 主动成交方向（足迹图正确性的根基；未知时前端降级为双列合计）。
+enum Aggressor {
+  AGGRESSOR_UNSPECIFIED = 0;
+  AGGRESSOR_BUY = 1;
+  AGGRESSOR_SELL = 2;
+  AGGRESSOR_UNKNOWN = 3;
+}
+
+// ========== 通用消息 ==========
+
+// 高精度十进制，字符串承载（避免浮点精度问题）。
+message Decimal {
+  string value = 1;
+}
+
+message Symbol {
+  string name = 1;
+  string display_name = 2;
+  string contract_size = 3;   // 字符串小数
+  string tick_size = 4;       // 字符串小数
+  string base_asset = 5;
+  string quote_asset = 6;
+}
+
+message Candle {
+  int64 timestamp_ms = 1;
+  string open = 2;
+  string high = 3;
+  string low = 4;
+  string close = 5;
+  string volume = 6;
+}
+
+message Tick {
+  string symbol = 1;
+  string price = 2;
+  string volume = 3;
+  int64 timestamp_ms = 4;
+  string bid = 5;
+  string ask = 6;
+}
+
+message Ticker {
+  string symbol = 1;
+  string last = 2;
+  string bid = 3;
+  string ask = 4;
+  string high = 5;
+  string low = 6;
+  string volume_24h = 7;
+  int64 timestamp_ms = 8;
+}
+
+message PriceLevel {
+  string price = 1;
+  string amount = 2;
+}
+
+message Book {
+  string symbol = 1;
+  repeated PriceLevel bids = 2;
+  repeated PriceLevel asks = 3;
+  int64 timestamp_ms = 4;
+  bool snapshot = 5;          // true = 全量快照；false = 增量
+}
+
+message Trade {
+  string id = 1;
+  string symbol = 2;
+  Side side = 3;
+  string price = 4;
+  string amount = 5;
+  int64 timestamp_ms = 6;
+  bool maker = 7;
+  Aggressor aggressor = 8;   // 主动方向：Buy/Sell/Unknown（Binance aggTrade m 字段映射，见 datasource 层）
+}
+
+// 爆仓事件（跨所字段归一后的统一形态）。
+message Liquidation {
+  string exchange = 1;
+  string symbol = 2;
+  Side side = 3;               // 爆仓方向
+  string amount = 4;           // 名义价值/数量（decimal）
+  string price = 5;            // 爆仓价格（decimal）
+  int64 timestamp_ms = 6;
+}
+
+// 订单簿增量（做市网关私有流 / 深度增量推送）。
+message OrderbookDelta {
+  string symbol = 1;
+  int64 seq = 2;               // 单调序号；seq 缺口 = 数据不连续 → 触发重同步
+  bool is_snapshot = 3;        // true=全量快照（重建起点）；false=增量（qty=0 表示删除档）
+  repeated PriceLevel bids = 4;
+  repeated PriceLevel asks = 5;
+}
+
+// 做市商私单投影：网关推送的队列位置为权威（优先于本地估算）。
+message MyOrderPosition {
+  string order_id = 1;
+  string symbol = 2;
+  Side side = 3;
+  string price = 4;            // decimal
+  string quantity = 5;         // decimal
+  uint32 queue_position = 6;   // 排队位置（外部权威）
+  uint32 total_in_queue = 7;
+  int64 updated_at_ms = 8;
+}
+
+message FundingRate {
+  string symbol = 1;
+  string rate = 2;
+  int64 next_funding_ts_ms = 3;
+  string mark_price = 4;
+}
+
+message Order {
+  string id = 1;
+  string symbol = 2;
+  Side side = 3;
+  OrderType order_type = 4;
+  string quantity = 5;
+  optional string price = 6;
+  optional string take_profit = 7;
+  optional string stop_loss = 8;
+  string filled_quantity = 9;
+  optional string avg_fill_price = 10;
+  OrderStatus status = 11;
+  int64 created_at_ms = 12;
+  int64 updated_at_ms = 13;
+}
+
+message Position {
+  string id = 1;
+  string order_id = 2;
+  string symbol = 3;
+  PositionSide side = 4;
+  string quantity = 5;
+  string entry_price = 6;
+  string current_price = 7;
+  string unrealized_pnl = 8;
+  optional string take_profit = 9;
+  optional string stop_loss = 10;
+  int64 opened_at_ms = 11;
+}
+
+message ClosedPosition {
+  string id = 1;
+  string order_id = 2;
+  string symbol = 3;
+  PositionSide side = 4;
+  string quantity = 5;
+  string entry_price = 6;
+  string exit_price = 7;
+  string realized_pnl = 8;
+  int64 opened_at_ms = 9;
+  int64 closed_at_ms = 10;
+  CloseReason close_reason = 11;
+}
+
+message Account {
+  string balance = 1;
+  string equity = 2;
+  string margin_used = 3;
+  string free_margin = 4;
+  string margin_frozen = 5;
+}
+
+message ExecutionReport {
+  string order_id = 1;
+  string symbol = 2;
+  Side side = 3;
+  OrderStatus status = 4;
+  string filled_quantity = 5;
+  string price = 6;
+  int64 timestamp_ms = 7;
+}
+
+message RuntimeStatus {
+  string venue = 1;
+  bool connected = 2;
+  uint64 reconnect_count = 3;
+  uint64 lagged_count = 4;
+  double place_order_p99_ms = 5;
+  double msg_per_sec = 6;
+  int64 uptime_secs = 7;
+}
+
+// 流消息统一封装：带类型与单调序号。
+message UpdateEnvelope {
+  uint64 seq = 1;
+  TopicClass topic_class = 2;
+  oneof payload {
+    Tick tick = 10;
+    Book book = 11;
+    Ticker ticker = 12;
+    Trade trade = 13;
+    FundingRate funding_rate = 14;
+    Liquidation liquidation = 15;
+    OrderbookDelta book_delta = 16;
+    MyOrderPosition my_order = 17;
+    Position position = 20;
+    ClosedPosition position_closed = 21;
+    Order order = 22;
+    ExecutionReport execution = 23;
+    Account account = 24;
+    RuntimeStatus runtime_status = 30;
+  }
+}
+
+message StrategyEvent {
+  string strategy_id = 1;
+  string status = 2;          // RUNNING / PAUSED / STOPPED / ERROR
+  oneof payload {
+    ExecutionReport execution = 10;
+    Account account = 11;
+    Position position = 12;
+    Order order = 13;
+  }
+  string message = 20;
+}

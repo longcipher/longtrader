@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package longtrader.ops.v1;
+
+import "google/protobuf/struct.proto";
+
+// Dynamic venue-operations surface.
+//
+// Every venue exposes a set of exchange-specific operations (transfers,
+// margin, earn, sub-accounts, ...) that do not fit the universal trading
+// contract. Instead of one RPC per quirk, each venue publishes a
+// self-describing registry: `ListVenueOps` discovers what is available,
+// `DescribeVenueOp` returns the full parameter schema, and `InvokeVenueOp`
+// executes an operation with dynamically-typed parameters. This is the
+// Connect-era equivalent of protocol reflection for venue quirks.
+service VenueOpService {
+  // Discover the operations a venue supports.
+  rpc ListVenueOps(ListVenueOpsRequest) returns (ListVenueOpsResponse);
+  // Full schema of one operation: parameter types, requirements, examples.
+  rpc DescribeVenueOp(DescribeVenueOpRequest) returns (DescribeVenueOpResponse);
+  // Execute an operation with dynamically-typed parameters.
+  rpc InvokeVenueOp(InvokeVenueOpRequest) returns (InvokeVenueOpResponse);
+}
+
+message ListVenueOpsRequest {
+  string exchange_id = 1;
+}
+
+message ListVenueOpsResponse {
+  repeated OpDescriptor ops = 1;
+}
+
+message DescribeVenueOpRequest {
+  string exchange_id = 1;
+  string op = 2;
+}
+
+message DescribeVenueOpResponse {
+  OpDescriptor op = 1;
+}
+
+message InvokeVenueOpRequest {
+  string exchange_id = 1;
+  string op = 2;
+  // Dynamically-typed parameters; validated against the descriptor server-side.
+  google.protobuf.Struct params = 3;
+}
+
+message InvokeVenueOpResponse {
+  google.protobuf.Struct result = 1;
+}
+
+message OpDescriptor {
+  string name = 1;
+  string category = 2;
+  string summary = 3;
+  // True when the operation moves funds or changes account state.
+  bool mutating = 4;
+  repeated ParamDescriptor params = 5;
+  repeated Example examples = 6;
+}
+
+message ParamDescriptor {
+  string name = 1;
+  ParamType type = 2;
+  bool required = 3;
+  string default = 4;
+  string doc = 5;
+  // Populated when type == ENUM.
+  repeated string enum_values = 6;
+}
+
+enum ParamType {
+  PARAM_TYPE_UNSPECIFIED = 0;
+  PARAM_TYPE_STRING = 1;
+  PARAM_TYPE_INT64 = 2;
+  PARAM_TYPE_DECIMAL = 3;
+  PARAM_TYPE_BOOL = 4;
+  PARAM_TYPE_ENUM = 5;
+  PARAM_TYPE_LIST = 6;
+  PARAM_TYPE_MAP = 7;
+}
+
+message Example {
+  string summary = 1;
+  google.protobuf.Struct params = 2;
+}
