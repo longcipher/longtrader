@@ -225,7 +225,7 @@ fn order_request(
                 trading::OrderSide::Sell
             }),
             amount: buffa::MessageField::some(decimal_to_common(qty)),
-            price: price.map(decimal_to_common).map(buffa::MessageField::some).unwrap_or_default(),
+            price: price.map(decimal_to_common).map_or_default(buffa::MessageField::some),
             trigger_price: buffa::MessageField::none(),
             time_in_force: buffa::EnumValue::Known(trading::TimeInForce::Gtc),
             post_only: false,

@@ -660,8 +660,7 @@ impl WalletGateway for MockAdapter {
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or_default())
-        .unwrap_or_default()
+        .map_or_default(|d| i64::try_from(d.as_millis()).unwrap_or_default())
 }
 
 impl MockAdapter {

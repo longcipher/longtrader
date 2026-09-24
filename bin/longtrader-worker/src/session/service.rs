@@ -43,8 +43,7 @@ fn now_ts() -> buffa_types::google::protobuf::Timestamp {
 fn now_ns() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_nanos()).unwrap_or_default())
-        .unwrap_or_default()
+        .map_or_default(|d| i64::try_from(d.as_nanos()).unwrap_or_default())
 }
 
 impl From<ManagerError> for ConnectError {
@@ -205,8 +204,8 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
             state: buffa::EnumValue::Known(
                 handle.state().map_or(worker::SessionState::Attached, SessionState::to_proto),
             ),
-            strategy_id: info.as_ref().map(|i| i.id.clone()).unwrap_or_default(),
-            name: info.as_ref().map(|i| i.name.clone()).unwrap_or_default(),
+            strategy_id: info.as_ref().map_or_default(|i| i.id.clone()),
+            name: info.as_ref().map_or_default(|i| i.name.clone()),
             started_at: info.as_ref().map_or(buffa::MessageField::none(), |i| {
                 buffa::MessageField::some(buffa_types::google::protobuf::Timestamp {
                     seconds: i.started_at_ms.div_euclid(1000),

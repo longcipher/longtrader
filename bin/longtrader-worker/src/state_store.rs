@@ -36,7 +36,7 @@ impl StateStore {
         // `state.json` exist.
         let tmp = {
             let file_name =
-                self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                self.path.file_name().map_or_default(|n| n.to_string_lossy().to_string());
             self.path.with_file_name(format!("{file_name}.tmp"))
         };
         std::fs::write(&tmp, &json).wrap_err_with(|| format!("write {}", tmp.display()))?;

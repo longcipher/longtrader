@@ -113,8 +113,18 @@ mod tests {
 
     #[test]
     fn lookup_by_id_round_trips() {
-        assert_eq!(descriptor(ids::GRID_MAKER).unwrap().id, ids::GRID_MAKER);
-        assert_eq!(descriptor(ids::CMDNC_ARB).unwrap().id, ids::CMDNC_ARB);
+        assert_eq!(
+            descriptor(ids::GRID_MAKER)
+                .expect("builtin descriptor GRID_MAKER must exist")
+                .id,
+            ids::GRID_MAKER
+        );
+        assert_eq!(
+            descriptor(ids::CMDNC_ARB)
+                .expect("builtin descriptor CMDNC_ARB must exist")
+                .id,
+            ids::CMDNC_ARB
+        );
         assert!(descriptor("nope").is_none());
     }
 }

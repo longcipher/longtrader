@@ -40,8 +40,7 @@ fn ts_from_ms(ms: i64) -> buffa_types::google::protobuf::Timestamp {
 fn ms_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or_default())
-        .unwrap_or_default()
+        .map_or_default(|d| i64::try_from(d.as_millis()).unwrap_or_default())
 }
 
 /// Minimal Connect client over `hpx` – mirrors the former `TerminalClient`
