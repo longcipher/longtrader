@@ -1,0 +1,192 @@
+syntax = "proto3";
+
+package longtrader.terminal.v1;
+
+import "longtrader/terminal/v1/strategy.proto";
+
+// 可空参数值（proto3 repeated 无 null，用显式容器表达）。
+message ParamValue {
+  optional double value = 1;
+}
+
+// ========== 组合单元（Hedge Unit）契约 ==========
+//
+// 组合单元是策略执行的核算单元：两腿（long/short）跨所配对，策略
+// 表达式输出目标名义，执行引擎维持两腿仓位在这个值上。UI 的"策略
+// 详情页"按组合单元组织（每单元一个页面：配置 + 运行时追踪 + 套利）。
+
+// 组合单元的一条腿。
+message HedgeLeg {
+  // 交易所 id（venue）。
+  string venue = 1;
+  // 交易所原生品种符号。
+  string symbol = 2;
+  // 腿方向：LONG / SHORT。
+  string side = 3;
+}
+
+// 一条调仓流水（策略调仓或价格波动调仓）。
+message Adjustment {
+  string id = 1;
+  // 毫秒时间戳。
+  int64 timestamp_ms = 2;
+  // 调仓种类：STRATEGY（策略调仓）/ DRIFT（价格波动调仓）/ MANUAL（手动）。
+  string kind = 3;
+  // 审计文本：表达式代入当拍实际值。
+  string expression = 4;
+  // 目标名义（quote 金额）。
+  double target_notional = 5;
+  // 目标数量（多腿单位，带符号）。
+  double target_quantity = 6;
+  // 调仓前名义（可缺席）。
+  optional double from_notional = 7;
+}
+
+// 套利快照：一条腿一对的实时价差/资金费率读数，供"套利显示区"渲染。
+message ArbitrageSnapshot {
+  // 跨所基差（spot vs perp 价格差，均值归一比率）。
+  double basis = 1;
+  // 资金费率差（空腿费率 - 多腿费率，比率）。
+  double funding_rate_diff = 2;
+  // 开仓动作侧可成交价差（多腿吃卖一、空腿吃买一）。
+  double open_spread = 3;
+  // 平仓动作侧可成交价差（多腿吃买一、空腿吃卖一）。
+  double close_spread = 4;
+  // 开仓阈值线（策略自定义，价差上穿建仓）。
+  double open_line = 5;
+  // 平仓阈值线（策略自定义，价差跌破清仓）。
+  double close_line = 6;
+  // 当前两腿名义合计（quote 金额）。
+  double current_notional = 7;
+  // 策略目标名义（quote 金额）。
+  double target_notional = 8;
+  // 净盈亏（价差盈亏 + 资金费净收 - 手续费，quote）。
+  double net_pnl = 9;
+  // 已实现盈亏（quote）。
+  double realized_pnl = 10;
+  // 资金费累计净收（quote）。
+  double funding_accrued = 11;
+  // 手续费累计（quote）。
+  double fees_paid = 12;
+  // 多腿数量偏差（(实际-目标)/目标）。
+  double long_deviation = 13;
+  // 空腿数量偏差。
+  double short_deviation = 14;
+  // 多腿爆仓接近度 [0,1]。
+  double long_liq_risk = 15;
+  // 空腿爆仓接近度 [0,1]。
+  double short_liq_risk = 16;
+  // 快照时刻（毫秒）。
+  int64 timestamp_ms = 17;
+}
+
+// 组合单元状态。
+message HedgeUnit {
+  string id = 1;
+  // 展示名。
+  string name = 2;
+  HedgeLeg long_leg = 3;
+  HedgeLeg short_leg = 4;
+  // 空腿汇率：空腿价格族 × scale 折到多腿单位。
+  double scale = 5;
+  // 绑定策略 id（见 StrategyDescriptor）。
+  string strategy_id = 6;
+  // 参数值，与 descriptor 的 params 槽位逐位对齐；null = 该槽未填。
+  repeated ParamValue params = 7;
+  // 状态：RUNNING / REDUCE_ONLY / DISABLED / CLOSED。
+  string status = 8;
+  // 目标名义（quote 金额）。
+  double target_notional = 9;
+  // 目标数量（多腿单位，带符号）。
+  double target_quantity = 10;
+  // 多腿实际持仓数量。
+  double long_quantity = 11;
+  // 空腿实际持仓数量（已折多腿单位，带符号为负）。
+  double short_quantity = 12;
+  // 最近调仓流水（按时间降序，最多保留最近 50 条）。
+  repeated Adjustment adjustments = 13;
+  // 最新套利快照（可缺席）。
+  optional ArbitrageSnapshot arbitrage = 14;
+  // 开仓时刻（毫秒）。
+  int64 opened_at_ms = 15;
+  // 最近更新时间（毫秒）。
+  int64 updated_at_ms = 16;
+}
+
+// 组合单元实时事件（流）。
+message HedgeUnitEvent {
+  oneof payload {
+    // 单元整体状态更新（含目标/实际仓位、状态、最新套利快照）。
+    HedgeUnit unit = 1;
+    // 新增一条调仓流水。
+    Adjustment adjustment = 2;
+    // 套利快照更新（高频，独立于单元低频状态）。
+    ArbitrageSnapshot arbitrage = 3;
+  }
+}
+
+// ========== 组合单元服务 ==========
+
+message ListHedgeUnitsRequest {
+  // 按名称 / 腿符号搜索（不分大小写子串），空串即不筛。
+  string search = 1;
+  // 状态白名单（RUNNING / REDUCE_ONLY / DISABLED / CLOSED），空数组即不筛。
+  repeated string statuses = 2;
+  // 策略 id 白名单，空数组即不筛。
+  repeated string strategy_ids = 3;
+}
+
+message ListHedgeUnitsResponse {
+  repeated HedgeUnit units = 1;
+}
+
+message GetHedgeUnitRequest {
+  string id = 1;
+}
+
+message CreateHedgeUnitRequest {
+  string name = 1;
+  HedgeLeg long_leg = 2;
+  HedgeLeg short_leg = 3;
+  double scale = 4;
+  string strategy_id = 5;
+  repeated ParamValue params = 6;
+  // 初始状态：RUNNING / REDUCE_ONLY / DISABLED。
+  string status = 7;
+}
+
+message UpdateHedgeUnitRequest {
+  string id = 1;
+  string name = 2;
+  double scale = 3;
+  string strategy_id = 4;
+  repeated ParamValue params = 5;
+  string status = 6;
+}
+
+message DeleteHedgeUnitRequest {
+  string id = 1;
+}
+
+message DeleteHedgeUnitResponse {}
+
+message SetHedgeUnitStatusRequest {
+  string id = 1;
+  string status = 2;  // RUNNING / REDUCE_ONLY / DISABLED
+}
+
+message StreamHedgeUnitEventsRequest {
+  // 订阅的组合单元 id；空 = 全部。
+  repeated string hedge_unit_ids = 1;
+}
+
+service HedgeUnitService {
+  rpc ListHedgeUnits(ListHedgeUnitsRequest) returns (ListHedgeUnitsResponse);
+  rpc GetHedgeUnit(GetHedgeUnitRequest) returns (HedgeUnit);
+  rpc CreateHedgeUnit(CreateHedgeUnitRequest) returns (HedgeUnit);
+  rpc UpdateHedgeUnit(UpdateHedgeUnitRequest) returns (HedgeUnit);
+  rpc DeleteHedgeUnit(DeleteHedgeUnitRequest) returns (DeleteHedgeUnitResponse);
+  rpc SetHedgeUnitStatus(SetHedgeUnitStatusRequest) returns (HedgeUnit);
+  // 组合单元实时事件流（状态 / 调仓 / 套利快照）。
+  rpc StreamHedgeUnitEvents(StreamHedgeUnitEventsRequest) returns (stream HedgeUnitEvent);
+}

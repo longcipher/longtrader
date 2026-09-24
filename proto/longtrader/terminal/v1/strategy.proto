@@ -15,6 +15,9 @@ service StrategyService {
   rpc GetStrategyStatus(GetStrategyStatusRequest) returns (StrategyStatus);
   rpc SubmitAction(SubmitActionRequest) returns (ActionReceipt);
   rpc StreamStrategyEvents(StreamStrategyEventsRequest) returns (stream StrategyEvent);
+  // 策略描述目录：返回可配置的策略模板（内置/开源/自定义），UI 据此渲染
+  // 参数表单（schema 驱动），终端不必为每个策略写死界面。
+  rpc ListStrategyDescriptors(ListStrategyDescriptorsRequest) returns (ListStrategyDescriptorsResponse);
 }
 
 message StrategyStatus {
@@ -76,4 +79,52 @@ message ActionReceipt {
 
 message StreamStrategyEventsRequest {
   repeated string strategy_ids = 1;   // 空 = 全部
+}
+
+
+// ========== 策略描述目录（schema 驱动配置体验） ==========
+
+// 单个参数槽位的声明。UI 据此渲染输入控件：step 决定滑块粒度与展示
+// 小数位，min/max 给出值域，default 作为新建表单的预填值。
+message ParamSlot {
+  // 槽位名称（表单标签）。
+  string label = 1;
+  // 量纲：percent / usd / decimal / duration / timestamp。
+  string dimension = 2;
+  // 值域下界（可缺席）。
+  optional double min = 3;
+  // 值域上界（可缺席）。
+  optional double max = 4;
+  // 输入网格步长（可缺席，缺省按量纲取默认档）。
+  optional double step = 5;
+  // 新建表单的预填值（可缺席）。
+  optional double default = 6;
+}
+
+// 一条可配置的策略模板。内置策略（builtin=true）只许调参数、
+// 结构禁改；自定义策略由用户自行创建。
+message StrategyDescriptor {
+  // 策略 id，如 "grid_maker" / "cmdnc_arb" / 用户自定义 id。
+  string id = 1;
+  // 展示名。
+  string name = 2;
+  // 一句话说明（这条策略在做什么、怎么调参）。
+  string note = 3;
+  // 是否为内置策略（内置不可删除，结构禁改）。
+  bool builtin = 4;
+  // 参数槽位声明（下标即策略参数数组的序号）。
+  repeated ParamSlot params = 5;
+  // 策略类型：hedge（两腿组合对冲）/ maker（做市）/ arb（套利）。
+  string kind = 6;
+}
+
+message ListStrategyDescriptorsRequest {
+  // 按 id / 名称 / 类型搜索（不分大小写子串），空串即不筛。
+  string search = 1;
+  // 是否只取内置策略。
+  optional bool builtin_only = 2;
+}
+
+message ListStrategyDescriptorsResponse {
+  repeated StrategyDescriptor strategies = 1;
 }

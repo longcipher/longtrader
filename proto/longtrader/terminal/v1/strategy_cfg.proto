@@ -1,0 +1,255 @@
+syntax = "proto3";
+
+package longtrader.terminal.v1;
+
+import "longtrader/terminal/v1/strategy.proto";
+import "longtrader/terminal/v1/hedge.proto";
+
+// ========== 指标（Metric）配置 ==========
+//
+// 指标是可计算量（跨所基差、资金费差、CVD …）。策略表达式与阈值都引用
+// 指标 id。QQQ 的"指标 CRUD + 量纲"对应此契约。
+message Metric {
+  // 指标 id，如 "basis" / "funding_rate_diff"。
+  string id = 1;
+  // 展示名。
+  string name = 2;
+  // 量纲：percent / usd / decimal / duration / timestamp。
+  string dimension = 3;
+  // 计算表达式（可引用其他指标 id / 价格源）。
+  string expression = 4;
+  // 说明。
+  string note = 5;
+}
+
+message ListMetricsRequest {
+  // 按 id / 名称搜索（不分大小写子串），空串即不筛。
+  string search = 1;
+}
+message ListMetricsResponse {
+  repeated Metric metrics = 1;
+}
+message UpsertMetricRequest {
+  // id 为空 = 新建；否则覆盖。
+  Metric metric = 1;
+}
+message DeleteMetricRequest {
+  string id = 1;
+}
+message DeleteMetricResponse {}
+
+// ========== 阈值（Threshold）配置 ==========
+//
+// 阈值对指标做比较，命中可触发通知。UI 的"机会页"用它过滤与高亮机会，
+// 阈值 CRUD + 通知开关对应 QQQ 的"阈值管理"。
+message Threshold {
+  string id = 1;
+  string name = 2;
+  // 被比较的指标 id。
+  string metric_id = 3;
+  // 比较符：GT / GTE / LT / LTE / EQ。
+  string operator = 4;
+  // 阈值线。
+  double value = 5;
+  // 命中时是否通知。
+  bool notify_enabled = 6;
+  // 通知通道 id：lark / bark / telegram。
+  repeated string notify_channels = 7;
+  string note = 8;
+}
+
+message ListThresholdsRequest {
+  string search = 1;
+}
+message ListThresholdsResponse {
+  repeated Threshold thresholds = 1;
+}
+message UpsertThresholdRequest {
+  Threshold threshold = 1;
+}
+message DeleteThresholdRequest {
+  string id = 1;
+}
+message DeleteThresholdResponse {}
+
+// ========== 自定义策略模板 CRUD ==========
+//
+// 与内置 `StrategyDescriptor` 同构（参数槽位 schema 驱动表单），但由用户
+// 自行创建 / 编辑 / 删除；内置策略禁改。
+message StrategyTemplate {
+  string id = 1;
+  string name = 2;
+  // 策略表达式（可引用指标 id 与参数槽位名）。
+  string expression = 3;
+  repeated ParamSlot params = 4;
+  string kind = 5;
+  string note = 6;
+}
+
+message ListStrategyTemplatesRequest {
+  string search = 1;
+}
+message ListStrategyTemplatesResponse {
+  repeated StrategyTemplate templates = 1;
+}
+message UpsertStrategyTemplateRequest {
+  StrategyTemplate template = 1;
+}
+message DeleteStrategyTemplateRequest {
+  string id = 1;
+}
+message DeleteStrategyTemplateResponse {}
+
+// ========== 表达式试算 ==========
+//
+// 配置体验的关键一环：保存前先在编辑器里代入当拍价格 / 参数，看到结果。
+message EvaluateExpressionRequest {
+  // 策略表达式（如 "basis * 100" / "open_spread - open_line"）。
+  string expression = 1;
+  // 多腿价格（quote；可缺席，缺省 0）。
+  optional double long_price = 2;
+  // 空腿价格（quote；可缺席，缺省 0）。
+  optional double short_price = 3;
+  // 空腿汇率（空腿价格族 × scale 折到多腿单位）。
+  double scale = 4;
+  // 参数槽位值（按序号对齐）。
+  repeated ParamValue params = 5;
+}
+message EvaluateExpressionResponse {
+  // 试算结果。
+  double result = 1;
+  // 代入后的可读表达式（审计文本）。
+  string evaluated_expression = 2;
+}
+
+// ========== 通知中心 ==========
+//
+// 通道级配置 + 测试发送 + 历史记录（对应 QQQ 通知中心：lark / bark /
+// telegram + 冷却 + 测试）。
+message NotificationChannel {
+  // 通道 id：lark / bark / telegram。
+  string id = 1;
+  string name = 2;
+  bool enabled = 3;
+  // 通道配置（webhook / token …），按通道约定。
+  string config_json = 4;
+}
+message ListNotificationChannelsRequest {}
+message ListNotificationChannelsResponse {
+  repeated NotificationChannel channels = 1;
+}
+message UpsertNotificationChannelRequest {
+  NotificationChannel channel = 1;
+}
+message TestNotificationRequest {
+  string channel = 1;
+}
+message TestNotificationResponse {
+  bool ok = 1;
+  string message = 2;
+}
+message NotificationRecord {
+  string id = 1;
+  int64 timestamp_ms = 2;
+  string title = 3;
+  string body = 4;
+  string channel = 5;
+  // SENT / FAILED。
+  string status = 6;
+}
+message ListNotificationsRequest {
+  // 最多返回条数（缺省 100）。
+  int64 limit = 1;
+}
+message ListNotificationsResponse {
+  repeated NotificationRecord records = 1;
+}
+
+// ========== 记录（episode）==========
+//
+// 一轮开 → 平 的完整核算：价差盈亏 + 资金费净收 − 手续费，含逐笔成交
+// 明细（对应 QQQ 的"记录 episode"）。
+message EpisodeFill {
+  int64 timestamp_ms = 1;
+  double price = 2;
+  double quantity = 3;
+  double fee = 4;
+}
+message Episode {
+  string id = 1;
+  string hedge_unit_id = 2;
+  int64 opened_at_ms = 3;
+  // 0 = 未平仓。
+  int64 closed_at_ms = 4;
+  // 价差盈亏（quote）。
+  double spread_pnl = 5;
+  // 资金费净收（quote）。
+  double funding_accrued = 6;
+  // 手续费累计（quote）。
+  double fees_paid = 7;
+  // 净盈亏 = 价差盈亏 + 资金费净收 − 手续费。
+  double net_pnl = 8;
+  // 多腿逐笔成交。
+  repeated EpisodeFill long_fills = 9;
+  // 空腿逐笔成交。
+  repeated EpisodeFill short_fills = 10;
+  // OPEN / CLOSED。
+  string status = 11;
+}
+message ListEpisodesRequest {
+  string hedge_unit_id = 1;
+  int64 limit = 2;
+}
+message ListEpisodesResponse {
+  repeated Episode episodes = 1;
+}
+
+// ========== 会话 / Token（配对码 + 二维码）==========
+//
+// 移动端 / 远端 Web UI 通过配对码 + 二维码与终端会话配对（对应 QQQ 的
+// "会话 / Token"页）。
+message SessionInfo {
+  string session_id = 1;
+  // 配对码（短码，人工输入）。
+  string pairing_code = 2;
+  // 二维码载荷（URL / token）。
+  string qr_payload = 3;
+  int64 expires_at_ms = 4;
+  repeated string devices = 5;
+}
+message GetSessionRequest {}
+message GetSessionResponse {
+  SessionInfo session = 1;
+}
+message RotateSessionRequest {}
+message RotateSessionResponse {
+  SessionInfo session = 1;
+}
+
+// ========== 服务 ==========
+service StrategyConfigService {
+  // 指标 CRUD。
+  rpc ListMetrics(ListMetricsRequest) returns (ListMetricsResponse);
+  rpc UpsertMetric(UpsertMetricRequest) returns (Metric);
+  rpc DeleteMetric(DeleteMetricRequest) returns (DeleteMetricResponse);
+  // 阈值 CRUD。
+  rpc ListThresholds(ListThresholdsRequest) returns (ListThresholdsResponse);
+  rpc UpsertThreshold(UpsertThresholdRequest) returns (Threshold);
+  rpc DeleteThreshold(DeleteThresholdRequest) returns (DeleteThresholdResponse);
+  // 自定义策略模板 CRUD。
+  rpc ListStrategyTemplates(ListStrategyTemplatesRequest) returns (ListStrategyTemplatesResponse);
+  rpc UpsertStrategyTemplate(UpsertStrategyTemplateRequest) returns (StrategyTemplate);
+  rpc DeleteStrategyTemplate(DeleteStrategyTemplateRequest) returns (DeleteStrategyTemplateResponse);
+  // 表达式试算。
+  rpc EvaluateExpression(EvaluateExpressionRequest) returns (EvaluateExpressionResponse);
+  // 通知通道与记录。
+  rpc ListNotificationChannels(ListNotificationChannelsRequest) returns (ListNotificationChannelsResponse);
+  rpc UpsertNotificationChannel(UpsertNotificationChannelRequest) returns (NotificationChannel);
+  rpc TestNotification(TestNotificationRequest) returns (TestNotificationResponse);
+  rpc ListNotifications(ListNotificationsRequest) returns (ListNotificationsResponse);
+  // 记录（episode）。
+  rpc ListEpisodes(ListEpisodesRequest) returns (ListEpisodesResponse);
+  // 会话 / Token。
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc RotateSession(RotateSessionRequest) returns (RotateSessionResponse);
+}

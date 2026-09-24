@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package longtrader.terminal.v1;
+
+import "longtrader/terminal/v1/hedge.proto";
+
+// ========== 机会（Opportunity）==========
+//
+// 跨所同标的配对（两腿组合），带实时价差 / 资金费差读数与指标值，UI 的
+// "机会页"据此排序、过滤与高亮（对应 QQQ 机会页：跨所配对同标的、指标
+// 排序 + 阈值过滤）。
+message Opportunity {
+  string id = 1;
+  // 同标的（underlying）。
+  string underlying = 2;
+  HedgeLeg long_leg = 3;
+  HedgeLeg short_leg = 4;
+  // 空腿汇率。
+  double scale = 5;
+  // 跨所基差（比率）。
+  double basis = 6;
+  // 资金费率差（空腿费率 - 多腿费率，比率）。
+  double funding_rate_diff = 7;
+  // 开仓动作侧可成交价差。
+  double open_spread = 8;
+  // 平仓动作侧可成交价差。
+  double close_spread = 9;
+  // 指标读数（指标 id → 值），用于排序与展示。
+  repeated MetricValue metrics = 10;
+  // 命中的阈值 id（用于高亮）。
+  repeated string hit_thresholds = 11;
+  // 当前名义合计（0 = 未开仓）。
+  double current_notional = 12;
+  int64 updated_at_ms = 13;
+}
+
+// 单个指标读数（指标 id → 值）。repeated 而非 map，避免不同 hasher 特征
+// 在生成类型上造成跨 crate 的 HashMap 类型不匹配。
+message MetricValue {
+  string id = 1;
+  double value = 2;
+}
+
+message ListOpportunitiesRequest {
+  // 按 underlying / 腿符号搜索（不分大小写子串）。
+  string search = 1;
+  // 排序字段：basis / funding_rate_diff / open_spread / close_spread。
+  string sort_by = 2;
+  // 排序方向：asc / desc。
+  string sort_dir = 3;
+  // 只保留命中这些阈值的机会。
+  repeated string threshold_ids = 4;
+  // 只保留未开仓的机会。
+  bool only_new = 5;
+}
+
+message ListOpportunitiesResponse {
+  repeated Opportunity opportunities = 1;
+}
+
+service OpportunityService {
+  rpc ListOpportunities(ListOpportunitiesRequest) returns (ListOpportunitiesResponse);
+}
