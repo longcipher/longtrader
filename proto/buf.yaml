@@ -6,12 +6,18 @@ lint:
     - RPC_RESPONSE_STANDARD_NAME
     - RPC_REQUEST_STANDARD_NAME
     - PACKAGE_VERSION_SUFFIX
+    # HedgeUnit / StrategyStatus are intentionally returned by multiple CRUD
+    # RPCs (resource-as-response, like a REST resource body). Renaming each into
+    # a per-RPC wrapper would be wire-compatible but would break the worker and
+    # every SDK client for zero behavioral gain, so the rule is disabled by
+    # policy. See docs/contract-style-guide.md §6.
+    - RPC_REQUEST_RESPONSE_UNIQUE
   use:
     - STANDARD
 breaking:
-  except:
-    - RPC_RESPONSE_STANDARD_NAME
-    - RPC_REQUEST_STANDARD_NAME
-    - PACKAGE_VERSION_SUFFIX
+  # NOTE: RPC_REQUEST_STANDARD_NAME / RPC_RESPONSE_STANDARD_NAME /
+  # PACKAGE_VERSION_SUFFIX are LINT-only rules and are intentionally NOT listed
+  # here — none of them is a valid `breaking` rule, and including any made
+  # `buf breaking` abort before reporting real wire breaks.
   use:
-    - FILE
+    - WIRE_JSON

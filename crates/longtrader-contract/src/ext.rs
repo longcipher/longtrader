@@ -37,12 +37,9 @@ pub enum DecimalConvertError {
 pub fn decimal_to_common(value: Decimal) -> common::Decimal {
     let mantissa = value.mantissa();
     if let Ok(unscaled) = i64::try_from(mantissa) {
-        common::Decimal {
-            unscaled,
-            scale: i32::try_from(value.scale()).unwrap_or_default(),
-            raw_str: String::new(),
-            ..Default::default()
-        }
+        // Decimal::scale() <= 28 always fits i32; explicit expect over silent zero.
+        let scale = i32::try_from(value.scale()).expect("decimal scale fits i32");
+        common::Decimal { unscaled, scale, raw_str: String::new(), ..Default::default() }
     } else {
         common::Decimal { unscaled: 0, scale: 0, raw_str: value.to_string(), ..Default::default() }
     }

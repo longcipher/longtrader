@@ -1,39 +1,49 @@
-> **English** | [中文](README.zh.md)
+# boll_grid
 
-# boll_grid — Bollinger Band Grid
+Polls candles, computes Bollinger bands over a close-price window, and — when the
+latest close sits inside sufficiently wide bands — cancels the previous ladder and
+re-quotes `grid_num` buy limits below and `grid_num` sell limits above the close.
 
-Native LongTrader strategy that trades a grid inside Bollinger Bands.
+## Parameters
 
-## Logic
+Inherited from `CommonParams`: `exchange_id` (default `"mock"`), `label`
+(default `""`), `symbol` (required), `timeframe` (default `"5m"`),
+`poll_secs` (default `30`).
 
-- Every `poll_secs` fetches `boll_window` candles and computes Bollinger Bands.
-- When the latest close is inside the bands and bandwidth is sufficient: cancel all open orders, then place `grid_num` limit orders on each side of the close (step = bandwidth / (grid_num + 1)), discarding levels outside the bands.
-- No grid is placed when price breaks outside the bands (strong trend) or bandwidth is too narrow (quiet market).
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | String | required | trading symbol |
+| `timeframe` | String | `"5m"` | candle timeframe |
+| `poll_secs` | u64 | `30` | poll cadence (seconds) |
+| `boll_window` | usize | `21` | candles in the Bollinger window |
+| `boll_mult` | Decimal | `2` | Bollinger band multiplier (k) |
+| `grid_num` | u32 | `3` | buy/sell limit levels per side |
+| `qty` | Decimal | `0.001` | quantity per leg |
+| `profit_spread_pct` | Decimal | `0.0005` | reverse-leg spread as a fraction of price |
 
-## Params (`[strategy.params]`)
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `symbol` | required | Trading pair |
-| `timeframe` | `"5m"` | Candle interval |
-| `poll_secs` | `30` | Poll interval |
-| `boll_window` | `21` | Bollinger window |
-| `boll_mult` | `2` | Stddev multiplier |
-| `grid_num` | `3` | Levels per side |
-| `qty` | `0.001` | Quantity per level |
-| `profit_spread_pct` | `0.0005` | Opposite-leg spread (reserved) |
-
-## Example
+## Example configuration
 
 ```toml
 [strategy]
 type = "boll_grid"
-
 [strategy.params]
-exchange_id = "binance"
-symbol = "BTCUSDT"
+symbol = "BTC/USDT"
+exchange_id = "mock"
 timeframe = "5m"
 boll_window = 21
-grid_num = 4
-qty = "0.01"
+boll_mult = 2
+grid_num = 3
+qty = "0.001"
+profit_spread_pct = "0.0005"
 ```
+
+## Capabilities
+
+- `TradingGateway` (`cancel_all_orders`, `create_order`)
+- `MarketDataSource` (`get_candles`)
+
+## Risk notes
+
+- Cancels **all** orders on the symbol every cycle, so only this ladder survives.
+- Bollinger bands need warmup and quotes appear only inside wide bands — may stay idle.
+- Grids accumulate inventory in one-sided trends; limit/market fills slip.

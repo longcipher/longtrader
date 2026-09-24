@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package longtrader.terminal.v1;
 
+import "longtrader/trading/v1/trading.proto";
+import "google/protobuf/timestamp.proto";
+
 // ========== 通用枚举 ==========
 
 enum Timeframe {
@@ -40,20 +43,6 @@ enum OrderStatus {
   ORDER_STATUS_PENDING = 1;
   ORDER_STATUS_FILLED = 2;
   ORDER_STATUS_CANCELED = 3;
-}
-
-enum PositionSide {
-  POSITION_SIDE_UNSPECIFIED = 0;
-  POSITION_SIDE_LONG = 1;
-  POSITION_SIDE_SHORT = 2;
-}
-
-enum CloseReason {
-  CLOSE_REASON_UNSPECIFIED = 0;
-  CLOSE_REASON_MANUAL = 1;
-  CLOSE_REASON_TAKE_PROFIT = 2;
-  CLOSE_REASON_STOP_LOSS = 3;
-  CLOSE_REASON_STOP_OUT = 4;
 }
 
 // 流订阅的分类桶，用于服务端分桶广播（慢客户端只影响其所订阅的桶）。
@@ -172,7 +161,7 @@ message MyOrderPosition {
   string quantity = 5;         // decimal
   uint32 queue_position = 6;   // 排队位置（外部权威）
   uint32 total_in_queue = 7;
-  int64 updated_at_ms = 8;
+  google.protobuf.Timestamp updated_at = 8;
 }
 
 message FundingRate {
@@ -194,36 +183,36 @@ message Order {
   string filled_quantity = 9;
   optional string avg_fill_price = 10;
   OrderStatus status = 11;
-  int64 created_at_ms = 12;
-  int64 updated_at_ms = 13;
+  google.protobuf.Timestamp created_at = 12;
+  google.protobuf.Timestamp updated_at = 13;
 }
 
 message Position {
   string id = 1;
   string order_id = 2;
   string symbol = 3;
-  PositionSide side = 4;
+  trading.v1.PositionSide side = 4;
   string quantity = 5;
   string entry_price = 6;
   string current_price = 7;
   string unrealized_pnl = 8;
   optional string take_profit = 9;
   optional string stop_loss = 10;
-  int64 opened_at_ms = 11;
+  google.protobuf.Timestamp opened_at = 11;
 }
 
 message ClosedPosition {
   string id = 1;
   string order_id = 2;
   string symbol = 3;
-  PositionSide side = 4;
+  trading.v1.PositionSide side = 4;
   string quantity = 5;
   string entry_price = 6;
   string exit_price = 7;
   string realized_pnl = 8;
-  int64 opened_at_ms = 9;
-  int64 closed_at_ms = 10;
-  CloseReason close_reason = 11;
+  google.protobuf.Timestamp opened_at = 9;
+  google.protobuf.Timestamp closed_at = 10;
+  trading.v1.CloseReason close_reason = 11;
 }
 
 message Account {

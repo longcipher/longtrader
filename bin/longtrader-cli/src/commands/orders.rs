@@ -1,3 +1,4 @@
+use color_eyre::Result;
 use longtrader_proto::{client::TerminalClient, proto::longtrader::terminal::v1::Side};
 
 use crate::output::Renderer;
@@ -12,7 +13,7 @@ pub(crate) async fn place_order(
     take_profit: Option<&str>,
     stop_loss: Option<&str>,
     output: &Renderer,
-) {
+) -> Result<()> {
     let order_type = if price.is_some() {
         longtrader_proto::proto::longtrader::terminal::v1::OrderType::Limit
     } else {
@@ -35,7 +36,10 @@ pub(crate) async fn place_order(
         )
         .await
     {
-        Ok(order) => output.render_orders(&[order]),
-        Err(e) => output.render_msg(&format!("Error: {e}")),
+        Ok(order) => {
+            output.render_orders(&[order]);
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
     }
 }

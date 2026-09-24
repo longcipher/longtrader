@@ -1,40 +1,41 @@
-> [English](README.md) | **中文**
+# dca_scheduler
 
-# dca_scheduler — 定投 / 定期补货
+按固定 cron 计划（默认每日 UTC 零点）以市价（或限价）单为每个 `symbols` 中的标的买入 `buy_amount`。节奏由时间决定，与价格无关。
 
-LongTrader 原生策略，提供定投与定期分批执行的调度能力。
+## 参数
 
-## 逻辑
+继承自 `CommonParams`：`exchange_id`（默认 `"mock"`）、`label`（默认 `""`）、`symbol`（必填）、`timeframe`（默认 `"5m"`）、`poll_secs`（默认 `30`）。
 
-- 每 `interval_secs` 提交一笔市价单；启动时立即执行第一笔。
-- `is_buy = true` 为定投买入；`false` 为定期卖出（手续费资产补货 /
-  分批派发场景）。
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `symbol` | String | 必填 | DCA 买入的报价标的 |
+| `timeframe` | String | `"5m"` | K 线周期（透传） |
+| `poll_secs` | u64 | `30` | 轮询间隔（秒） |
+| `schedule_cron` | String | `"0 0 * * *"` | cron 表达式（分 时 日 月 周），UTC |
+| `buy_amount` | Decimal | `100` | 每次每标的花费的报价金额 |
+| `symbols` | Vec<String> | 必填 | 定投的基准资产 |
+| `use_limit` | bool | `false` | 以限价代替市价 |
+| `limit_offset` | Decimal | `0.001` | 限价相对价格的偏移（比例） |
 
-## 参数（`[strategy.params]`）
-
-| 字段 | 默认 | 说明 |
-|------|------|------|
-| `symbol` | 必填 | 交易对 |
-| `poll_secs` | `30` | （未使用，保留公共字段兼容） |
-| `interval_secs` | `86400` | 下单间隔秒数 |
-| `is_buy` | `true` | 买/卖方向 |
-| `qty` | `0.001` | 每笔数量 |
-
-## 配置示例
+## 示例配置
 
 ```toml
 [strategy]
 type = "dca_scheduler"
-
 [strategy.params]
-exchange_id = "binance"
-symbol = "BTCUSDT"
-interval_secs = 3600
-is_buy = true
-qty = "0.002"
+symbol = "USDT"
+schedule_cron = "0 0 * * *"
+buy_amount = "100"
+symbols = ["BTC", "ETH"]
 ```
 
-## 说明
+## 依赖能力
 
-当前版本聚焦核心定投调度能力，按金额（amount）换算数量等扩展能力
-可通过上层配置与风控层组合实现。
+- `TradingGateway`（`create_order`）
+- `MarketDataSource`（`fetch_ticker`）
+
+## 风险提示
+
+- 固定节奏忽略价格水平 → 可能在局部高点买入。
+- 市价单滑点；限价模式可能漏单并跳过该次执行。
+- cron 以 UTC 计算。

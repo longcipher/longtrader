@@ -2,9 +2,9 @@
  * Session: the single hand-written entry point of the TypeScript SDK.
  * Mirrors sdks/python/longtrader_sdk/session.py 1:1 (design doc section 6.8).
  *
- * Wire format (see docs/bare-protocol-guide.md):
+ * Wire format (see ../../docs/bare-protocol-guide.md):
  *   POST {base_url}/longtrader.worker.v1.WorkerSessionService/{Method}
- *   Content-Type: application/proto
+ *   Content-Type: application/proto (unary) or application/connect+proto (streaming)
  *   Body: raw protobuf request; 200 body is the raw protobuf response.
  */
 import {
@@ -68,7 +68,7 @@ export class Session {
     const req = create(AttachSessionRequestSchema, {
       token,
       clientName: "longtrader-sdk-typescript",
-      clientVersion: "0.1.0",
+      clientVersion: "0.2.0",
       ...(policy ? { policy } : {}),
     });
     const session = new Session(baseUrl, fetch);

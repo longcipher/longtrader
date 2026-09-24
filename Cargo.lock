@@ -1735,14 +1735,14 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "longtrader-catalog"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "longtrader-contract",
 ]
 
 [[package]]
 name = "longtrader-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "buffa",
  "clap",
@@ -1757,7 +1757,7 @@ dependencies = [
 
 [[package]]
 name = "longtrader-contract"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "buffa",
  "buffa-types",
@@ -1773,7 +1773,7 @@ dependencies = [
 
 [[package]]
 name = "longtrader-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "buffa",
  "futures-util",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "longtrader-worker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-stream",
  "async-trait",

@@ -17,7 +17,11 @@ struct Cli {
     #[arg(long, default_value = "http://127.0.0.1:8810", global = true)]
     endpoint: String,
 
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        help = "Terminal API bearer token (also read from $LONGTRADER_TOKEN)"
+    )]
     token: Option<String>,
 
     #[arg(long, default_value = "mock", global = true)]
@@ -38,7 +42,8 @@ async fn main() -> color_eyre::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let client = if let Some(token) = &cli.token {
+    let token = cli.token.clone().or_else(|| std::env::var("LONGTRADER_TOKEN").ok());
+    let client = if let Some(token) = &token {
         longtrader_proto::client::TerminalClient::new_with_token(&cli.endpoint, token)
     } else {
         longtrader_proto::client::TerminalClient::new(&cli.endpoint)
@@ -46,6 +51,6 @@ async fn main() -> color_eyre::Result<()> {
 
     let output = output::Renderer::new(cli.format);
 
-    commands::dispatch(&client, &cli.venue, &output, cli.command).await;
+    commands::dispatch(&client, &cli.venue, &output, cli.command).await?;
     Ok(())
 }

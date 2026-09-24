@@ -197,14 +197,15 @@ impl SimpleGrid {
     #[allow(clippy::cognitive_complexity)]
     async fn rebalance(&self) -> color_eyre::Result<()> {
         let current = self.current_price().await?;
-        let mut levels = self.levels.lock().await;
+        // ponytail: snapshot under a short lock; all RPCs run lock-free.
+        let snapshot: Vec<GridLevel> = self.levels.lock().await.clone();
         let mut errors: u32 = 0;
 
-        if levels.is_empty() {
-            *levels = self.calculate_levels(current);
-            tracing::info!("initialized {} grid levels on {}", levels.len(), self.config.symbol);
-            for level in &mut *levels {
-                if let Err(err) = self.place_level_order(&*level).await {
+        if snapshot.is_empty() {
+            let mut fresh = self.calculate_levels(current);
+            tracing::info!("initialized {} grid levels on {}", fresh.len(), self.config.symbol);
+            for level in &fresh {
+                if let Err(err) = self.place_level_order(level).await {
                     errors += 1;
                     tracing::error!(price = %level.price, error = %err, "initial placement failed");
                 }
@@ -214,14 +215,16 @@ impl SimpleGrid {
                     errors,
                     "error threshold reached during init; tripping grid kill-switch"
                 );
-                self.cancel_tracked_orders(&levels).await;
-                levels.clear();
+                self.cancel_tracked_orders(&fresh).await;
+                fresh.clear();
             }
-            self.persist_levels(&levels);
+            self.persist_levels(&fresh);
+            *self.levels.lock().await = fresh;
             return Ok(());
         }
 
         // Authoritative open-order view keyed by client_order_id and price.
+        // Lock-free: uses the snapshot taken above.
         let open_orders = self
             .gateway
             .fetch_open_orders(trading::FetchOpenOrdersRequest {
@@ -240,7 +243,8 @@ impl SimpleGrid {
             }
         }
 
-        for level in &mut *levels {
+        let mut updated = snapshot;
+        for level in &mut updated {
             // Prefer exact client_order_id matching; fall back to price-level
             // matching for backends that do not echo client_order_id.
             let alive =
@@ -266,7 +270,7 @@ impl SimpleGrid {
                 side: opposite_side,
                 client_order_id: format!("grid-{}", ulid::Ulid::generate()),
             };
-            if let Err(err) = self.place_level_order(&*level).await {
+            if let Err(err) = self.place_level_order(level).await {
                 errors += 1;
                 tracing::error!(price = %level.price, error = %err, "flip placement failed");
             }
@@ -277,10 +281,11 @@ impl SimpleGrid {
                 errors,
                 "error threshold reached; tripping grid kill-switch and cancelling tracked orders"
             );
-            self.cancel_tracked_orders(&levels).await;
-            levels.clear();
-            self.persist_levels(&levels);
+            self.cancel_tracked_orders(&updated).await;
+            updated.clear();
+            self.persist_levels(&updated);
         }
+        *self.levels.lock().await = updated;
         Ok(())
     }
 }

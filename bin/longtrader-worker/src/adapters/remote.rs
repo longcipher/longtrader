@@ -32,7 +32,8 @@ const SERVICE_MARKET: &str = "longtrader.market.v1.MarketDataService";
 fn ts_from_ms(ms: i64) -> buffa_types::google::protobuf::Timestamp {
     buffa_types::google::protobuf::Timestamp {
         seconds: ms.div_euclid(1000),
-        nanos: i32::try_from(ms.rem_euclid(1000) * 1_000_000).unwrap_or_default(),
+        // remainder <1000 so nanos <1e9 always fits i32
+        nanos: i32::try_from(ms.rem_euclid(1000) * 1_000_000).expect("ms remainder fits i32"),
         ..Default::default()
     }
 }
@@ -40,7 +41,7 @@ fn ts_from_ms(ms: i64) -> buffa_types::google::protobuf::Timestamp {
 fn ms_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or_default(|d| i64::try_from(d.as_millis()).unwrap_or_default())
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// Minimal Connect client over `hpx` – mirrors the former `TerminalClient`
@@ -87,7 +88,7 @@ impl RemoteAdapter {
             &self.base_url,
             service,
             method,
-            &self.token,
+            Some(self.token.as_str()),
             req,
         )
         .await
@@ -208,8 +209,12 @@ impl TradingGateway for RemoteAdapter {
         &self,
         exchange_id: &common::ExchangeId,
     ) -> Result<worker::ReconcileStateResponse, PortError> {
-        // Aggregate three contract calls into one atomic-ish snapshot.
-        // The snapshot watermark is `ms_now`; deltas after that will be replayed.
+        // Best-effort snapshot: three sequential unary calls, NOT atomic.
+        // Callers must treat `snapshot_sequence` as a local watermark and
+        // replay deltas after it (see `SessionManager::complete_reconcile`).
+        // A server-side single-RPC `ReconcileState` is the long-term fix.
+        // ponytail: 3 RPCs + local seq; server atomic snapshot when available.
+        let started_ms = ms_now();
         let account_resp: trading::GetAccountResponse = self
             .unary(
                 SERVICE_TRADING,
@@ -254,11 +259,16 @@ impl TradingGateway for RemoteAdapter {
             )
             .await?;
 
+        if started_ms != ms_now() {
+            tracing::debug!(
+                "sync_state spanned multiple millis; snapshot is best-effort, not atomic"
+            );
+        }
         Ok(worker::ReconcileStateResponse {
-            // Monotonic watermark so the session can discard already-applied
-            // deltas after the snapshot point (design doc §6.3).
+            // Local monotonic watermark (NOT server-atomic). Session discards
+            // deltas at/below this point and replays the remainder.
             snapshot_sequence: self.snapshot_seq.fetch_add(1, Ordering::Relaxed) + 1,
-            snapshot_time: MessageField::some(ts_from_ms(ms_now())),
+            snapshot_time: MessageField::some(ts_from_ms(started_ms)),
             balances,
             positions: positions_resp.positions,
             open_orders: open_orders_resp.orders,
@@ -320,9 +330,7 @@ impl MarketDataSource for RemoteAdapter {
 
         let seq = Arc::new(AtomicU64::new(0));
         let (tx, rx) =
-            overflow::policy_channel(BUFFER_CAP, policy, |event: &market::MarketDataEvent| {
-                event.header.sequence
-            });
+            overflow::policy_channel(BUFFER_CAP, policy, crate::adapters::market_event_key);
 
         for sub in req.subscriptions {
             let channel = match sub.channel {
@@ -340,7 +348,13 @@ impl MarketDataSource for RemoteAdapter {
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(Duration::from_millis(POLL_INTERVAL_MS));
                 loop {
+                    if tx.is_closed() {
+                        break;
+                    }
                     ticker.tick().await;
+                    if tx.is_closed() {
+                        break;
+                    }
                     match adapter.poll_snapshot(channel, &exchange_id, &symbol, &seq).await {
                         Ok(Some(event)) => {
                             tx.send(event).await;
@@ -377,7 +391,11 @@ impl RemoteAdapter {
                 .fetch_order_book(market::FetchOrderBookRequest {
                     exchange_id: MessageField::some(exchange_id.clone()),
                     symbol: symbol.to_string(),
-                    limit: 100,
+                    pagination: crate::proto::common::Pagination {
+                        limit: 100,
+                        ..Default::default()
+                    }
+                    .into(),
                     ..Default::default()
                 })
                 .await?;
@@ -395,7 +413,7 @@ impl RemoteAdapter {
         Ok(Some(market::MarketDataEvent {
             header: MessageField::some(header),
             event: Some(event),
-            resume_token: String::new(),
+            resume_token: next.to_string(),
             ..Default::default()
         }))
     }

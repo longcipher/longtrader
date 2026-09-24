@@ -25,21 +25,36 @@ pub fn encode_envelope(flags: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Decode errors for [`decode_envelope_result`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EnvelopeError {
+    #[error("buffer too short for 5-byte header")]
+    TooShort,
+    #[error("truncated payload: need {need} bytes, have {have}")]
+    Truncated { need: usize, have: usize },
+}
+
+/// Decode one envelope, returning a typed error instead of silent `None`.
+#[inline]
+pub fn decode_envelope_result(buf: &[u8]) -> Result<(u8, &[u8], usize), EnvelopeError> {
+    if buf.len() < 5 {
+        return Err(EnvelopeError::TooShort);
+    }
+    let flags = buf[0];
+    let len = u32::from_be_bytes(buf[1..5].try_into().expect("5-byte header")) as usize;
+    if buf.len() < 5 + len {
+        return Err(EnvelopeError::Truncated { need: 5 + len, have: buf.len() });
+    }
+    Ok((flags, &buf[5..5 + len], 5 + len))
+}
+
 /// Decode one envelope from the front of `buf`.
 ///
 /// Returns `(flags, payload_slice, consumed_bytes)` on success, `None` if
 /// `buf` is too short or truncated. Caller advances by `consumed_bytes`.
 #[inline]
 pub fn decode_envelope(buf: &[u8]) -> Option<(u8, &[u8], usize)> {
-    if buf.len() < 5 {
-        return None;
-    }
-    let flags = buf[0];
-    let len = u32::from_be_bytes(buf[1..5].try_into().ok()?) as usize;
-    if buf.len() < 5 + len {
-        return None;
-    }
-    Some((flags, &buf[5..5 + len], 5 + len))
+    decode_envelope_result(buf).ok()
 }
 
 #[cfg(test)]

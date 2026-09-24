@@ -1,43 +1,47 @@
-> **English** | [中文](README.zh.md)
+# supertrend
 
-# supertrend — Supertrend + DEMA Trend Following
+Polls candles, computes the Supertrend (ATR + multiplier), and on a fresh
+direction flip (down→up or up→down) submits a market order to flip exposure to
+long/short. Direction is edge-triggered in-memory; after a restart it waits for
+the next fresh flip rather than replaying the last one.
 
-Native LongTrader strategy with dual Supertrend + DEMA confirmation.
+## Parameters
 
-## Logic
+Inherited from `CommonParams`: `exchange_id` (default `"mock"`), `label`
+(default `""`), `symbol` (required), `timeframe` (default `"5m"`),
+`poll_secs` (default `30`).
 
-- Every `poll_secs` fetches the candle window and rebuilds Supertrend and fast/slow DEMA series.
-- Opens only when Supertrend direction and DEMA relative position agree: up → market buy, down → market sell.
-- On signal reversal, closes existing directional position first (in-memory state machine: Flat / Long / Short).
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | String | required | trading symbol |
+| `timeframe` | String | `"5m"` | candle timeframe |
+| `poll_secs` | u64 | `30` | poll cadence (seconds) |
+| `atr_period` | usize | `10` | ATR lookback |
+| `multiplier` | Decimal | `3.0` | Supertrend ATR multiplier |
+| `qty` | Decimal | `0.001` | order quantity |
+| `use_limit` | bool | `false` | place limit instead of market (offset = `limit_offset`) |
+| `limit_offset` | Decimal | `0.001` | limit offset from price (fraction) |
 
-## Params (`[strategy.params]`)
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `symbol` | required | Trading pair |
-| `timeframe` | `"5m"` | Candle interval |
-| `poll_secs` | `30` | Poll interval |
-| `atr_window` | `14` | ATR / Supertrend period |
-| `atr_multiplier` | `3` | Supertrend bandwidth multiplier |
-| `fast_dema_window` | `10` | Fast DEMA window |
-| `slow_dema_window` | `21` | Slow DEMA window |
-| `qty` | `0.001` | Order quantity |
-
-## Example
+## Example configuration
 
 ```toml
 [strategy]
 type = "supertrend"
-
 [strategy.params]
-exchange_id = "binance"
-symbol = "ETHUSDT"
-timeframe = "15m"
-atr_window = 21
-atr_multiplier = "2.5"
-qty = "0.5"
+symbol = "BTC/USDT"
+exchange_id = "mock"
+atr_period = 10
+multiplier = "3.0"
+qty = "0.001"
 ```
 
-## Notes
+## Capabilities
 
-Current version focuses on Supertrend + DEMA core signals. Linear-regression confirmation, ATR take-profit and other extensions can be composed via risk layer; position sizing is fixed `qty` with account-level leverage handled by risk controls.
+- `TradingGateway` (`create_order`)
+- `MarketDataSource` (`get_candles`)
+
+## Risk notes
+
+- Market orders slip versus the signal price; limit mode can miss fills.
+- Direction is in-memory → restart may flip on the first post-restart signal.
+- Lagging trend filter → whipsaws in choppy regimes.

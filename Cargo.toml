@@ -4,13 +4,12 @@ members = ["bin/*", "crates/*"]
 exclude = [".github/"]
 resolver = "3"
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["LongCipher"]
 repository = "https://github.com/longcipher/longtrader"
 homepage = "https://github.com/longcipher/longtrader"
-
 
 [workspace.dependencies]
 async-stream = "0.3.6"
@@ -27,8 +26,8 @@ hotpath = "0.26.0"
 hpx = { version = "2.5.26", default-features = false, features = ["rustls-tls", "http1", "http2", "stream", "tracing", "hickory-dns"] }
 http-body = "1.1.0"
 # in-repo
-longtrader-contract = { path = "crates/longtrader-contract", version = "0.1.0" }
-longtrader-proto = { path = "crates/longtrader-proto", version = "0.1.0" }
+longtrader-contract = { path = "crates/longtrader-contract", version = "0.2.0" }
+longtrader-proto = { path = "crates/longtrader-proto", version = "0.2.0" }
 proptest = "1.11.0"
 rust_decimal = "1.43.0"
 rust_decimal_macros = "1.40.0"

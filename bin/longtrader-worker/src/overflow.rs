@@ -88,6 +88,8 @@ where
     K: Eq + Hash + Send + 'static,
 {
     /// Push one item through the configured overflow policy.
+    /// ponytail: Coalesce uses an O(n) key scan; cap is small (<=64 in practice).
+    /// Upgrade to HashMap<index> if cap grows or profiling shows hotspot.
     pub async fn send(&self, item: T) {
         match self.state.policy {
             OverflowPolicy::Block => {
@@ -98,6 +100,7 @@ where
                 let key = (self.state.key_fn)(&item);
                 {
                     let mut buf = self.state.buf.lock().await;
+                    debug_assert!(self.state.cap <= 1024, "coalesce cap unexpectedly large");
                     if self.state.policy == OverflowPolicy::Coalesce {
                         // Replace any buffered item with the same key.
                         if let Some(slot) = buf.iter_mut().find(|(k, _)| *k == key) {

@@ -18,6 +18,18 @@ impl Renderer {
         Self { format }
     }
 
+    /// Left-align and truncate `s` to `width` columns, appending an ellipsis
+    /// when it overflows. Keeps table output aligned regardless of payload.
+    fn trunc(s: &str, width: usize) -> String {
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() <= width {
+            format!("{s:<width$}")
+        } else {
+            let head: String = chars.iter().take(width.saturating_sub(1)).collect();
+            format!("{head}…")
+        }
+    }
+
     pub(crate) fn render_symbols(&self, symbols: &[Symbol]) {
         match self.format {
             OutputFormat::Json => {
@@ -29,7 +41,10 @@ impl Renderer {
                 for s in symbols {
                     println!(
                         "{:<15} {:<20} {:<10} {:<10}",
-                        s.name, s.display_name, s.base_asset, s.quote_asset
+                        Self::trunc(&s.name, 15),
+                        Self::trunc(&s.display_name, 20),
+                        Self::trunc(&s.base_asset, 10),
+                        Self::trunc(&s.quote_asset, 10),
                     );
                 }
             }
@@ -86,17 +101,17 @@ impl Renderer {
                 for p in positions {
                     let side = match p.side {
                         buffa::EnumValue::Known(
-                            longtrader_proto::proto::longtrader::terminal::v1::PositionSide::Long,
+                            longtrader_proto::proto::longtrader::trading::v1::PositionSide::Long,
                         ) => "Long",
                         buffa::EnumValue::Known(
-                            longtrader_proto::proto::longtrader::terminal::v1::PositionSide::Short,
+                            longtrader_proto::proto::longtrader::trading::v1::PositionSide::Short,
                         ) => "Short",
                         _ => "-",
                     };
                     println!(
                         "{:<12} {:<12} {:<8} {:<12} {:<12} {:<12} {:<12}",
-                        p.id,
-                        p.symbol,
+                        Self::trunc(&p.id, 12),
+                        Self::trunc(&p.symbol, 12),
                         side,
                         p.quantity,
                         p.entry_price,
@@ -139,9 +154,13 @@ impl Renderer {
                         buffa::EnumValue::Known(
                             longtrader_proto::proto::longtrader::terminal::v1::OrderType::Stop,
                         ) => "Stop",
+                        buffa::EnumValue::Known(
+                            longtrader_proto::proto::longtrader::terminal::v1::OrderType::StopLimit,
+                        ) => "StopLimit",
                         _ => "-",
                     };
                     let status = match o.status {
+                        buffa::EnumValue::Known(longtrader_proto::proto::longtrader::terminal::v1::OrderStatus::Unspecified) => "-",
                         buffa::EnumValue::Known(longtrader_proto::proto::longtrader::terminal::v1::OrderStatus::Pending) => "Pending",
                         buffa::EnumValue::Known(longtrader_proto::proto::longtrader::terminal::v1::OrderStatus::Filled) => "Filled",
                         buffa::EnumValue::Known(longtrader_proto::proto::longtrader::terminal::v1::OrderStatus::Canceled) => "Canceled",
@@ -149,8 +168,8 @@ impl Renderer {
                     };
                     println!(
                         "{:<12} {:<12} {:<6} {:<8} {:<10} {:<10} {:<10}",
-                        o.id,
-                        o.symbol,
+                        Self::trunc(&o.id, 12),
+                        Self::trunc(&o.symbol, 12),
                         side,
                         otype,
                         o.quantity,
@@ -171,7 +190,12 @@ impl Renderer {
                 println!("{:<15} {:<10} {:<10}", "NAME", "CONNECTED", "SYMBOLS");
                 println!("{}", "-".repeat(35));
                 for v in venues {
-                    println!("{:<15} {:<10} {:<10}", v.name, v.connected, v.symbol_count);
+                    println!(
+                        "{:<15} {:<10} {:<10}",
+                        Self::trunc(&v.name, 15),
+                        v.connected,
+                        v.symbol_count
+                    );
                 }
             }
         }

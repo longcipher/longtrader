@@ -1,31 +1,53 @@
+use color_eyre::Result;
 use longtrader_proto::client::TerminalClient;
 
 use crate::output::Renderer;
 
-pub(crate) async fn list(_client: &TerminalClient, output: &Renderer) {
-    output.render_msg(
-        "Strategy listing requires direct RPC call (not yet implemented in TerminalClient)",
-    );
+pub(crate) async fn list(client: &TerminalClient, output: &Renderer) -> Result<()> {
+    match client.list_strategies().await {
+        Ok(items) => {
+            if items.is_empty() {
+                output.render_msg("no strategies");
+            } else {
+                for s in &items {
+                    output.render_msg(&format!(
+                        "{} {} [{}] {}",
+                        s.strategy_id, s.name, s.status, s.error
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub(crate) async fn start(
-    _client: &TerminalClient,
-    _strategy_id: &str,
-    _name: Option<&str>,
+    client: &TerminalClient,
+    strategy_id: &str,
+    name: Option<&str>,
     output: &Renderer,
-) {
-    output.render_msg(
-        "Strategy start requires direct RPC call (not yet implemented in TerminalClient)",
-    );
+) -> Result<()> {
+    match client.start_strategy(strategy_id, name.unwrap_or(strategy_id), "{}").await {
+        Ok(s) => {
+            output.render_msg(&format!("started {} [{}]", s.strategy_id, s.status));
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub(crate) async fn stop(
-    _client: &TerminalClient,
-    _strategy_id: &str,
-    _cancel_all: bool,
+    client: &TerminalClient,
+    strategy_id: &str,
+    cancel_all: bool,
     output: &Renderer,
-) {
-    output.render_msg(
-        "Strategy stop requires direct RPC call (not yet implemented in TerminalClient)",
-    );
+) -> Result<()> {
+    match client.stop_strategy(strategy_id, cancel_all).await {
+        Ok(s) => {
+            output.render_msg(&format!("stopped {} [{}]", s.strategy_id, s.status));
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }

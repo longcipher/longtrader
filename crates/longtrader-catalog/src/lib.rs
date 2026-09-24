@@ -54,17 +54,17 @@ fn slot(
 fn grid_maker() -> StrategyDescriptor {
     StrategyDescriptor {
         id: ids::GRID_MAKER.into(),
-        name: "网格做市".into(),
-        note: "在标记价两侧按「网格下界」到「网格上界」铺等距挂单：每层挂「每层数量」，挂单价相对标记价偏移「挂单偏移」；价格上行吃卖、下行吃买，层间价差即每次往返的毛利。".into(),
+        name: "Grid Maker".into(),
+        note: "Layer resting limit orders from lower to upper bound: each level rests quantity per level with an offset from mark; buy low / sell high, spread is round-trip edge.".into(),
         builtin: true,
         kind: "maker".into(),
         params: vec![
-            slot("网格下界", "usd", Some(0.0), None, Some(1.0), Some(90_000.0)),
-            slot("网格上界", "usd", Some(0.0), None, Some(1.0), Some(110_000.0)),
-            slot("网格层数", "decimal", Some(1.0), None, Some(1.0), Some(20.0)),
-            slot("每层数量", "decimal", Some(0.0), None, Some(0.0001), Some(0.01)),
-            slot("挂单偏移", "percent", Some(0.0), None, Some(0.0001), Some(0.001)),
-            slot("最大名义", "usd", Some(0.0), None, Some(50.0), Some(1_000.0)),
+            slot("lower_bound", "usd", Some(0.0), None, Some(1.0), Some(90_000.0)),
+            slot("upper_bound", "usd", Some(0.0), None, Some(1.0), Some(110_000.0)),
+            slot("levels", "decimal", Some(1.0), None, Some(1.0), Some(20.0)),
+            slot("qty_per_level", "decimal", Some(0.0), None, Some(0.0001), Some(0.01)),
+            slot("order_offset", "percent", Some(0.0), None, Some(0.0001), Some(0.001)),
+            slot("max_notional", "usd", Some(0.0), None, Some(50.0), Some(1_000.0)),
         ],
         ..Default::default()
     }
@@ -74,15 +74,15 @@ fn grid_maker() -> StrategyDescriptor {
 fn cmdnc_arb() -> StrategyDescriptor {
     StrategyDescriptor {
         id: ids::CMDNC_ARB.into(),
-        name: "跨所收敛套利".into(),
-        note: "两腿同标的跨所配对（多腿吃卖一、空腿吃买一）：基差涨到「开仓基差」一次开到「每轮名义」，回落「平仓基差」即清仓，两线之间保持现状。".into(),
+        name: "Cross-Venue Convergence Arbitrage".into(),
+        note: "Paired cross-venue legs on one symbol: open to per-round notional when basis reaches open threshold, flatten at close threshold, hold between.".into(),
         builtin: true,
         kind: "arb".into(),
         params: vec![
-            slot("开仓基差", "percent", Some(0.0), None, Some(0.0001), Some(0.005)),
-            slot("平仓基差", "percent", Some(0.0), None, Some(0.0001), Some(0.002)),
-            slot("每轮名义", "usd", Some(0.0), None, Some(10.0), Some(100.0)),
-            slot("最大名义", "usd", Some(0.0), None, Some(50.0), Some(1_000.0)),
+            slot("open_basis", "percent", Some(0.0), None, Some(0.0001), Some(0.005)),
+            slot("close_basis", "percent", Some(0.0), None, Some(0.0001), Some(0.002)),
+            slot("notional_per_round", "usd", Some(0.0), None, Some(10.0), Some(100.0)),
+            slot("max_notional", "usd", Some(0.0), None, Some(50.0), Some(1_000.0)),
         ],
         ..Default::default()
     }
@@ -114,15 +114,11 @@ mod tests {
     #[test]
     fn lookup_by_id_round_trips() {
         assert_eq!(
-            descriptor(ids::GRID_MAKER)
-                .expect("builtin descriptor GRID_MAKER must exist")
-                .id,
+            descriptor(ids::GRID_MAKER).expect("builtin descriptor GRID_MAKER must exist").id,
             ids::GRID_MAKER
         );
         assert_eq!(
-            descriptor(ids::CMDNC_ARB)
-                .expect("builtin descriptor CMDNC_ARB must exist")
-                .id,
+            descriptor(ids::CMDNC_ARB).expect("builtin descriptor CMDNC_ARB must exist").id,
             ids::CMDNC_ARB
         );
         assert!(descriptor("nope").is_none());

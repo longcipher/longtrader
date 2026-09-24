@@ -3,6 +3,7 @@ syntax = "proto3";
 package longtrader.terminal.v1;
 
 import "longtrader/terminal/v1/messages.proto";
+import "longtrader/common/v1/types.proto";
 
 // 交易服务：账户 / 持仓 / 订单。
 service TradingService {
@@ -46,20 +47,22 @@ message GetOpenOrdersResponse {
 
 message GetOrderHistoryRequest {
   string venue = 1;
-  uint32 limit = 2;
+  common.v1.Pagination pagination = 2;
 }
 
 message GetOrderHistoryResponse {
   repeated Order orders = 1;
+  common.v1.Page page = 2;
 }
 
 message GetClosedPositionsRequest {
   string venue = 1;
-  uint32 limit = 2;
+  common.v1.Pagination pagination = 2;
 }
 
 message GetClosedPositionsResponse {
   repeated ClosedPosition positions = 1;
+  common.v1.Page page = 2;
 }
 
 message PlaceOrderRequest {

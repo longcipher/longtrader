@@ -1,8 +1,9 @@
+use color_eyre::Result;
 use longtrader_proto::client::TerminalClient;
 
 use crate::output::Renderer;
 
-pub(crate) async fn run(client: &TerminalClient, output: &Renderer) {
+pub(crate) async fn run(client: &TerminalClient, output: &Renderer) -> Result<()> {
     match client.health().await {
         Ok(resp) => {
             if let Renderer { format: crate::output::OutputFormat::Json, .. } = output {
@@ -17,7 +18,8 @@ pub(crate) async fn run(client: &TerminalClient, output: &Renderer) {
                     }
                 }
             }
+            Ok(())
         }
-        Err(e) => output.render_msg(&format!("Error: {e}")),
+        Err(e) => Err(e.into()),
     }
 }

@@ -1,41 +1,43 @@
-> **English** | [中文](README.zh.md)
+# fixed_maker
 
-# fixed_maker — Fixed-Spread Market Making
+Polls the ticker, re-centres on the mid price, and each cycle cancels all orders
+and re-quotes a bid at `mid * (1 - bid_spread)` and an ask at `mid * (1 + ask_spread)`.
 
-Native LongTrader strategy that quotes both sides around a fixed spread.
+## Parameters
 
-## Logic
+Inherited from `CommonParams`: `exchange_id` (default `"mock"`), `label`
+(default `""`), `symbol` (required), `timeframe` (default `"5m"`),
+`poll_secs` (default `30`).
 
-- Every `poll_secs` fetches the latest ticker price.
-- Quotes around mid: bid = mid × (1 − bid_spread), ask = mid × (1 + ask_spread).
-- Each cycle cancels old quotes via `cancel_all_orders`, then places new two-sided limit orders.
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | String | required | trading symbol |
+| `timeframe` | String | `"5m"` | candle timeframe |
+| `poll_secs` | u64 | `30` | poll cadence (seconds) |
+| `bid_spread` | Decimal | `0.001` | bid offset from mid (fraction) |
+| `ask_spread` | Decimal | `0.001` | ask offset from mid (fraction) |
+| `qty` | Decimal | `0.001` | quantity per side |
 
-## Params (`[strategy.params]`)
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `symbol` | required | Trading pair |
-| `timeframe` | `"5m"` | (reserved common field, unused) |
-| `poll_secs` | `30` | Re-quote interval |
-| `bid_spread` | `0.001` | Bid spread ratio |
-| `ask_spread` | `0.001` | Ask spread ratio |
-| `qty` | `0.001` | Quantity per side |
-
-## Example
+## Example configuration
 
 ```toml
 [strategy]
 type = "fixed_maker"
-
 [strategy.params]
-exchange_id = "binance"
-symbol = "BTCUSDT"
-poll_secs = 10
-bid_spread = "0.0005"
-ask_spread = "0.0008"
-qty = "0.01"
+symbol = "BTC/USDT"
+exchange_id = "mock"
+bid_spread = "0.001"
+ask_spread = "0.001"
+qty = "0.001"
 ```
 
-## Risk Note
+## Capabilities
 
-Unconditional two-sided quoting has no inventory protection. In live trading, combine with the terminal kill-switch and position limits, or compose with inventory-aware strategies such as `rebalance`.
+- `TradingGateway` (`cancel_all_orders`, `create_order`)
+- `MarketDataSource` (`fetch_ticker`)
+
+## Risk notes
+
+- Cancels all orders every poll — wipes unrelated resting orders on the symbol.
+- No inventory skew → adverse selection in trends (quotes get hit on the losing side).
+- Market/limit fills slip.

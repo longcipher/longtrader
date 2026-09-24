@@ -34,8 +34,10 @@ use crate::proto::worker;
 fn now_ts() -> buffa_types::google::protobuf::Timestamp {
     let dur = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     buffa_types::google::protobuf::Timestamp {
-        seconds: i64::try_from(dur.as_secs()).unwrap_or_default(),
-        nanos: i32::try_from(dur.subsec_nanos()).unwrap_or_default(),
+        // saturate (not zero) on far-future overflow
+        seconds: i64::try_from(dur.as_secs()).unwrap_or(i64::MAX),
+        // subsec_nanos() < 1e9 always fits i32
+        nanos: i32::try_from(dur.subsec_nanos()).expect("subsec_nanos fits i32"),
         ..Default::default()
     }
 }
@@ -43,7 +45,7 @@ fn now_ts() -> buffa_types::google::protobuf::Timestamp {
 fn now_ns() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or_default(|d| i64::try_from(d.as_nanos()).unwrap_or_default())
+        .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
 }
 
 impl From<ManagerError> for ConnectError {
@@ -151,21 +153,23 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
         if let Some(policy) = req.policy.as_option() {
             let mut session_policy = handle.policy();
             if let Some(timeout) = policy.lease_timeout.as_option() {
-                let millis =
-                    timeout.seconds.saturating_mul(1000) + i64::from(timeout.nanos) / 1_000_000;
-                let dur = std::time::Duration::from_millis(millis.max(0).cast_unsigned());
-                session_policy.lease_timeout = dur.clamp(
-                    std::time::Duration::from_millis(500),
-                    std::time::Duration::from_secs(3600),
-                );
+                session_policy.lease_timeout = super::lease::lease_timeout_from_proto(timeout)
+                    .map_err(|e| {
+                        ConnectError::invalid_argument(format!("bad lease_timeout: {e}"))
+                    })?;
             }
-            let scope = match policy.scope {
-                buffa::EnumValue::Known(scope) => scope,
-                buffa::EnumValue::Unknown(_) => worker::kill_switch_policy::Scope::Unspecified,
-            };
-            if scope != worker::kill_switch_policy::Scope::Unspecified {
-                // SCOPE_SESSION_ORDERS / SCOPE_ALL_ORDERS / SCOPE_NONE
-                session_policy.scope = scope;
+            match policy.scope {
+                buffa::EnumValue::Known(scope) => {
+                    if scope != worker::kill_switch_policy::Scope::Unspecified {
+                        // SCOPE_SESSION_ORDERS / SCOPE_ALL_ORDERS / SCOPE_NONE
+                        session_policy.scope = scope;
+                    }
+                }
+                buffa::EnumValue::Unknown(v) => {
+                    return Err(ConnectError::invalid_argument(format!(
+                        "unknown KillSwitchPolicy scope {v}"
+                    )));
+                }
             }
             handle.set_policy(session_policy);
         }
@@ -210,7 +214,7 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
                 buffa::MessageField::some(buffa_types::google::protobuf::Timestamp {
                     seconds: i.started_at_ms.div_euclid(1000),
                     nanos: i32::try_from(i.started_at_ms.rem_euclid(1000) * 1_000_000)
-                        .unwrap_or_default(),
+                        .expect("ms remainder fits i32"),
                     ..Default::default()
                 })
             }),
@@ -297,7 +301,16 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
         // from the ring buffer after `after_seq`.
         // Sequence is gap-free per subscription; gaps trigger resync
         // (see `crate::ports::is_sequence_gap`).
-        let after_seq: u64 = req.resume_token.parse().unwrap_or(0);
+        let after_seq: u64 = if req.resume_token.is_empty() {
+            0
+        } else {
+            req.resume_token.parse().map_err(|_| {
+                ConnectError::invalid_argument(format!(
+                    "bad resume_token {:?}; expected decimal sequence",
+                    req.resume_token
+                ))
+            })?
+        };
         let replay = handle.replay_after(after_seq).await;
         let mut rx = handle.subscribe();
         let stream = async_stream::stream! {

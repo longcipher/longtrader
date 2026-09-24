@@ -171,9 +171,10 @@ pub trait TradingGateway: Send + Sync {
         req: trading::CloseAllPositionsRequest,
     ) -> Result<trading::CloseAllPositionsResponse, PortError>;
 
-    /// One-shot authoritative snapshot for deterministic recovery. Adapters
-    /// aggregate their backend's balance/position/open-order reads; atomicity
-    /// across the three is backend-dependent until convergence completes.
+    /// Best-effort snapshot for deterministic recovery. Adapters aggregate
+    /// their backend's balance/position/open-order reads; the three reads are
+    /// NOT atomic on the open backend (see `RemoteAdapter::sync_state`).
+    /// Callers must replay deltas after `snapshot_sequence` to converge.
     async fn sync_state(
         &self,
         exchange_id: &common::ExchangeId,

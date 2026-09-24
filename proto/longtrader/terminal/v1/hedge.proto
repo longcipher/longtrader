@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package longtrader.terminal.v1;
 
-import "longtrader/terminal/v1/strategy.proto";
+import "google/protobuf/timestamp.proto";
 
 // 可空参数值（proto3 repeated 无 null，用显式容器表达）。
 message ParamValue {
@@ -107,10 +107,10 @@ message HedgeUnit {
   repeated Adjustment adjustments = 13;
   // 最新套利快照（可缺席）。
   optional ArbitrageSnapshot arbitrage = 14;
-  // 开仓时刻（毫秒）。
-  int64 opened_at_ms = 15;
-  // 最近更新时间（毫秒）。
-  int64 updated_at_ms = 16;
+  // 开仓时刻。
+  google.protobuf.Timestamp opened_at = 15;
+  // 最近更新时间。
+  google.protobuf.Timestamp updated_at = 16;
 }
 
 // 组合单元实时事件（流）。

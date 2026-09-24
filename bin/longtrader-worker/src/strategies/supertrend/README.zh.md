@@ -1,46 +1,42 @@
-> [English](README.md) | **中文**
+# supertrend
 
-# supertrend — Supertrend + DEMA 趋势跟踪
+轮询 K 线，计算 Supertrend（ATR + 倍数）；当方向出现新翻转（下→上或上→下）时下一笔市价单将敞口翻为多/空。方向为内存中的边沿触发；重启后等待下一个新翻转而非重放。
 
-LongTrader 原生策略，基于 Supertrend + DEMA 双重确认的趋势跟踪实现。
+## 参数
 
-## 逻辑
+继承自 `CommonParams`：`exchange_id`（默认 `"mock"`）、`label`（默认 `""`）、`symbol`（必填）、`timeframe`（默认 `"5m"`）、`poll_secs`（默认 `30`）。
 
-- 每 `poll_secs` 秒拉取 K 线窗口，重建 Supertrend 与快/慢 DEMA 序列。
-- Supertrend 方向与 DEMA 相对位置**同时一致**才开仓：向上 → 市价买入，
-  向下 → 市价卖出。
-- 信号反转时先平掉现有方向仓位（内存相位机：Flat / Long / Short）。
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `symbol` | String | 必填 | 交易标的 |
+| `timeframe` | String | `"5m"` | K 线周期 |
+| `poll_secs` | u64 | `30` | 轮询间隔（秒） |
+| `atr_period` | usize | `10` | ATR 回看周期 |
+| `multiplier` | Decimal | `3.0` | Supertrend ATR 倍数 |
+| `qty` | Decimal | `0.001` | 下单数量 |
+| `use_limit` | bool | `false` | 以限价代替市价（偏移 = `limit_offset`） |
+| `limit_offset` | Decimal | `0.001` | 限价相对价格的偏移（比例） |
 
-## 参数（`[strategy.params]`）
-
-| 字段 | 默认 | 说明 |
-|------|------|------|
-| `symbol` | 必填 | 交易对 |
-| `timeframe` | `"5m"` | K 线周期 |
-| `poll_secs` | `30` | 轮询间隔 |
-| `atr_window` | `14` | ATR / Supertrend 周期 |
-| `atr_multiplier` | `3` | Supertrend 带宽乘数 |
-| `fast_dema_window` | `10` | 快 DEMA 窗口 |
-| `slow_dema_window` | `21` | 慢 DEMA 窗口 |
-| `qty` | `0.001` | 下单数量 |
-
-## 配置示例
+## 示例配置
 
 ```toml
 [strategy]
 type = "supertrend"
-
 [strategy.params]
-exchange_id = "binance"
-symbol = "ETHUSDT"
-timeframe = "15m"
-atr_window = 21
-atr_multiplier = "2.5"
-qty = "0.5"
+symbol = "BTC/USDT"
+exchange_id = "mock"
+atr_period = 10
+multiplier = "3.0"
+qty = "0.001"
 ```
 
-## 说明
+## 依赖能力
 
-当前版本聚焦 Supertrend + DEMA 核心信号，线性回归确认、ATR 止盈等
-扩展能力可通过风控层与策略组合实现；仓位规模基于固定 `qty`，
-账户级杠杆 sizing 由风控层负责。
+- `TradingGateway`（`create_order`）
+- `MarketDataSource`（`get_candles`）
+
+## 风险提示
+
+- 市价单相对信号价存在滑点；限价模式可能漏单。
+- 方向在内存中，重启后可能在重启后首次信号即翻转。
+- 滞后趋势过滤器，震荡行情中易反复打脸。

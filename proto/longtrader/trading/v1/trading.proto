@@ -84,8 +84,8 @@ message Order {
   optional common.v1.Decimal take_profit = 20;
   optional common.v1.Decimal stop_loss = 21;
   // Creation / last update, Unix milliseconds.
-  int64 created_at_ms = 22;
-  int64 updated_at_ms = 23;
+  google.protobuf.Timestamp created_at = 22;
+  google.protobuf.Timestamp updated_at = 23;
 }
 
 message CreateOrderRequest {
@@ -164,17 +164,19 @@ message Position {
   optional common.v1.Decimal take_profit = 15;
   optional common.v1.Decimal stop_loss = 16;
   // Position open time, Unix milliseconds.
-  int64 opened_at_ms = 17;
+  google.protobuf.Timestamp opened_at = 17;
 }
 
-// Position side as seen from the holder's perspective.
+// Position side as seen from the holder's perspective. Single authority for
+// position sides; reuse this enum rather than defining a sibling.
 enum PositionSide {
   POSITION_SIDE_UNSPECIFIED = 0;
   POSITION_SIDE_LONG = 1;
   POSITION_SIDE_SHORT = 2;
 }
 
-// Why a position was closed.
+// Canonical reason a position/order was closed. This is the single authority for
+// close reasons across the contract — do not introduce a parallel enum.
 enum CloseReason {
   CLOSE_REASON_UNSPECIFIED = 0;
   CLOSE_REASON_MANUAL = 1;
@@ -192,8 +194,8 @@ message ClosedPosition {
   common.v1.Decimal entry_price = 6;
   common.v1.Decimal exit_price = 7;
   common.v1.Decimal realized_pnl = 8;
-  int64 opened_at_ms = 9;
-  int64 closed_at_ms = 10;
+  google.protobuf.Timestamp opened_at = 9;
+  google.protobuf.Timestamp closed_at = 10;
   CloseReason close_reason = 11;
 }
 
@@ -225,20 +227,22 @@ message GetPositionsResponse {
 
 message GetOrderHistoryRequest {
   common.v1.ExchangeId exchange_id = 1;
-  uint32 limit = 2;
+  common.v1.Pagination pagination = 2;
 }
 
 message GetOrderHistoryResponse {
   repeated Order orders = 1;
+  common.v1.Page page = 2;
 }
 
 message GetClosedPositionsRequest {
   common.v1.ExchangeId exchange_id = 1;
-  uint32 limit = 2;
+  common.v1.Pagination pagination = 2;
 }
 
 message GetClosedPositionsResponse {
   repeated ClosedPosition positions = 1;
+  common.v1.Page page = 2;
 }
 
 message ClosePositionRequest {

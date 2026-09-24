@@ -36,7 +36,11 @@ fn main() {
     protos.sort();
     assert!(!protos.is_empty(), "no .proto files found under {}", proto_root.display());
 
-    println!("cargo:rerun-if-changed={}", proto_root.display());
+    // Rerun whenever any tracked .proto file changes (not just the directory
+    // entry), so contract edits actually regenerate the Rust types.
+    for p in &protos {
+        println!("cargo:rerun-if-changed={}", p.display());
+    }
 
     let file_strs: Vec<String> = protos.iter().map(|p| p.to_string_lossy().into_owned()).collect();
     let file_refs: Vec<&str> = file_strs.iter().map(String::as_str).collect();

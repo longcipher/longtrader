@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package longtrader.terminal.v1;
 
+import "longtrader/common/v1/types.proto";
+
 import "longtrader/terminal/v1/messages.proto";
 
 // 行情数据服务：symbols / candles / book / tickers / funding rates。
@@ -28,11 +30,12 @@ message GetCandlesRequest {
   Timeframe timeframe = 3;
   optional int64 start_ms = 4;
   optional int64 end_ms = 5;
-  uint32 limit = 6;
+  common.v1.Pagination pagination = 6;
 }
 
 message GetCandlesResponse {
   repeated Candle candles = 1;
+  common.v1.Page page = 2;
 }
 
 message GetBookRequest {
@@ -66,9 +69,10 @@ message GetFundingRatesResponse {
 message SearchSymbolsRequest {
   string venue = 1;
   string query = 2;
-  uint32 limit = 3;
+  common.v1.Pagination pagination = 3;
 }
 
 message SearchSymbolsResponse {
   repeated Symbol symbols = 1;
+  common.v1.Page page = 2;
 }

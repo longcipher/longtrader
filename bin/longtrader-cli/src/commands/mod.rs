@@ -10,6 +10,7 @@ pub(crate) mod symbols;
 pub(crate) mod venues;
 
 use clap::Subcommand;
+use color_eyre::Result;
 use longtrader_proto::client::TerminalClient;
 
 use crate::output::Renderer;
@@ -111,31 +112,39 @@ pub(crate) async fn dispatch(
     venue: &str,
     output: &Renderer,
     cmd: Commands,
-) {
+) -> Result<()> {
     match cmd {
-        Commands::Health => health::run(client, output).await,
-        Commands::Venues => venues::run(client, output).await,
-        Commands::Symbols { venue } => symbols::run(client, &venue, output).await,
+        Commands::Health => health::run(client, output).await?,
+        Commands::Venues => venues::run(client, output).await?,
+        Commands::Symbols { venue } => symbols::run(client, &venue, output).await?,
         Commands::Candles { symbol, timeframe, limit } => {
-            candles::run(client, venue, &symbol, &timeframe, limit, output).await;
+            candles::run(client, venue, &symbol, &timeframe, limit, output).await?;
         }
-        Commands::Book { symbol, depth } => book::run(client, venue, &symbol, depth, output).await,
+        Commands::Book { symbol, depth } => {
+            book::run(client, venue, &symbol, depth, output).await?;
+        }
         Commands::Search { query, limit } => {
-            search::run(client, venue, &query, limit, output).await;
+            search::run(client, venue, &query, limit, output).await?;
         }
         Commands::Account => match client.get_account(venue).await {
             Ok(account) => output.render_account(&account),
-            Err(e) => output.render_msg(&format!("Error: {e}")),
+            Err(e) => {
+                return Err(e.into());
+            }
         },
-        Commands::Positions => positions::run(client, venue, output).await,
+        Commands::Positions => positions::run(client, venue, output).await?,
         Commands::Orders { symbol } => match client.get_open_orders(venue, symbol.as_deref()).await
         {
             Ok(orders) => output.render_orders(&orders),
-            Err(e) => output.render_msg(&format!("Error: {e}")),
+            Err(e) => {
+                return Err(e.into());
+            }
         },
         Commands::History { limit } => match client.get_order_history(venue, limit).await {
             Ok(orders) => output.render_orders(&orders),
-            Err(e) => output.render_msg(&format!("Error: {e}")),
+            Err(e) => {
+                return Err(e.into());
+            }
         },
         Commands::Buy { symbol, quantity, price, take_profit, stop_loss } => {
             orders::place_order(
@@ -149,7 +158,7 @@ pub(crate) async fn dispatch(
                 stop_loss.as_deref(),
                 output,
             )
-            .await;
+            .await?;
         }
         Commands::Sell { symbol, quantity, price, take_profit, stop_loss } => {
             orders::place_order(
@@ -163,23 +172,31 @@ pub(crate) async fn dispatch(
                 stop_loss.as_deref(),
                 output,
             )
-            .await;
+            .await?;
         }
         Commands::Cancel { order_id } => match client.cancel_order(venue, &order_id).await {
             Ok(order) => output.render_orders(&[order]),
-            Err(e) => output.render_msg(&format!("Error: {e}")),
+            Err(e) => {
+                return Err(e.into());
+            }
         },
         Commands::Close { position_id } => match client.close_position(venue, &position_id).await {
-            Ok(()) => output.render_msg(&format!("Position {position_id} closed")),
-            Err(e) => output.render_msg(&format!("Error: {e}")),
+            Ok(pos) => output.render_msg(&format!(
+                "Position {} closed (unrealized pnl={})",
+                pos.id, pos.unrealized_pnl
+            )),
+            Err(e) => {
+                return Err(e.into());
+            }
         },
-        Commands::Stream { topics } => stream::run(client, venue, &topics, output).await,
-        Commands::Strategies => strategies::list(client, output).await,
+        Commands::Stream { topics } => stream::run(client, venue, &topics, output).await?,
+        Commands::Strategies => strategies::list(client, output).await?,
         Commands::StrategyStart { strategy_id, name } => {
-            strategies::start(client, &strategy_id, name.as_deref(), output).await;
+            strategies::start(client, &strategy_id, name.as_deref(), output).await?;
         }
         Commands::StrategyStop { strategy_id, cancel_all } => {
-            strategies::stop(client, &strategy_id, cancel_all, output).await;
+            strategies::stop(client, &strategy_id, cancel_all, output).await?;
         }
     }
+    Ok(())
 }

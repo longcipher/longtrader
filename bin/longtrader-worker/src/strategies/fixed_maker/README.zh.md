@@ -1,42 +1,40 @@
-> [English](README.md) | **中文**
+# fixed_maker
 
-# fixed_maker — 固定价差双边做市
+轮询行情，以中间价为中心，每个周期撤销全部订单，并重新挂买价 `mid * (1 - bid_spread)`、卖价 `mid * (1 + ask_spread)` 的限价单。
 
-LongTrader 原生策略，基于固定价差的双边做市实现。
+## 参数
 
-## 逻辑
+继承自 `CommonParams`：`exchange_id`（默认 `"mock"`）、`label`（默认 `""`）、`symbol`（必填）、`timeframe`（默认 `"5m"`）、`poll_secs`（默认 `30`）。
 
-- 每 `poll_secs` 秒拉取 ticker 取最新价。
-- 以最新价为中枢：bid = mid × (1 − bid_spread)，ask = mid × (1 + ask_spread)。
-- 每轮先 `cancel_all_orders` 清旧报价，再挂新双边限价单。
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `symbol` | String | 必填 | 交易标的 |
+| `timeframe` | String | `"5m"` | K 线周期 |
+| `poll_secs` | u64 | `30` | 轮询间隔（秒） |
+| `bid_spread` | Decimal | `0.001` | 买价相对中间价偏移（比例） |
+| `ask_spread` | Decimal | `0.001` | 卖价相对中间价偏移（比例） |
+| `qty` | Decimal | `0.001` | 每侧数量 |
 
-## 参数（`[strategy.params]`）
-
-| 字段 | 默认 | 说明 |
-|------|------|------|
-| `symbol` | 必填 | 交易对 |
-| `timeframe` | `"5m"` | （保留公共字段，未使用） |
-| `poll_secs` | `30` | 重新报价间隔 |
-| `bid_spread` | `0.001` | 买单价差比例 |
-| `ask_spread` | `0.001` | 卖单价差比例 |
-| `qty` | `0.001` | 单边数量 |
-
-## 配置示例
+## 示例配置
 
 ```toml
 [strategy]
 type = "fixed_maker"
-
 [strategy.params]
-exchange_id = "binance"
-symbol = "BTCUSDT"
-poll_secs = 10
-bid_spread = "0.0005"
-ask_spread = "0.0008"
-qty = "0.01"
+symbol = "BTC/USDT"
+exchange_id = "mock"
+bid_spread = "0.001"
+ask_spread = "0.001"
+qty = "0.001"
 ```
+
+## 依赖能力
+
+- `TradingGateway`（`cancel_all_orders`、`create_order`）
+- `MarketDataSource`（`fetch_ticker`）
 
 ## 风险提示
 
-无条件双边报价没有库存保护，实盘请配合终端侧 kill-switch 与仓位上限
-使用；如需库存保护请结合风控策略或 `rebalance` 等仓位管理策略组合使用。
+- 每个周期撤销全部订单，会清掉该标的上无关的挂单。
+- 无库存倾斜 → 趋势中逆向选择（挂单在亏损侧被吃）。
+- 市价/限价成交存在滑点。

@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package longtrader.terminal.v1;
 
+import "google/protobuf/timestamp.proto";
+import "longtrader/common/v1/types.proto";
+
 import "longtrader/terminal/v1/strategy.proto";
 import "longtrader/terminal/v1/hedge.proto";
 
@@ -150,7 +153,7 @@ message TestNotificationResponse {
 }
 message NotificationRecord {
   string id = 1;
-  int64 timestamp_ms = 2;
+  google.protobuf.Timestamp timestamp = 2;
   string title = 3;
   string body = 4;
   string channel = 5;
@@ -158,11 +161,11 @@ message NotificationRecord {
   string status = 6;
 }
 message ListNotificationsRequest {
-  // 最多返回条数（缺省 100）。
-  int64 limit = 1;
+  common.v1.Pagination pagination = 1;
 }
 message ListNotificationsResponse {
   repeated NotificationRecord records = 1;
+  common.v1.Page page = 2;
 }
 
 // ========== 记录（episode）==========
@@ -170,7 +173,7 @@ message ListNotificationsResponse {
 // 一轮开 → 平 的完整核算：价差盈亏 + 资金费净收 − 手续费，含逐笔成交
 // 明细（对应 QQQ 的"记录 episode"）。
 message EpisodeFill {
-  int64 timestamp_ms = 1;
+  google.protobuf.Timestamp timestamp = 1;
   double price = 2;
   double quantity = 3;
   double fee = 4;
@@ -178,9 +181,9 @@ message EpisodeFill {
 message Episode {
   string id = 1;
   string hedge_unit_id = 2;
-  int64 opened_at_ms = 3;
+  google.protobuf.Timestamp opened_at = 3;
   // 0 = 未平仓。
-  int64 closed_at_ms = 4;
+  google.protobuf.Timestamp closed_at = 4;
   // 价差盈亏（quote）。
   double spread_pnl = 5;
   // 资金费净收（quote）。
@@ -198,10 +201,11 @@ message Episode {
 }
 message ListEpisodesRequest {
   string hedge_unit_id = 1;
-  int64 limit = 2;
+  common.v1.Pagination pagination = 2;
 }
 message ListEpisodesResponse {
   repeated Episode episodes = 1;
+  common.v1.Page page = 2;
 }
 
 // ========== 会话 / Token（配对码 + 二维码）==========
@@ -214,7 +218,7 @@ message SessionInfo {
   string pairing_code = 2;
   // 二维码载荷（URL / token）。
   string qr_payload = 3;
-  int64 expires_at_ms = 4;
+  google.protobuf.Timestamp expires_at = 4;
   repeated string devices = 5;
 }
 message GetSessionRequest {}

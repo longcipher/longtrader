@@ -18,6 +18,13 @@ pub enum TransportError {
     Decode(String),
 }
 
+/// Connect content-type for unary calls (`application/proto`).
+/// Server-streaming uses `application/connect+proto` with 5-byte envelopes
+/// (see `TerminalClient::stream_updates`); the split is per Connect spec.
+pub const CONNECT_PROTO_UNARY: &str = "application/proto";
+/// Connect content-type for server-streaming (`application/connect+proto`).
+pub const CONNECT_PROTO_STREAM: &str = "application/connect+proto";
+
 /// Perform one Connect unary call: POST `base_url/{service}/{method}` with
 /// `application/proto` and an optional bearer token, then decode the response.
 pub async fn unary<Q: Message, R: Message + Default>(
@@ -25,13 +32,13 @@ pub async fn unary<Q: Message, R: Message + Default>(
     base_url: &str,
     service: &str,
     method: &str,
-    token: &str,
+    token: Option<&str>,
     req: Q,
 ) -> Result<R, TransportError> {
     let url = format!("{}/{}/{}", base_url.trim_end_matches('/'), service, method);
     let body = req.encode_to_vec();
-    let mut builder = http.post(&url).header("content-type", "application/proto").body(body);
-    if !token.is_empty() {
+    let mut builder = http.post(&url).header("content-type", CONNECT_PROTO_UNARY).body(body);
+    if let Some(token) = token.filter(|t| !t.is_empty()) {
         builder = builder.header("authorization", format!("Bearer {token}"));
     }
     let resp = builder.send().await.map_err(|e| TransportError::Http(e.to_string()))?;

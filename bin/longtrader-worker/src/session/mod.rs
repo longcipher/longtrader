@@ -41,9 +41,11 @@
 //! successful `KeepAlive`; on lease timeout they locally cancel and stop
 //! trading (see `spawn_strategy_lease_guard` helper below).
 
+pub mod lease;
 pub mod proxy;
 pub mod server;
 pub mod service;
+pub mod state;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -54,6 +56,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use lease::{default_lease, lease_timeout_from_proto};
+pub use state::SessionState;
 use tokio::sync::{Mutex, broadcast};
 
 use crate::{
@@ -63,44 +67,8 @@ use crate::{
 
 /// Default heartbeat interval negotiated at attach.
 pub const DEFAULT_HEARTBEAT_MS: u32 = 10_000;
-/// Heartbeat budget multiplier applied when a policy omits lease_timeout.
-const LEASE_HEARTBEAT_BUDGET: u32 = 3;
 /// Replay ring capacity per session.
 const EVENT_RING_CAPACITY: usize = 1024;
-
-/// Server-enforced session states mirroring `worker.v1.SessionState`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum SessionState {
-    Attached = 1,
-    Syncing = 2,
-    Active = 3,
-    KillSwitchTripped = 4,
-    GracefulShutdown = 5,
-}
-
-impl SessionState {
-    fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            1 => Some(Self::Attached),
-            2 => Some(Self::Syncing),
-            3 => Some(Self::Active),
-            4 => Some(Self::KillSwitchTripped),
-            5 => Some(Self::GracefulShutdown),
-            _ => None,
-        }
-    }
-
-    pub fn to_proto(self) -> worker::SessionState {
-        match self {
-            Self::Attached => worker::SessionState::Attached,
-            Self::Syncing => worker::SessionState::Syncing,
-            Self::Active => worker::SessionState::Active,
-            Self::KillSwitchTripped => worker::SessionState::KillSwitchTripped,
-            Self::GracefulShutdown => worker::SessionState::GracefulShutdown,
-        }
-    }
-}
 
 /// Kill-switch configuration for one session.
 #[derive(Debug, Clone)]
@@ -112,12 +80,36 @@ pub struct SessionPolicy {
 impl Default for SessionPolicy {
     fn default() -> Self {
         Self {
-            lease_timeout: Duration::from_millis(
-                u64::from(DEFAULT_HEARTBEAT_MS) * u64::from(LEASE_HEARTBEAT_BUDGET),
-            ),
+            lease_timeout: default_lease(u64::from(DEFAULT_HEARTBEAT_MS)),
             scope: worker::kill_switch_policy::Scope::SessionOrders,
         }
     }
+}
+
+/// Apply a proto policy onto a session policy; single owner for lease/scope parsing.
+fn apply_policy(
+    current: &mut SessionPolicy,
+    policy: &worker::KillSwitchPolicy,
+) -> Result<(), ManagerError> {
+    if let Some(timeout) = policy.lease_timeout.as_option() {
+        current.lease_timeout = lease_timeout_from_proto(timeout)
+            .map_err(|e| ManagerError::InvalidArgument(e.to_string()))?;
+    }
+    match policy.scope {
+        buffa::EnumValue::Known(s) => {
+            if s == worker::kill_switch_policy::Scope::Unspecified {
+                // Explicit Unspecified means "leave unchanged".
+            } else {
+                current.scope = s;
+            }
+        }
+        buffa::EnumValue::Unknown(v) => {
+            return Err(ManagerError::InvalidArgument(format!(
+                "unknown KillSwitchPolicy scope discriminant {v}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -130,9 +122,15 @@ pub struct StrategyInfo {
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or_default(|d| i64::try_from(d.as_millis()).unwrap_or_default())
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
+        // saturate on overflow (far future) rather than silently returning epoch
+        i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+    })
+}
+
+/// Millis remainder (<1000) scaled to nanos always fits i32 (<1e9).
+fn nanos_from_ms_rem(ms: i64) -> i32 {
+    i32::try_from(ms.rem_euclid(1000) * 1_000_000).expect("ms remainder fits i32")
 }
 
 /// One live session: state, lease bookkeeping, kill-switch policy, tracked
@@ -382,23 +380,7 @@ impl SessionManager {
                         handle.touch();
                         if let Some(policy) = policy.clone() {
                             let mut new_policy = handle.policy();
-                            if let Some(timeout) = policy.lease_timeout.as_option() {
-                                let millis = timeout.seconds.saturating_mul(1000) +
-                                    i64::from(timeout.nanos) / 1_000_000;
-                                let dur = Duration::from_millis(millis.max(0).cast_unsigned());
-                                // Clamp to prevent 0ms DoS (negative/invalid lease).
-                                new_policy.lease_timeout = dur
-                                    .clamp(Duration::from_millis(500), Duration::from_secs(3600));
-                            }
-                            let scope = match policy.scope {
-                                buffa::EnumValue::Known(s) => s,
-                                buffa::EnumValue::Unknown(_) => {
-                                    worker::kill_switch_policy::Scope::Unspecified
-                                }
-                            };
-                            if scope != worker::kill_switch_policy::Scope::Unspecified {
-                                new_policy.scope = scope;
-                            }
+                            apply_policy(&mut new_policy, &policy)?;
                             handle.set_policy(new_policy);
                         }
                         return Ok((reconnect_session_id.to_string(), handle.heartbeat_interval_ms));
@@ -415,20 +397,7 @@ impl SessionManager {
         let id = ulid::Ulid::generate().to_string();
         let mut session_policy = SessionPolicy::default();
         if let Some(policy) = policy.as_ref() {
-            if let Some(timeout) = policy.lease_timeout.as_option() {
-                let millis =
-                    timeout.seconds.saturating_mul(1000) + i64::from(timeout.nanos) / 1_000_000;
-                let dur = Duration::from_millis(millis.max(0).cast_unsigned());
-                session_policy.lease_timeout =
-                    dur.clamp(Duration::from_millis(500), Duration::from_secs(3600));
-            }
-            let scope = match policy.scope {
-                buffa::EnumValue::Known(scope) => scope,
-                buffa::EnumValue::Unknown(_) => worker::kill_switch_policy::Scope::Unspecified,
-            };
-            if scope != worker::kill_switch_policy::Scope::Unspecified {
-                session_policy.scope = scope;
-            }
+            apply_policy(&mut session_policy, policy)?;
         }
         let (events_tx, _) = broadcast::channel(256);
         let handle = Arc::new(SessionHandle {
@@ -502,13 +471,14 @@ impl SessionManager {
         fields: HashMap<String, String>,
     ) -> Result<(), ManagerError> {
         let handle = self.get(session_id).await?;
+        let now = now_ms();
         let event = worker::LogEvent {
             session_id: session_id.to_string(),
             level: buffa::EnumValue::Known(level),
             message: message.clone(),
             timestamp: buffa::MessageField::some(buffa_types::google::protobuf::Timestamp {
-                seconds: now_ms().div_euclid(1000),
-                nanos: i32::try_from(now_ms().rem_euclid(1000) * 1_000_000).unwrap_or_default(),
+                seconds: now.div_euclid(1000),
+                nanos: nanos_from_ms_rem(now),
                 ..Default::default()
             }),
             fields: fields.into_iter().collect(),
@@ -618,22 +588,18 @@ impl SessionManager {
     /// Lease expiry tripwire for one session: flip state and execute the
     /// configured kill-switch scope.
     async fn trip_kill_switch(&self, handle: &SessionHandle, timeout: Duration) {
-        let prev = handle.swap_state(SessionState::KillSwitchTripped);
-        if prev.is_none() {
+        let Some(prev) = handle.swap_state(SessionState::KillSwitchTripped) else {
+            // Corrupt state byte: refuse to publish a guessed transition.
+            tracing::error!(session = %handle.id, "corrupt session state; refusing kill-switch");
             return;
-        }
+        };
         tracing::error!(
             session = %handle.id,
             lease_timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
             "session lease expired; tripping kill-switch"
         );
-        self.publish_state_change(
-            handle,
-            prev.unwrap_or(SessionState::Active),
-            SessionState::KillSwitchTripped,
-            "lease expired",
-        )
-        .await;
+        self.publish_state_change(handle, prev, SessionState::KillSwitchTripped, "lease expired")
+            .await;
         let policy = handle.policy();
         match policy.scope {
             worker::kill_switch_policy::Scope::SessionOrders => {

@@ -1,38 +1,45 @@
-> **English** | [中文](README.zh.md)
+# dca_scheduler
 
-# dca_scheduler — DCA / Scheduled Accumulation
+On a fixed cron schedule (default daily midnight UTC) buys `buy_amount` of each
+symbol in `symbols` with a market (or limit) order. Cadence is time-based, not
+price-based.
 
-Native LongTrader strategy for dollar-cost averaging and periodic batch execution.
+## Parameters
 
-## Logic
+Inherited from `CommonParams`: `exchange_id` (default `"mock"`), `label`
+(default `""`), `symbol` (required), `timeframe` (default `"5m"`),
+`poll_secs` (default `30`).
 
-- Submits one market order every `interval_secs`; the first order executes immediately on startup.
-- `is_buy = true` for scheduled buying; `false` for scheduled selling (fee-asset restocking / batch distribution).
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | String | required | quote symbol for the DCA buys |
+| `timeframe` | String | `"5m"` | candle timeframe (passed through) |
+| `poll_secs` | u64 | `30` | poll cadence (seconds) |
+| `schedule_cron` | String | `"0 0 * * *"` | cron expression (min hour day month weekday), UTC |
+| `buy_amount` | Decimal | `100` | quote amount to spend per symbol per run |
+| `symbols` | Vec<String> | required | base assets to dollar-cost-average |
+| `use_limit` | bool | `false` | place limit instead of market |
+| `limit_offset` | Decimal | `0.001` | limit offset from price (fraction) |
 
-## Params (`[strategy.params]`)
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `symbol` | required | Trading pair |
-| `poll_secs` | `30` | (unused, kept for common-field compatibility) |
-| `interval_secs` | `86400` | Interval in seconds |
-| `is_buy` | `true` | Buy/sell direction |
-| `qty` | `0.001` | Quantity per order |
-
-## Example
+## Example configuration
 
 ```toml
 [strategy]
 type = "dca_scheduler"
-
 [strategy.params]
-exchange_id = "binance"
-symbol = "BTCUSDT"
-interval_secs = 3600
-is_buy = true
-qty = "0.002"
+symbol = "USDT"
+schedule_cron = "0 0 * * *"
+buy_amount = "100"
+symbols = ["BTC", "ETH"]
 ```
 
-## Notes
+## Capabilities
 
-Current version focuses on core DCA scheduling. Amount-based sizing and other extensions can be composed via upper-layer config and risk controls.
+- `TradingGateway` (`create_order`)
+- `MarketDataSource` (`fetch_ticker`)
+
+## Risk notes
+
+- Fixed cadence ignores price levels → buys into local tops.
+- Market orders slip; limit mode can miss fills and skip the run.
+- cron is evaluated in UTC.

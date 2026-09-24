@@ -69,7 +69,7 @@ s.close()
   surfaced as `ConnectError` (`.code`, `.details`).
 - Server-streaming uses `application/connect+proto` with 5-byte envelopes
   (1 flag byte + u32 big-endian length; flag `0x02` = end-of-stream JSON).
-  See `docs/bare-protocol-guide.md` sections 4–5.
+  See `../docs/bare-protocol-guide.md` sections 4–5.
 - Auth is the existing terminal API token passed to `AttachSession`.
 - `OverflowPolicy` governs event-queue behavior under slow consumers
   (`DROP_OLDEST` preserves newest, `COALESCE` last-writer-wins, `BLOCK`

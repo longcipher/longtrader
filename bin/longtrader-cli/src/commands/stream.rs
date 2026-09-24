@@ -1,3 +1,4 @@
+use color_eyre::Result;
 use futures_util::StreamExt;
 use longtrader_proto::{client::TerminalClient, proto::longtrader::terminal::v1::TopicClass};
 
@@ -5,36 +6,43 @@ use crate::output::Renderer;
 
 pub(crate) async fn run(
     client: &TerminalClient,
-    _venue: &str,
+    venue: &str,
     topics: &[String],
     output: &Renderer,
-) {
+) -> Result<()> {
     let topic_classes: Vec<TopicClass> = if topics.is_empty() {
         vec![TopicClass::MarketLite, TopicClass::MarketHeavy, TopicClass::Trading]
     } else {
-        topics
-            .iter()
-            .filter_map(|t| match t.to_uppercase().as_str() {
-                "MARKET_LITE" => Some(TopicClass::MarketLite),
-                "MARKET_HEAVY" => Some(TopicClass::MarketHeavy),
-                "TRADING" => Some(TopicClass::Trading),
-                "RUNTIME" => Some(TopicClass::Runtime),
-                "FUNDING" => Some(TopicClass::Funding),
-                "DERIVATIVES" => Some(TopicClass::Derivatives),
-                _ => {
-                    output.render_msg(&format!("Unknown topic class: {t}"));
-                    None
-                }
-            })
-            .collect()
+        let mut classes = Vec::new();
+        let mut unknown = Vec::new();
+        for t in topics {
+            match t.to_uppercase().as_str() {
+                "MARKET_LITE" => classes.push(TopicClass::MarketLite),
+                "MARKET_HEAVY" => classes.push(TopicClass::MarketHeavy),
+                "TRADING" => classes.push(TopicClass::Trading),
+                "RUNTIME" => classes.push(TopicClass::Runtime),
+                "FUNDING" => classes.push(TopicClass::Funding),
+                "DERIVATIVES" => classes.push(TopicClass::Derivatives),
+                other => unknown.push(other.to_string()),
+            }
+        }
+        if !unknown.is_empty() {
+            return Err(color_eyre::Report::msg(format!(
+                "Unknown topic class(es): {}",
+                unknown.join(", ")
+            )));
+        }
+        classes
     };
 
-    match client.stream_updates(&[], &[], &topic_classes).await {
-        Ok(mut stream) => {
-            output.render_msg("Streaming updates (Ctrl+C to stop)...");
-            while let Some(msg) = stream.next().await {
-                match msg {
-                    Ok(env) => {
+    let venues = if venue.is_empty() { vec![] } else { vec![venue.to_string()] };
+    let mut stream = client.stream_updates(&venues, &[], &topic_classes).await?;
+    output.render_msg("Streaming updates (Ctrl+C to stop)...");
+    loop {
+        tokio::select! {
+            maybe = stream.next() => {
+                match maybe {
+                    Some(Ok(env)) => {
                         let payload_desc = match &env.payload {
                             Some(p) => describe_payload(p),
                             None => "empty".to_string(),
@@ -46,15 +54,17 @@ pub(crate) async fn run(
                             payload_desc
                         ));
                     }
-                    Err(e) => {
-                        output.render_msg(&format!("Stream error: {e}"));
-                        break;
-                    }
+                    Some(Err(e)) => return Err(e.into()),
+                    None => break,
                 }
             }
+            _ = tokio::signal::ctrl_c() => {
+                output.render_msg("Stopped by user (Ctrl+C)");
+                break;
+            }
         }
-        Err(e) => output.render_msg(&format!("Error: {e}")),
     }
+    Ok(())
 }
 
 fn topic_name(topic: buffa::EnumValue<TopicClass>) -> &'static str {

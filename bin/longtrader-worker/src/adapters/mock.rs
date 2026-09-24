@@ -281,7 +281,8 @@ impl MarketDataSource for MockAdapter {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let n = if req.limit == 0 { 10 } else { i64::from(req.limit.min(1000)) };
+        let raw_limit = req.pagination.as_option().map_or(0, |p| p.limit);
+        let n = if raw_limit == 0 { 10 } else { (raw_limit.min(1000)) as i64 };
         let candles = (0..n)
             .map(|i| market::Candle {
                 timestamp_ms: (now - (n - i) * 60) * 1000,
@@ -318,7 +319,8 @@ impl MarketDataSource for MockAdapter {
     ) -> Result<market::OrderBook, PortError> {
         let state = self.state.lock().expect("mock state");
         let step = Decimal::new(1, 2); // 0.01
-        let depth = usize::try_from(req.limit.max(1)).unwrap_or(10);
+        let depth =
+            usize::try_from(req.pagination.as_option().map_or(1, |p| p.limit).max(1)).unwrap_or(10);
         let (mut bids, mut asks) = (Vec::with_capacity(depth), Vec::with_capacity(depth));
         for i in 1..=depth {
             bids.push(market::PriceLevel {
@@ -354,7 +356,9 @@ impl MarketDataSource for MockAdapter {
             .map(|s| s.symbol.clone())
             .collect();
         let (tx, rx) = crate::overflow::policy_channel::<market::MarketDataEvent, String>(
-            16, policy, event_key,
+            16,
+            policy,
+            crate::adapters::market_event_key,
         );
         let price = self.state.lock().expect("mock state").price;
         tokio::spawn(async move {
@@ -393,22 +397,7 @@ impl MarketDataSource for MockAdapter {
     }
 }
 
-fn event_key(event: &market::MarketDataEvent) -> String {
-    let channel = match event.event.as_ref() {
-        Some(market::market_data_event::Event::Ticker(_)) => "ticker",
-        Some(market::market_data_event::Event::Orderbook(_)) => "book",
-        Some(market::market_data_event::Event::Trade(_)) => "trade",
-        Some(market::market_data_event::Event::Ohlcv(_)) => "ohlcv",
-        None => "none",
-    };
-    let symbol = match event.event.as_ref() {
-        Some(market::market_data_event::Event::Ticker(t)) => t.symbol.clone(),
-        Some(market::market_data_event::Event::Orderbook(b)) => b.symbol.clone(),
-        Some(market::market_data_event::Event::Trade(t)) => t.symbol.clone(),
-        _ => String::new(),
-    };
-    format!("{channel}:{symbol}")
-}
+// ponytail: key fn lives in `crate::adapters::market_event_key` (single owner).
 
 #[cfg(test)]
 mod tests {
@@ -608,6 +597,10 @@ impl VenueOpInvoker for MockAdapter {
         _params: serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, PortError> {
         let state = self.state.lock().expect("mock state");
+        tracing::warn!(
+            op = op,
+            "VenueOpInvoker invoked on MockAdapter — dry-run stub; no real venue operation is performed"
+        );
         match op {
             "account.balance" => Ok(serde_json::json!({
                 "currency": "USDT",

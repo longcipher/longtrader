@@ -104,6 +104,19 @@ if python3 -c "import grpc_tools" >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
+# Step GO: Go stubs via buf (requires buf CLI + network for remote plugins)
+# ---------------------------------------------------------------------------
+if command -v buf >/dev/null 2>&1; then
+  if (cd "${ROOT}/proto" && buf generate --template buf.gen.yaml); then
+    note_ok "Go stubs -> sdks/go/gen"
+  else
+    note_skip "Go codegen (buf generate failed; network or plugin issue?)"
+  fi
+else
+  note_skip "Go codegen (buf not found)"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

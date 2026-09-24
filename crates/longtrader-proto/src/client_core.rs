@@ -1,8 +1,10 @@
 //! Shared constants and URL helpers for Connect-RPC clients.
+//! Single owner is `crate::service_name`; these re-exports keep call sites short.
 
-pub(crate) const SERVICE_MARKET: &str = "longtrader.terminal.v1.MarketDataService";
-pub(crate) const SERVICE_TRADING: &str = "longtrader.terminal.v1.TradingService";
-pub(crate) const SERVICE_RUNTIME: &str = "longtrader.terminal.v1.RuntimeService";
+pub(crate) use crate::service_name::{
+    MARKET_DATA as SERVICE_MARKET, RUNTIME as SERVICE_RUNTIME, STRATEGY as SERVICE_STRATEGY,
+    TRADING as SERVICE_TRADING,
+};
 
 /// Trim trailing slashes from a base URL.
 #[must_use]

@@ -124,7 +124,17 @@ impl Rebalance {
             values.insert(asset.clone(), balance * price);
         }
         let plan = plan_trades(&values, &self.config.targets);
+        let total_value: Decimal = values.values().copied().sum();
         for (asset, delta) in &plan {
+            if total_value.is_zero() {
+                continue;
+            }
+            let actual_weight = values.get(asset).copied().unwrap_or_default() / total_value;
+            let target_weight = self.config.targets.get(asset).copied().unwrap_or_default();
+            if (actual_weight - target_weight).abs() <= self.config.band_pct {
+                tracing::debug!(asset = %asset, "within rebalance band; skipping");
+                continue;
+            }
             // Convert quote-value delta into quantity at the current price.
             let price = if *asset == self.config.quote_asset {
                 Decimal::ONE

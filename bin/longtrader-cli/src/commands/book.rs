@@ -1,3 +1,4 @@
+use color_eyre::Result;
 use longtrader_proto::client::TerminalClient;
 
 use crate::output::Renderer;
@@ -8,7 +9,7 @@ pub(crate) async fn run(
     symbol: &str,
     depth: u32,
     output: &Renderer,
-) {
+) -> Result<()> {
     match client.get_book(venue, symbol, depth).await {
         Ok(book) => {
             if let Renderer { format: crate::output::OutputFormat::Json, .. } = output {
@@ -29,7 +30,8 @@ pub(crate) async fn run(
                     println!("{:<15} {:<15}", level.price, level.amount);
                 }
             }
+            Ok(())
         }
-        Err(e) => output.render_msg(&format!("Error: {e}")),
+        Err(e) => Err(e.into()),
     }
 }

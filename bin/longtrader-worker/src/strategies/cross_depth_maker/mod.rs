@@ -55,7 +55,8 @@ impl CrossDepthMaker {
             .fetch_order_book(crate::proto::market::FetchOrderBookRequest {
                 exchange_id: buffa::MessageField::some(hedge),
                 symbol: self.config.venues.symbol.clone(),
-                limit: 1,
+                pagination: crate::proto::common::Pagination { limit: 1, ..Default::default() }
+                    .into(),
                 ..Default::default()
             })
             .await?;

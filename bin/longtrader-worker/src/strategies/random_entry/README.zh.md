@@ -1,39 +1,39 @@
-> [English](README.md) | **中文**
+# random_entry
 
-# random_entry — 随机测试单
+**研究/演示策略——不盈利。** 每个周期抛一枚有偏硬币（以 `p` 概率做多）并下 `qty` 市价单，可用 `seed` 复现。仅用于压测 worker，而非实盘。
 
-LongTrader 原生策略，基于可复现随机数源的连通性测试策略。
+## 参数
 
-## 逻辑
+继承自 `CommonParams`：`exchange_id`（默认 `"mock"`）、`label`（默认 `""`）、`symbol`（必填）、`timeframe`（默认 `"5m"`）、`poll_secs`（默认 `30`）。
 
-- 每 `interval_secs` 秒以 `entry_probability` 的概率提交一笔随机方向的
-  市价单。
-- 随机源为 SplitMix64，种子由 `seed` 固定 → 同配置重放序列一致，
-  便于联调与回归。
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `symbol` | String | 必填 | 交易标的 |
+| `timeframe` | String | `"5m"` | K 线周期（透传） |
+| `poll_secs` | u64 | `30` | 轮询间隔（秒） |
+| `qty` | Decimal | `0.001` | 下单数量 |
+| `seed` | u64 | `42` | 随机数种子（可复现） |
+| `p` | Decimal | `0.1` | 每周期做多概率 |
 
-用途：连通性、签名、限频、风控链路冒烟测试。**非盈利策略**。
-
-## 参数（`[strategy.params]`）
-
-| 字段 | 默认 | 说明 |
-|------|------|------|
-| `symbol` | 必填 | 交易对 |
-| `interval_secs` | `60` | 决策间隔 |
-| `entry_probability` | `0.05` | 每次触发概率 [0,1] |
-| `qty` | `0.0001` | 下单数量 |
-| `seed` | 黄金比例常数 | RNG 种子 |
-
-## 配置示例
+## 示例配置
 
 ```toml
 [strategy]
 type = "random_entry"
-
 [strategy.params]
-exchange_id = "binance"
-symbol = "BTCUSDT"
-interval_secs = 30
-entry_probability = "0.5"
+symbol = "BTC/USDT"
 qty = "0.001"
 seed = 42
+p = "0.1"
 ```
+
+## 依赖能力
+
+- `TradingGateway`（`create_order` / 市价单）
+- `MarketDataSource`（`get_candles`）
+
+## 风险提示
+
+- **非交易策略**——入场随机，期望 PnL 约为 0 减手续费。
+- 市价单滑点；运行会累积手续费/库存。
+- 仅用于 mock 场所的负载/集成测试。

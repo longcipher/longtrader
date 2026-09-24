@@ -9,4 +9,4 @@ from .ports import MarketPort, OverflowPolicy, TradingPort
 from .session import Session
 
 __all__ = ["Session", "OverflowPolicy", "TradingPort", "MarketPort"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

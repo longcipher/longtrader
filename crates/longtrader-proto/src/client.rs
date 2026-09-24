@@ -14,7 +14,10 @@ use futures_util::Stream;
 use thiserror::Error;
 
 use crate::{
-    client_core::{SERVICE_MARKET, SERVICE_RUNTIME, SERVICE_TRADING, service_url, trim_base_url},
+    client_core::{
+        SERVICE_MARKET, SERVICE_RUNTIME, SERVICE_STRATEGY, SERVICE_TRADING, service_url,
+        trim_base_url,
+    },
     proto::longtrader::terminal::v1 as proto,
     transport::TransportError,
 };
@@ -77,7 +80,7 @@ impl TerminalClient {
 
     fn request(&self, url: &str, body: Vec<u8>, content_type: &str) -> hpx::RequestBuilder {
         let mut builder = self.http.post(url).header("content-type", content_type).body(body);
-        if let Some(token) = &self.auth_token {
+        if let Some(token) = self.auth_token.as_deref().filter(|t| !t.is_empty()) {
             builder = builder.header("authorization", format!("Bearer {token}"));
         }
         builder
@@ -94,7 +97,7 @@ impl TerminalClient {
             &self.base_url,
             service,
             method,
-            self.auth_token.as_deref().unwrap_or(""),
+            self.auth_token.as_deref(),
             req,
         )
         .await
@@ -129,7 +132,11 @@ impl TerminalClient {
             venue: venue.to_string(),
             symbol: symbol.to_string(),
             timeframe: buffa::EnumValue::Known(timeframe),
-            limit,
+            pagination: crate::proto::longtrader::common::v1::Pagination {
+                limit: u64::from(limit),
+                ..Default::default()
+            }
+            .into(),
             ..Default::default()
         };
         let resp: proto::GetCandlesResponse = self.unary(SERVICE_MARKET, "GetCandles", req).await?;
@@ -156,6 +163,21 @@ impl TerminalClient {
             .ok_or_else(|| TerminalClientError::MissingField("book".to_string()))
     }
 
+    /// Fetch tickers (empty `symbols` = all).
+    pub async fn get_tickers(
+        &self,
+        venue: &str,
+        symbols: &[String],
+    ) -> Result<Vec<proto::Ticker>, TerminalClientError> {
+        let req = proto::GetTickersRequest {
+            venue: venue.to_string(),
+            symbols: symbols.to_vec(),
+            ..Default::default()
+        };
+        let resp: proto::GetTickersResponse = self.unary(SERVICE_MARKET, "GetTickers", req).await?;
+        Ok(resp.tickers)
+    }
+
     /// Search symbols by query.
     pub async fn search_symbols(
         &self,
@@ -166,7 +188,11 @@ impl TerminalClient {
         let req = proto::SearchSymbolsRequest {
             venue: venue.to_string(),
             query: query.to_string(),
-            limit,
+            pagination: crate::proto::longtrader::common::v1::Pagination {
+                limit: u64::from(limit),
+                ..Default::default()
+            }
+            .into(),
             ..Default::default()
         };
         let resp: proto::SearchSymbolsResponse =
@@ -220,8 +246,15 @@ impl TerminalClient {
         venue: &str,
         limit: u32,
     ) -> Result<Vec<proto::Order>, TerminalClientError> {
-        let req =
-            proto::GetOrderHistoryRequest { venue: venue.to_string(), limit, ..Default::default() };
+        let req = proto::GetOrderHistoryRequest {
+            venue: venue.to_string(),
+            pagination: crate::proto::longtrader::common::v1::Pagination {
+                limit: u64::from(limit),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        };
         let resp: proto::GetOrderHistoryResponse =
             self.unary(SERVICE_TRADING, "GetOrderHistory", req).await?;
         Ok(resp.orders)
@@ -235,7 +268,11 @@ impl TerminalClient {
     ) -> Result<Vec<proto::ClosedPosition>, TerminalClientError> {
         let req = proto::GetClosedPositionsRequest {
             venue: venue.to_string(),
-            limit,
+            pagination: crate::proto::longtrader::common::v1::Pagination {
+                limit: u64::from(limit),
+                ..Default::default()
+            }
+            .into(),
             ..Default::default()
         };
         let resp: proto::GetClosedPositionsResponse =
@@ -295,12 +332,12 @@ impl TerminalClient {
             .ok_or_else(|| TerminalClientError::MissingField("order".to_string()))
     }
 
-    /// Close a position.
+    /// Close a position (full close, market).
     pub async fn close_position(
         &self,
         venue: &str,
         position_id: &str,
-    ) -> Result<(), TerminalClientError> {
+    ) -> Result<proto::Position, TerminalClientError> {
         let req = proto::ClosePositionRequest {
             venue: venue.to_string(),
             position_id: position_id.to_string(),
@@ -308,9 +345,27 @@ impl TerminalClient {
             price_choice: Some(proto::close_position_request::PriceChoice::Market(true)),
             ..Default::default()
         };
-        let _resp: proto::ClosePositionResponse =
+        let resp: proto::ClosePositionResponse =
             self.unary(SERVICE_TRADING, "ClosePosition", req).await?;
-        Ok(())
+        resp.position
+            .as_option()
+            .cloned()
+            .ok_or_else(|| TerminalClientError::MissingField("position".to_string()))
+    }
+
+    /// Cancel all open orders (optionally one symbol).
+    pub async fn cancel_all(
+        &self,
+        venue: &str,
+        symbol: Option<&str>,
+    ) -> Result<Vec<proto::Order>, TerminalClientError> {
+        let req = proto::CancelAllRequest {
+            venue: venue.to_string(),
+            symbol: symbol.map(String::from),
+            ..Default::default()
+        };
+        let resp: proto::CancelAllResponse = self.unary(SERVICE_TRADING, "CancelAll", req).await?;
+        Ok(resp.orders)
     }
 
     /// Close all positions.
@@ -320,6 +375,91 @@ impl TerminalClient {
         let _resp: proto::CloseAllPositionsResponse =
             self.unary(SERVICE_TRADING, "CloseAllPositions", req).await?;
         Ok(())
+    }
+
+    // ---- StrategyService ----
+
+    /// List strategies.
+    pub async fn list_strategies(&self) -> Result<Vec<proto::StrategyStatus>, TerminalClientError> {
+        let req = proto::ListStrategiesRequest::default();
+        let resp: proto::ListStrategiesResponse =
+            self.unary(SERVICE_STRATEGY, "ListStrategies", req).await?;
+        Ok(resp.strategies)
+    }
+
+    /// Start a strategy.
+    pub async fn start_strategy(
+        &self,
+        strategy_id: &str,
+        name: &str,
+        params_json: &str,
+    ) -> Result<proto::StrategyStatus, TerminalClientError> {
+        let req = proto::StartStrategyRequest {
+            strategy_id: strategy_id.to_string(),
+            name: name.to_string(),
+            params_json: params_json.to_string(),
+            ..Default::default()
+        };
+        let resp: proto::StrategyStatus =
+            self.unary(SERVICE_STRATEGY, "StartStrategy", req).await?;
+        Ok(resp)
+    }
+
+    /// Pause a strategy.
+    pub async fn pause_strategy(
+        &self,
+        strategy_id: &str,
+    ) -> Result<proto::StrategyStatus, TerminalClientError> {
+        let req = proto::PauseStrategyRequest {
+            strategy_id: strategy_id.to_string(),
+            ..Default::default()
+        };
+        let resp: proto::StrategyStatus =
+            self.unary(SERVICE_STRATEGY, "PauseStrategy", req).await?;
+        Ok(resp)
+    }
+
+    /// Resume a strategy.
+    pub async fn resume_strategy(
+        &self,
+        strategy_id: &str,
+    ) -> Result<proto::StrategyStatus, TerminalClientError> {
+        let req = proto::ResumeStrategyRequest {
+            strategy_id: strategy_id.to_string(),
+            ..Default::default()
+        };
+        let resp: proto::StrategyStatus =
+            self.unary(SERVICE_STRATEGY, "ResumeStrategy", req).await?;
+        Ok(resp)
+    }
+
+    /// Stop a strategy.
+    pub async fn stop_strategy(
+        &self,
+        strategy_id: &str,
+        cancel_all_orders: bool,
+    ) -> Result<proto::StrategyStatus, TerminalClientError> {
+        let req = proto::StopStrategyRequest {
+            strategy_id: strategy_id.to_string(),
+            cancel_all_orders,
+            ..Default::default()
+        };
+        let resp: proto::StrategyStatus = self.unary(SERVICE_STRATEGY, "StopStrategy", req).await?;
+        Ok(resp)
+    }
+
+    /// Get strategy status.
+    pub async fn get_strategy_status(
+        &self,
+        strategy_id: &str,
+    ) -> Result<proto::StrategyStatus, TerminalClientError> {
+        let req = proto::GetStrategyStatusRequest {
+            strategy_id: strategy_id.to_string(),
+            ..Default::default()
+        };
+        let resp: proto::StrategyStatus =
+            self.unary(SERVICE_STRATEGY, "GetStrategyStatus", req).await?;
+        Ok(resp)
     }
 
     // ---- RuntimeService ----
@@ -368,7 +508,7 @@ impl TerminalClient {
         body.extend_from_slice(&payload);
 
         let resp = self
-            .request(&url, body, "application/connect+proto")
+            .request(&url, body, crate::transport::CONNECT_PROTO_STREAM)
             .send()
             .await
             .map_err(|e| TerminalClientError::Http(e.to_string()))?;

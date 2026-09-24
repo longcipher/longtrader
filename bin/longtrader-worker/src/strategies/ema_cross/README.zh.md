@@ -1,41 +1,40 @@
-> [English](README.md) | **中文**
+# ema_cross
 
-# ema_cross — EMA 金叉/死叉
+轮询 K 线，计算快/慢 EMA，在快慢线出现新交叉时下一笔市价单。交叉状态为内存中的边沿触发；重启后等待下一个新交叉，而非重放上一次。
 
-LongTrader 原生策略，基于快慢 EMA 金叉/死叉的趋势跟踪实现。
+## 参数
 
-## 逻辑
+继承自 `CommonParams`：`exchange_id`（默认 `"mock"`）、`label`（默认 `""`）、`symbol`（必填）、`timeframe`（默认 `"5m"`）、`poll_secs`（默认 `30`）。
 
-- 每 `poll_secs` 秒通过 `MarketDataSource::get_candles` 拉取最近 K 线窗口。
-- 对收盘价序列计算快/慢 EMA。
-- 快线上穿慢线 → 市价买入 `qty`；下穿 → 市价卖出。
-- 交叉状态为边沿触发（内存态）：重启后等待下一次新鲜交叉，不会重放旧信号。
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `symbol` | String | 必填 | 交易标的 |
+| `timeframe` | String | `"5m"` | K 线周期 |
+| `poll_secs` | u64 | `30` | 轮询间隔（秒） |
+| `fast_window` | usize | `9` | 快线 EMA 周期 |
+| `slow_window` | usize | `21` | 慢线 EMA 周期 |
+| `qty` | Decimal | `0.001` | 市价单数量 |
 
-## 参数（`[strategy.params]`）
-
-| 字段 | 默认 | 说明 |
-|------|------|------|
-| `exchange_id` | `"mock"` | 交易所标识 |
-| `label` | `""` | 子账户标签 |
-| `symbol` | 必填 | 交易对 |
-| `timeframe` | `"5m"` | K 线周期 |
-| `poll_secs` | `30` | 轮询间隔 |
-| `fast_window` | `9` | 快 EMA 窗口 |
-| `slow_window` | `21` | 慢 EMA 窗口 |
-| `qty` | `0.001` | 下单数量 |
-
-## 配置示例
+## 示例配置
 
 ```toml
 [strategy]
 type = "ema_cross"
-
 [strategy.params]
-exchange_id = "binance"
-symbol = "BTCUSDT"
-timeframe = "5m"
-poll_secs = 30
+symbol = "BTC/USDT"
+exchange_id = "mock"
 fast_window = 9
 slow_window = 21
 qty = "0.001"
 ```
+
+## 依赖能力
+
+- `TradingGateway`（`create_order` / 市价单）
+- `MarketDataSource`（`get_candles`）
+
+## 风险提示
+
+- 市价单相对信号价存在滑点。
+- 交叉状态在内存中，重启后可能在重启后首次交叉即交易。
+- 滞后指标，震荡行情中易反复打脸。

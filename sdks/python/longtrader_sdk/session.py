@@ -5,9 +5,9 @@ attach -> heartbeat -> reconcile -> trade. Generated stubs are imported
 lazily so this module imports cleanly even before ``just sdk-generate``
 has produced ``longtrader_sdk/proto``.
 
-Wire format (see docs/bare-protocol-guide.md):
+Wire format (see ../../docs/bare-protocol-guide.md):
   POST {base_url}/longtrader.worker.v1.WorkerSessionService/{Method}
-  Content-Type: application/proto
+  Content-Type: application/proto (unary) or application/connect+proto (streaming)
   Body: raw protobuf request; 200 body is the raw protobuf response.
 """
 
@@ -90,7 +90,7 @@ class Session:
         req = pb.AttachSessionRequest(
             token=token,
             client_name="longtrader-sdk-python",
-            client_version="0.1.0",
+            client_version="0.2.0",
         )
         if policy is not None:
             req.policy.CopyFrom(policy)
