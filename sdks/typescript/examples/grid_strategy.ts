@@ -36,7 +36,10 @@ import {
   OrderType,
   TimeInForce,
 } from "../src/gen/longtrader/trading/v1/trading_pb.js";
-import type { Order, OrderRequest } from "../src/gen/longtrader/trading/v1/trading_pb.js";
+import type {
+  Order,
+  OrderRequest,
+} from "../src/gen/longtrader/trading/v1/trading_pb.js";
 import {
   FetchTickerRequestSchema,
   FetchTickerResponseSchema,
