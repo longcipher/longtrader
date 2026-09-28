@@ -53,10 +53,15 @@ impl SimpleGridConfig {
                 params.exchange_id.as_deref().unwrap_or("mock"),
                 params.label.as_deref().unwrap_or_default(),
             ),
-            symbol: params.symbol.clone().ok_or_else(|| color_eyre::eyre::eyre!("symbol is required"))?,
+            symbol: params
+                .symbol
+                .clone()
+                .ok_or_else(|| color_eyre::eyre::eyre!("symbol is required"))?,
             lower_price: required(params.lower_price, "lower_price")?,
             upper_price: required(params.upper_price, "upper_price")?,
-            num_levels: params.num_levels.ok_or_else(|| color_eyre::eyre::eyre!("num_levels is required"))?,
+            num_levels: params
+                .num_levels
+                .ok_or_else(|| color_eyre::eyre::eyre!("num_levels is required"))?,
             qty_per_level: required(params.qty_per_level, "qty_per_level")?,
         })
     }

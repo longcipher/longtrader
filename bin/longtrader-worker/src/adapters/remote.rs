@@ -330,10 +330,14 @@ impl MarketDataSource for RemoteAdapter {
         // on a fixed cadence; the channel applies `policy` (DropOldest / Coalesce
         // / Block) so a slow consumer never stalls the worker or other sessions.
         let this = self.clone();
-        Ok(crate::adapters::poll_market_data(req, policy, move |channel, exchange_id, symbol, seq| {
-            let this = this.clone();
-            async move { this.poll_snapshot(channel, &exchange_id, symbol, &seq).await }
-        }))
+        Ok(crate::adapters::poll_market_data(
+            req,
+            policy,
+            move |channel, exchange_id, symbol, seq| {
+                let this = this.clone();
+                async move { this.poll_snapshot(channel, &exchange_id, symbol, &seq).await }
+            },
+        ))
     }
 }
 

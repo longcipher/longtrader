@@ -358,33 +358,37 @@ impl MarketDataSource for MockAdapter {
             .collect();
         let price = self.state.lock().await.price;
         let this = self.clone();
-        Ok(crate::adapters::poll_market_data(req, policy, move |channel, exchange_id, symbol, seq| {
-            let this = this.clone();
-            let _ = (channel, exchange_id);
-            let price = price;
-            async move {
-                let _ = this;
-                let next = seq.fetch_add(1, Ordering::Relaxed) + 1;
-                let header = common::EventHeader {
-                    trace_id: "mock".to_string(),
-                    sequence: next,
-                    ..common::EventHeader::default()
-                };
-                let ticker = market::Ticker {
-                    header: MessageField::some(header),
-                    symbol,
-                    timestamp: MessageField::some(now_ts()),
-                    last: MessageField::some(decimal_to_common(price)),
-                    ..Default::default()
-                };
-                Ok(Some(market::MarketDataEvent {
-                    header: ticker.header.clone(),
-                    event: Some(market::market_data_event::Event::Ticker(Box::new(ticker))),
-                    resume_token: format!("{next}"),
-                    ..Default::default()
-                }))
-            }
-        }))
+        Ok(crate::adapters::poll_market_data(
+            req,
+            policy,
+            move |channel, exchange_id, symbol, seq| {
+                let this = this.clone();
+                let _ = (channel, exchange_id);
+                let price = price;
+                async move {
+                    let _ = this;
+                    let next = seq.fetch_add(1, Ordering::Relaxed) + 1;
+                    let header = common::EventHeader {
+                        trace_id: "mock".to_string(),
+                        sequence: next,
+                        ..common::EventHeader::default()
+                    };
+                    let ticker = market::Ticker {
+                        header: MessageField::some(header),
+                        symbol,
+                        timestamp: MessageField::some(now_ts()),
+                        last: MessageField::some(decimal_to_common(price)),
+                        ..Default::default()
+                    };
+                    Ok(Some(market::MarketDataEvent {
+                        header: ticker.header.clone(),
+                        event: Some(market::market_data_event::Event::Ticker(Box::new(ticker))),
+                        resume_token: format!("{next}"),
+                        ..Default::default()
+                    }))
+                }
+            },
+        ))
     }
 }
 

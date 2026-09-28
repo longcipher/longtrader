@@ -1,9 +1,6 @@
 use std::path::Path;
 
-use color_eyre::{
-    Result,
-    eyre::WrapErr,
-};
+use color_eyre::{Result, eyre::WrapErr};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 

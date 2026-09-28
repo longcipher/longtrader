@@ -32,12 +32,10 @@ impl Renderer {
 
     pub(crate) fn render_symbols(&self, symbols: &[Symbol]) {
         match self.format {
-            OutputFormat::Json => {
-                match serde_json::to_string_pretty(symbols) {
-                    Ok(json) => println!("{json}"),
-                    Err(e) => eprintln!("JSON serialization error: {e}"),
-                }
-            }
+            OutputFormat::Json => match serde_json::to_string_pretty(symbols) {
+                Ok(json) => println!("{json}"),
+                Err(e) => eprintln!("JSON serialization error: {e}"),
+            },
             OutputFormat::Table => {
                 println!("{:<15} {:<20} {:<10} {:<10}", "NAME", "DISPLAY", "BASE", "QUOTE");
                 println!("{}", "-".repeat(60));
@@ -56,12 +54,10 @@ impl Renderer {
 
     pub(crate) fn render_candles(&self, candles: &[Candle]) {
         match self.format {
-            OutputFormat::Json => {
-                match serde_json::to_string_pretty(candles) {
-                    Ok(json) => println!("{json}"),
-                    Err(e) => eprintln!("JSON serialization error: {e}"),
-                }
-            }
+            OutputFormat::Json => match serde_json::to_string_pretty(candles) {
+                Ok(json) => println!("{json}"),
+                Err(e) => eprintln!("JSON serialization error: {e}"),
+            },
             OutputFormat::Table => {
                 println!(
                     "{:<20} {:<12} {:<12} {:<12} {:<12} {:<12}",
@@ -80,12 +76,10 @@ impl Renderer {
 
     pub(crate) fn render_account(&self, account: &Account) {
         match self.format {
-            OutputFormat::Json => {
-                match serde_json::to_string_pretty(account) {
-                    Ok(json) => println!("{json}"),
-                    Err(e) => eprintln!("JSON serialization error: {e}"),
-                }
-            }
+            OutputFormat::Json => match serde_json::to_string_pretty(account) {
+                Ok(json) => println!("{json}"),
+                Err(e) => eprintln!("JSON serialization error: {e}"),
+            },
             OutputFormat::Table => {
                 println!("{:<15} {}", "Balance", account.balance);
                 println!("{:<15} {}", "Equity", account.equity);
@@ -98,12 +92,10 @@ impl Renderer {
 
     pub(crate) fn render_positions(&self, positions: &[Position]) {
         match self.format {
-            OutputFormat::Json => {
-                match serde_json::to_string_pretty(positions) {
-                    Ok(json) => println!("{json}"),
-                    Err(e) => eprintln!("JSON serialization error: {e}"),
-                }
-            }
+            OutputFormat::Json => match serde_json::to_string_pretty(positions) {
+                Ok(json) => println!("{json}"),
+                Err(e) => eprintln!("JSON serialization error: {e}"),
+            },
             OutputFormat::Table => {
                 println!(
                     "{:<12} {:<12} {:<8} {:<12} {:<12} {:<12} {:<12}",
@@ -137,12 +129,10 @@ impl Renderer {
 
     pub(crate) fn render_orders(&self, orders: &[Order]) {
         match self.format {
-            OutputFormat::Json => {
-                match serde_json::to_string_pretty(orders) {
-                    Ok(json) => println!("{json}"),
-                    Err(e) => eprintln!("JSON serialization error: {e}"),
-                }
-            }
+            OutputFormat::Json => match serde_json::to_string_pretty(orders) {
+                Ok(json) => println!("{json}"),
+                Err(e) => eprintln!("JSON serialization error: {e}"),
+            },
             OutputFormat::Table => {
                 println!(
                     "{:<12} {:<12} {:<6} {:<8} {:<10} {:<10} {:<10}",
@@ -198,12 +188,10 @@ impl Renderer {
 
     pub(crate) fn render_venues(&self, venues: &[VenueStatus]) {
         match self.format {
-            OutputFormat::Json => {
-                match serde_json::to_string_pretty(venues) {
-                    Ok(json) => println!("{json}"),
-                    Err(e) => eprintln!("JSON serialization error: {e}"),
-                }
-            }
+            OutputFormat::Json => match serde_json::to_string_pretty(venues) {
+                Ok(json) => println!("{json}"),
+                Err(e) => eprintln!("JSON serialization error: {e}"),
+            },
             OutputFormat::Table => {
                 println!("{:<15} {:<10} {:<10}", "NAME", "CONNECTED", "SYMBOLS");
                 println!("{}", "-".repeat(35));

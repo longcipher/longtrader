@@ -738,10 +738,14 @@ impl MarketDataSource for TerminalAdapter {
         policy: OverflowPolicy,
     ) -> Result<MarketEventStream, PortError> {
         let this = self.clone();
-        Ok(crate::adapters::poll_market_data(req, policy, move |channel, exchange_id, symbol, seq| {
-            let this = this.clone();
-            async move { this.poll_snapshot(channel, &exchange_id, symbol, &seq).await }
-        }))
+        Ok(crate::adapters::poll_market_data(
+            req,
+            policy,
+            move |channel, exchange_id, symbol, seq| {
+                let this = this.clone();
+                async move { this.poll_snapshot(channel, &exchange_id, symbol, &seq).await }
+            },
+        ))
     }
 }
 

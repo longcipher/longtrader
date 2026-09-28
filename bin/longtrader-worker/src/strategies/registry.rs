@@ -67,14 +67,19 @@ pub fn registry() -> &'static [StrategyDescriptor] {
                 factory: |ctx| {
                     let cfg =
                         ema_cross::EmaCrossConfig::from_params(ctx.config.strategy.params.table())?;
-                    Ok(Box::new(ema_cross::EmaCross::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                    Ok(Box::new(ema_cross::EmaCross::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
                 },
             },
             StrategyDescriptor {
                 name: "supertrend",
                 factory: |ctx| {
-                    let cfg =
-                        supertrend::SupertrendConfig::from_params(ctx.config.strategy.params.table())?;
+                    let cfg = supertrend::SupertrendConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
                     Ok(Box::new(supertrend::Supertrend::new(
                         cfg,
                         ctx.gateway.clone(),
@@ -87,7 +92,11 @@ pub fn registry() -> &'static [StrategyDescriptor] {
                 factory: |ctx| {
                     let cfg =
                         boll_grid::BollGridConfig::from_params(ctx.config.strategy.params.table())?;
-                    Ok(Box::new(boll_grid::BollGrid::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                    Ok(Box::new(boll_grid::BollGrid::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
                 },
             },
             StrategyDescriptor {
@@ -111,8 +120,9 @@ pub fn registry() -> &'static [StrategyDescriptor] {
             StrategyDescriptor {
                 name: "fixed_maker",
                 factory: |ctx| {
-                    let cfg =
-                        fixed_maker::FixedMakerConfig::from_params(ctx.config.strategy.params.table())?;
+                    let cfg = fixed_maker::FixedMakerConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
                     Ok(Box::new(fixed_maker::FixedMaker::new(
                         cfg,
                         ctx.gateway.clone(),
@@ -147,21 +157,31 @@ pub fn registry() -> &'static [StrategyDescriptor] {
                 factory: |ctx| {
                     let cfg =
                         sentinel::SentinelConfig::from_params(ctx.config.strategy.params.table())?;
-                    Ok(Box::new(sentinel::Sentinel::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                    Ok(Box::new(sentinel::Sentinel::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
                 },
             },
             StrategyDescriptor {
                 name: "autoborrow",
                 factory: |ctx| {
-                    let cfg =
-                        autoborrow::AutoborrowConfig::from_params(ctx.config.strategy.params.table())?;
-                    Ok(Box::new(autoborrow::Autoborrow::new(cfg, ctx.gateway.clone(), ctx.ops.clone())))
+                    let cfg = autoborrow::AutoborrowConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(autoborrow::Autoborrow::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.ops.clone(),
+                    )))
                 },
             },
             StrategyDescriptor {
                 name: "convert",
                 factory: |ctx| {
-                    let cfg = convert::ConvertConfig::from_params(ctx.config.strategy.params.table())?;
+                    let cfg =
+                        convert::ConvertConfig::from_params(ctx.config.strategy.params.table())?;
                     Ok(Box::new(convert::Convert::new(cfg, ctx.ops.clone())))
                 },
             },
@@ -253,8 +273,9 @@ pub fn registry() -> &'static [StrategyDescriptor] {
             StrategyDescriptor {
                 name: "rebalance",
                 factory: |ctx| {
-                    let cfg =
-                        rebalance::RebalanceConfig::from_params(ctx.config.strategy.params.table())?;
+                    let cfg = rebalance::RebalanceConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
                     Ok(Box::new(rebalance::Rebalance::new(
                         cfg,
                         ctx.gateway.clone(),
@@ -265,8 +286,9 @@ pub fn registry() -> &'static [StrategyDescriptor] {
             StrategyDescriptor {
                 name: "market_cap",
                 factory: |ctx| {
-                    let cfg =
-                        market_cap::MarketCapConfig::from_params(ctx.config.strategy.params.table())?;
+                    let cfg = market_cap::MarketCapConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
                     Ok(Box::new(market_cap::MarketCap::new(
                         cfg,
                         ctx.gateway.clone(),

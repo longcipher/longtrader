@@ -19,16 +19,17 @@ pub mod mock;
 pub mod remote;
 pub mod terminal;
 
+use std::sync::{Arc, atomic::AtomicU64};
+
 pub use mock::MockAdapter;
 pub use remote::RemoteAdapter;
 pub use terminal::TerminalAdapter;
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-
-use crate::overflow;
-use crate::ports::{MarketEventStream, OverflowPolicy, PortError};
-use crate::proto::{common, market};
+use crate::{
+    overflow,
+    ports::{MarketEventStream, OverflowPolicy, PortError},
+    proto::{common, market},
+};
 
 /// Build an [`common::ExchangeId`] from config strings.
 pub fn exchange_id(id: &str, label: &str) -> common::ExchangeId {
@@ -69,8 +70,8 @@ pub fn market_event_key(event: &market::MarketDataEvent) -> String {
 /// # Arguments
 /// * `req` - The stream market data request
 /// * `policy` - The overflow policy to apply
-/// * `fetcher` - A closure that fetches one snapshot for a given subscription.
-///   The closure must be `Send + 'static` and the returned future must be `Send`.
+/// * `fetcher` - A closure that fetches one snapshot for a given subscription. The closure must be
+///   `Send + 'static` and the returned future must be `Send`.
 ///
 /// # Returns
 /// A receiver that yields `MarketDataEvent`s
@@ -85,15 +86,19 @@ pub fn poll_market_data<F, Fut>(
     mut fetcher: F,
 ) -> MarketEventStream
 where
-    F: FnMut(market::StreamChannel, common::ExchangeId, String, Arc<AtomicU64>) -> Fut + Send + 'static + Clone,
-    Fut: std::future::Future<Output = Result<Option<market::MarketDataEvent>, PortError>> + Send + 'static,
+    F: FnMut(market::StreamChannel, common::ExchangeId, String, Arc<AtomicU64>) -> Fut
+        + Send
+        + 'static
+        + Clone,
+    Fut: std::future::Future<Output = Result<Option<market::MarketDataEvent>, PortError>>
+        + Send
+        + 'static,
 {
     const POLL_INTERVAL_MS: u64 = 1_000;
     const BUFFER_CAP: usize = 16;
 
     let seq = Arc::new(AtomicU64::new(0));
-    let (tx, rx) =
-        overflow::policy_channel(BUFFER_CAP, policy, market_event_key);
+    let (tx, rx) = overflow::policy_channel(BUFFER_CAP, policy, market_event_key);
 
     // exchange_id is a required field in the proto definition.
     // If it is None, we cannot proceed.
@@ -114,7 +119,8 @@ where
         let symbol = sub.symbol;
         let mut fetcher = fetcher.clone();
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_millis(POLL_INTERVAL_MS));
             loop {
                 if tx.is_closed() {
                     break;
@@ -123,7 +129,8 @@ where
                 if tx.is_closed() {
                     break;
                 }
-                match fetcher(channel, exchange_id.clone(), symbol.clone(), Arc::clone(&seq)).await {
+                match fetcher(channel, exchange_id.clone(), symbol.clone(), Arc::clone(&seq)).await
+                {
                     Ok(Some(event)) => {
                         tx.send(event).await;
                     }

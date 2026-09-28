@@ -165,13 +165,7 @@ impl SessionHandle {
 
     /// Milliseconds elapsed since the last heartbeat (pause-aware).
     async fn last_seen_elapsed_ms(&self) -> u64 {
-        self.last_seen
-            .lock()
-            .await
-            .elapsed()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX)
+        self.last_seen.lock().await.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
     }
 
     pub async fn policy(&self) -> SessionPolicy {

@@ -185,13 +185,15 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
         let req = request.to_owned_message();
         let handle = self.manager.get(&req.session_id).await?;
         let strategy_id = ulid::Ulid::generate().to_string();
-        handle.set_strategy(super::StrategyInfo {
-            id: strategy_id.clone(),
-            name: req.name.clone(),
-            started_at_ms: now_ns() / 1_000_000,
-            orders_submitted: 0,
-            log_events: 0,
-        }).await;
+        handle
+            .set_strategy(super::StrategyInfo {
+                id: strategy_id.clone(),
+                name: req.name.clone(),
+                started_at_ms: now_ns() / 1_000_000,
+                orders_submitted: 0,
+                log_events: 0,
+            })
+            .await;
         let resp = worker::RegisterStrategyResponse { strategy_id, ..Default::default() };
         Response::ok(PreEncoded::from_message(&resp))
     }
