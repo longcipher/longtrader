@@ -186,6 +186,20 @@ message Account {
   common.v1.Decimal margin_frozen = 5;
 }
 
+message Trade {
+  string id = 1;
+  string order_id = 2;
+  string symbol = 3;
+  OrderSide side = 4;
+  common.v1.Decimal price = 5;
+  common.v1.Decimal amount = 6;
+  common.v1.Decimal cost = 7;
+  common.v1.Decimal fee = 8;
+  string fee_currency = 9;
+  google.protobuf.Timestamp timestamp = 10;
+  bool maker = 11;
+}
+
 message Position {
   string id = 1;
   string symbol = 2;
