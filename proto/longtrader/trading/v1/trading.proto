@@ -209,9 +209,14 @@ message Position {
   common.v1.Decimal entry_price = 6;
   common.v1.Decimal mark_price = 7;
   common.v1.Decimal unrealized_pnl = 8;
-  string order_id = 9;
+  // Absent when the venue does not report the originating order.
+  optional string order_id = 9;
   common.v1.Decimal current_price = 10;
   google.protobuf.Timestamp timestamp = 11;
+  // Bracket orders attached to the position; unset means "not set" (the
+  // `ModifyPosition` RPC clears a bracket when the field is absent).
+  optional common.v1.Decimal take_profit = 12;
+  optional common.v1.Decimal stop_loss = 13;
   // Position open time, Unix milliseconds.
   google.protobuf.Timestamp opened_at = 17;
 }
