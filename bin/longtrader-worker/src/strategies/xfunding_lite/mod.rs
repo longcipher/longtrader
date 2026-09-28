@@ -150,7 +150,7 @@ mod tests {
     #[tokio::test]
     async fn positive_rate_opens_short_and_zero_rate_closes() {
         let adapter = StdArc::new(MockAdapter::new(dec!(100)));
-        adapter.set_funding_rate(dec!(0.0005));
+        adapter.set_funding_rate(dec!(0.0005)).await;
         let config = XfundingLiteConfig::from_params(
             &toml::from_str("symbol = \"BTCUSDT\"\nqty = \"0.1\"").expect("toml"),
         )
@@ -160,14 +160,14 @@ mod tests {
         let s = XfundingLite::new(config, gateway, funding);
 
         s.tick().await.expect("tick");
-        assert_eq!(adapter.trigger_orders().len(), 0);
+        assert_eq!(adapter.trigger_orders().await.len(), 0);
         let open = adapter
             .fetch_open_orders(crate::proto::trading::FetchOpenOrdersRequest::default())
             .await
             .expect("orders");
         assert_eq!(open.len(), 1, "short opened");
 
-        adapter.set_funding_rate(Decimal::ZERO);
+        adapter.set_funding_rate(Decimal::ZERO).await;
         s.tick().await.expect("tick");
         let open = adapter
             .fetch_open_orders(crate::proto::trading::FetchOpenOrdersRequest::default())

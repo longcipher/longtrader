@@ -121,7 +121,7 @@ mod tests {
     #[tokio::test]
     async fn borrows_when_below_floor() {
         let adapter = StdArc::new(MockAdapter::new(dec!(100)));
-        adapter.set_op_balance(dec!(50));
+        adapter.set_op_balance(dec!(50)).await;
         let config = AutoborrowConfig::from_params(
             &toml::from_str(
                 "symbol = \"BTCUSDT\"\nasset = \"USDT\"\nmin_balance = \"200\"\npoll_secs = 1",
@@ -145,7 +145,7 @@ mod tests {
     #[tokio::test]
     async fn no_borrow_when_above_floor() {
         let adapter = StdArc::new(MockAdapter::new(dec!(100)));
-        adapter.set_op_balance(dec!(500));
+        adapter.set_op_balance(dec!(500)).await;
         let config = AutoborrowConfig::from_params(
             &toml::from_str("symbol = \"BTCUSDT\"\nasset = \"USDT\"\nmin_balance = \"200\"")
                 .expect("toml"),

@@ -2,8 +2,11 @@
 //!
 //! Extracted from `strategies::mod`: adding a strategy means appending one
 //! entry here — no string dispatch elsewhere (open/closed).
+//!
+//! Uses `OnceLock` for lazy initialization, allowing strategies to be
+//! registered from other crates or modules without modifying this file.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use color_eyre::Result;
 
@@ -39,240 +42,247 @@ pub struct StrategyDescriptor {
     pub factory: StrategyFactory,
 }
 
+static REGISTRY: OnceLock<Vec<StrategyDescriptor>> = OnceLock::new();
+
 /// All known strategies. Order is irrelevant; lookup is by `name`.
+///
+/// Uses `OnceLock` for lazy initialization. The registry is initialized once
+/// on first access and reused thereafter.
 pub fn registry() -> &'static [StrategyDescriptor] {
-    &[
-        StrategyDescriptor {
-            name: "simple_grid",
-            factory: |ctx| {
-                let cfg = ctx.config.grid_config()?;
-                Ok(Box::new(simple_grid::SimpleGrid::new(
-                    cfg,
-                    ctx.gateway.clone(),
-                    ctx.market.clone(),
-                )))
+    REGISTRY.get_or_init(|| {
+        vec![
+            StrategyDescriptor {
+                name: "simple_grid",
+                factory: |ctx| {
+                    let cfg = simple_grid::SimpleGridConfig::from_config(&ctx.config)?;
+                    Ok(Box::new(simple_grid::SimpleGrid::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "ema_cross",
-            factory: |ctx| {
-                let cfg =
-                    ema_cross::EmaCrossConfig::from_params(ctx.config.strategy.params.table())?;
-                Ok(Box::new(ema_cross::EmaCross::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+            StrategyDescriptor {
+                name: "ema_cross",
+                factory: |ctx| {
+                    let cfg =
+                        ema_cross::EmaCrossConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(ema_cross::EmaCross::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "supertrend",
-            factory: |ctx| {
-                let cfg =
-                    supertrend::SupertrendConfig::from_params(ctx.config.strategy.params.table())?;
-                Ok(Box::new(supertrend::Supertrend::new(
-                    cfg,
-                    ctx.gateway.clone(),
-                    ctx.market.clone(),
-                )))
+            StrategyDescriptor {
+                name: "supertrend",
+                factory: |ctx| {
+                    let cfg =
+                        supertrend::SupertrendConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(supertrend::Supertrend::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "boll_grid",
-            factory: |ctx| {
-                let cfg =
-                    boll_grid::BollGridConfig::from_params(ctx.config.strategy.params.table())?;
-                Ok(Box::new(boll_grid::BollGrid::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+            StrategyDescriptor {
+                name: "boll_grid",
+                factory: |ctx| {
+                    let cfg =
+                        boll_grid::BollGridConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(boll_grid::BollGrid::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "dca_scheduler",
-            factory: |ctx| {
-                let cfg = dca_scheduler::DcaSchedulerConfig::from_params(
-                    ctx.config.strategy.params.table(),
-                )?;
-                Ok(Box::new(dca_scheduler::DcaScheduler::new(cfg, ctx.gateway.clone())))
+            StrategyDescriptor {
+                name: "dca_scheduler",
+                factory: |ctx| {
+                    let cfg = dca_scheduler::DcaSchedulerConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(dca_scheduler::DcaScheduler::new(cfg, ctx.gateway.clone())))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "dca",
-            factory: |ctx| {
-                let cfg = dca_scheduler::DcaSchedulerConfig::from_params(
-                    ctx.config.strategy.params.table(),
-                )?;
-                Ok(Box::new(dca_scheduler::DcaScheduler::new(cfg, ctx.gateway.clone())))
+            StrategyDescriptor {
+                name: "dca",
+                factory: |ctx| {
+                    let cfg = dca_scheduler::DcaSchedulerConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(dca_scheduler::DcaScheduler::new(cfg, ctx.gateway.clone())))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "fixed_maker",
-            factory: |ctx| {
-                let cfg =
-                    fixed_maker::FixedMakerConfig::from_params(ctx.config.strategy.params.table())?;
-                Ok(Box::new(fixed_maker::FixedMaker::new(
-                    cfg,
-                    ctx.gateway.clone(),
-                    ctx.market.clone(),
-                )))
+            StrategyDescriptor {
+                name: "fixed_maker",
+                factory: |ctx| {
+                    let cfg =
+                        fixed_maker::FixedMakerConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(fixed_maker::FixedMaker::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "random_entry",
-            factory: |ctx| {
-                let cfg = random_entry::RandomEntryConfig::from_params(
-                    ctx.config.strategy.params.table(),
-                )?;
-                Ok(Box::new(random_entry::RandomEntry::new(cfg, ctx.gateway.clone())))
+            StrategyDescriptor {
+                name: "random_entry",
+                factory: |ctx| {
+                    let cfg = random_entry::RandomEntryConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(random_entry::RandomEntry::new(cfg, ctx.gateway.clone())))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "xfunding_lite",
-            factory: |ctx| {
-                let cfg = xfunding_lite::XfundingLiteConfig::from_params(
-                    ctx.config.strategy.params.table(),
-                )?;
-                Ok(Box::new(xfunding_lite::XfundingLite::new(
-                    cfg,
-                    ctx.gateway.clone(),
-                    ctx.funding.clone(),
-                )))
+            StrategyDescriptor {
+                name: "xfunding_lite",
+                factory: |ctx| {
+                    let cfg = xfunding_lite::XfundingLiteConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(xfunding_lite::XfundingLite::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.funding.clone(),
+                    )))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "sentinel",
-            factory: |ctx| {
-                let cfg =
-                    sentinel::SentinelConfig::from_params(ctx.config.strategy.params.table())?;
-                Ok(Box::new(sentinel::Sentinel::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+            StrategyDescriptor {
+                name: "sentinel",
+                factory: |ctx| {
+                    let cfg =
+                        sentinel::SentinelConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(sentinel::Sentinel::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "autoborrow",
-            factory: |ctx| {
-                let cfg =
-                    autoborrow::AutoborrowConfig::from_params(ctx.config.strategy.params.table())?;
-                Ok(Box::new(autoborrow::Autoborrow::new(cfg, ctx.gateway.clone(), ctx.ops.clone())))
+            StrategyDescriptor {
+                name: "autoborrow",
+                factory: |ctx| {
+                    let cfg =
+                        autoborrow::AutoborrowConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(autoborrow::Autoborrow::new(cfg, ctx.gateway.clone(), ctx.ops.clone())))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "convert",
-            factory: |ctx| {
-                let cfg = convert::ConvertConfig::from_params(ctx.config.strategy.params.table())?;
-                Ok(Box::new(convert::Convert::new(cfg, ctx.ops.clone())))
+            StrategyDescriptor {
+                name: "convert",
+                factory: |ctx| {
+                    let cfg = convert::ConvertConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(convert::Convert::new(cfg, ctx.ops.clone())))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "deposit_transfer",
-            factory: |ctx| {
-                let cfg = deposit_transfer::DepositTransferConfig::from_params(
-                    ctx.config.strategy.params.table(),
-                )?;
-                Ok(Box::new(deposit_transfer::DepositTransfer::new(cfg, ctx.wallet.clone())))
+            StrategyDescriptor {
+                name: "deposit_transfer",
+                factory: |ctx| {
+                    let cfg = deposit_transfer::DepositTransferConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(deposit_transfer::DepositTransfer::new(cfg, ctx.wallet.clone())))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "cross_fixed_maker",
-            factory: |ctx| {
-                let cfg = params_from_table(ctx.config.strategy.params.table())?;
-                Ok(Box::new(cross_fixed_maker::CrossFixedMaker::new(
-                    cfg,
-                    ctx.gateway.clone(),
-                    ctx.market.clone(),
-                )))
+            StrategyDescriptor {
+                name: "cross_fixed_maker",
+                factory: |ctx| {
+                    let cfg = params_from_table(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(cross_fixed_maker::CrossFixedMaker::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "cross_depth_maker",
-            factory: |ctx| {
-                let cfg = params_from_table(ctx.config.strategy.params.table())?;
-                Ok(Box::new(cross_depth_maker::CrossDepthMaker::new(
-                    cfg,
-                    ctx.gateway.clone(),
-                    ctx.market.clone(),
-                )))
+            StrategyDescriptor {
+                name: "cross_depth_maker",
+                factory: |ctx| {
+                    let cfg = params_from_table(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(cross_depth_maker::CrossDepthMaker::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "cross_maker",
-            factory: |ctx| {
-                let cfg = params_from_table(ctx.config.strategy.params.table())?;
-                Ok(Box::new(cross_maker::CrossMaker::new(
-                    cfg,
-                    ctx.gateway.clone(),
-                    ctx.market.clone(),
-                )))
+            StrategyDescriptor {
+                name: "cross_maker",
+                factory: |ctx| {
+                    let cfg = params_from_table(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(cross_maker::CrossMaker::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "hedge_grid",
-            factory: |ctx| {
-                let cfg = params_from_table(ctx.config.strategy.params.table())?;
-                Ok(Box::new(hedge_grid::HedgeGrid::new(
-                    cfg,
-                    ctx.gateway.clone(),
-                    ctx.market.clone(),
-                )))
+            StrategyDescriptor {
+                name: "hedge_grid",
+                factory: |ctx| {
+                    let cfg = params_from_table(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(hedge_grid::HedgeGrid::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "balance_align",
-            factory: |ctx| {
-                let cfg = params_from_table(ctx.config.strategy.params.table())?;
-                Ok(Box::new(balance_align::BalanceAlign::new(
-                    cfg,
-                    ctx.gateway.clone(),
-                    ctx.wallet.clone(),
-                )))
+            StrategyDescriptor {
+                name: "balance_align",
+                factory: |ctx| {
+                    let cfg = params_from_table(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(balance_align::BalanceAlign::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.wallet.clone(),
+                    )))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "premium_monitor",
-            factory: |ctx| {
-                let cfg: premium_monitor::PremiumMonitorConfig =
-                    params_from_table(ctx.config.strategy.params.table())?;
-                Ok(Box::new(premium_monitor::PremiumMonitor::new(cfg, ctx.market.clone())))
+            StrategyDescriptor {
+                name: "premium_monitor",
+                factory: |ctx| {
+                    let cfg: premium_monitor::PremiumMonitorConfig =
+                        params_from_table(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(premium_monitor::PremiumMonitor::new(cfg, ctx.market.clone())))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "nav_recorder",
-            factory: |ctx| {
-                let cfg = nav_recorder::NavRecorderConfig::from_params(
-                    ctx.config.strategy.params.table(),
-                )?;
-                Ok(Box::new(nav_recorder::NavRecorder::new(
-                    cfg,
-                    ctx.gateway.clone(),
-                    ctx.market.clone(),
-                )))
+            StrategyDescriptor {
+                name: "nav_recorder",
+                factory: |ctx| {
+                    let cfg = nav_recorder::NavRecorderConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(nav_recorder::NavRecorder::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "rebalance",
-            factory: |ctx| {
-                let cfg =
-                    rebalance::RebalanceConfig::from_params(ctx.config.strategy.params.table())?;
-                Ok(Box::new(rebalance::Rebalance::new(
-                    cfg,
-                    ctx.gateway.clone(),
-                    ctx.market.clone(),
-                )))
+            StrategyDescriptor {
+                name: "rebalance",
+                factory: |ctx| {
+                    let cfg =
+                        rebalance::RebalanceConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(rebalance::Rebalance::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "market_cap",
-            factory: |ctx| {
-                let cfg =
-                    market_cap::MarketCapConfig::from_params(ctx.config.strategy.params.table())?;
-                Ok(Box::new(market_cap::MarketCap::new(
-                    cfg,
-                    ctx.gateway.clone(),
-                    ctx.market.clone(),
-                )))
+            StrategyDescriptor {
+                name: "market_cap",
+                factory: |ctx| {
+                    let cfg =
+                        market_cap::MarketCapConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(market_cap::MarketCap::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
             },
-        },
-        StrategyDescriptor {
-            name: "irr",
-            factory: |ctx| {
-                let cfg = irr::IrrConfig::from_params(ctx.config.strategy.params.table())?;
-                Ok(Box::new(irr::Irr::new(cfg, ctx.gateway.clone())))
+            StrategyDescriptor {
+                name: "irr",
+                factory: |ctx| {
+                    let cfg = irr::IrrConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(irr::Irr::new(cfg, ctx.gateway.clone())))
+                },
             },
-        },
-    ]
+        ]
+    })
 }
 
 /// Resolve and build the configured strategy by name.

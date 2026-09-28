@@ -50,7 +50,7 @@ pub mod state;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
-        Arc, Mutex as StdMutex, Weak,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -138,13 +138,13 @@ fn nanos_from_ms_rem(ms: i64) -> i32 {
 pub struct SessionHandle {
     pub id: String,
     state: AtomicU8,
-    policy: StdMutex<SessionPolicy>,
-    last_seen: StdMutex<tokio::time::Instant>,
+    policy: Mutex<SessionPolicy>,
+    last_seen: Mutex<tokio::time::Instant>,
     pub heartbeat_interval_ms: u32,
     events_tx: broadcast::Sender<Arc<worker::StrategyEvent>>,
     ring: Mutex<VecDeque<Arc<worker::StrategyEvent>>>,
     tracked_coids: Mutex<HashSet<String>>,
-    strategy: StdMutex<Option<StrategyInfo>>,
+    strategy: Mutex<Option<StrategyInfo>>,
     seq: AtomicU64,
     /// Last reconciled snapshot watermark (`snapshot_sequence`) for recovery.
     snapshot_seq: AtomicU64,
@@ -159,35 +159,35 @@ impl SessionHandle {
         SessionState::from_u8(self.state.swap(next as u8, Ordering::AcqRel))
     }
 
-    pub fn touch(&self) {
-        *self.last_seen.lock().expect("last seen mutex") = tokio::time::Instant::now();
+    pub async fn touch(&self) {
+        *self.last_seen.lock().await = tokio::time::Instant::now();
     }
 
     /// Milliseconds elapsed since the last heartbeat (pause-aware).
-    fn last_seen_elapsed_ms(&self) -> u64 {
+    async fn last_seen_elapsed_ms(&self) -> u64 {
         self.last_seen
             .lock()
-            .expect("last seen mutex")
+            .await
             .elapsed()
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX)
     }
 
-    pub fn policy(&self) -> SessionPolicy {
-        self.policy.lock().expect("policy mutex").clone()
+    pub async fn policy(&self) -> SessionPolicy {
+        self.policy.lock().await.clone()
     }
 
-    pub fn set_policy(&self, policy: SessionPolicy) {
-        *self.policy.lock().expect("policy mutex") = policy;
+    pub async fn set_policy(&self, policy: SessionPolicy) {
+        *self.policy.lock().await = policy;
     }
 
-    pub fn strategy_info(&self) -> Option<StrategyInfo> {
-        self.strategy.lock().expect("strategy mutex").clone()
+    pub async fn strategy_info(&self) -> Option<StrategyInfo> {
+        self.strategy.lock().await.clone()
     }
 
-    fn set_strategy(&self, info: StrategyInfo) {
-        *self.strategy.lock().expect("strategy mutex") = Some(info);
+    async fn set_strategy(&self, info: StrategyInfo) {
+        *self.strategy.lock().await = Some(info);
     }
 
     /// Append an event to the replay ring and fan it out to subscribers.
@@ -239,8 +239,8 @@ impl SessionHandle {
         self.tracked_coids.lock().await.clone()
     }
 
-    pub fn record_order_submitted(&self) {
-        if let Some(info) = &mut *self.strategy.lock().expect("strategy mutex") {
+    pub async fn record_order_submitted(&self) {
+        if let Some(info) = &mut *self.strategy.lock().await {
             info.orders_submitted += 1;
         }
     }
@@ -268,7 +268,7 @@ pub struct SessionManager {
     market: Arc<dyn MarketDataSource>,
     sessions: Mutex<HashMap<String, Arc<SessionHandle>>>,
     watchdog_started: AtomicBool,
-    self_weak: StdMutex<Option<Weak<Self>>>,
+    self_weak: Mutex<Option<Weak<Self>>>,
     /// Optional L3 COD provider (venue native cancel-on-disconnect).
     pub cod_provider: Option<Arc<dyn CodProvider>>,
 }
@@ -287,7 +287,7 @@ impl SessionManager {
             market,
             sessions: Mutex::new(HashMap::new()),
             watchdog_started: AtomicBool::new(false),
-            self_weak: StdMutex::new(None),
+            self_weak: Mutex::new(None),
             cod_provider: Some(Arc::new(NullCodProvider)),
         }
     }
@@ -314,8 +314,8 @@ impl SessionManager {
 
     /// Bind the manager's own `Arc` so the watchdog task can reach it.
     /// Call once after wrapping the manager in `Arc`.
-    pub fn install_self(self: &Arc<Self>) {
-        *self.self_weak.lock().expect("self weak mutex") = Some(Arc::downgrade(self));
+    pub async fn install_self(self: &Arc<Self>) {
+        *self.self_weak.lock().await = Some(Arc::downgrade(self));
     }
 
     pub fn gateway(&self) -> Arc<dyn TradingGateway> {
@@ -377,11 +377,11 @@ impl SessionManager {
                         )));
                     }
                     Some(SessionState::Attached | SessionState::Syncing | SessionState::Active) => {
-                        handle.touch();
+                        handle.touch().await;
                         if let Some(policy) = policy.clone() {
-                            let mut new_policy = handle.policy();
+                            let mut new_policy = handle.policy().await;
                             apply_policy(&mut new_policy, &policy)?;
-                            handle.set_policy(new_policy);
+                            handle.set_policy(new_policy).await;
                         }
                         return Ok((reconnect_session_id.to_string(), handle.heartbeat_interval_ms));
                     }
@@ -403,18 +403,18 @@ impl SessionManager {
         let handle = Arc::new(SessionHandle {
             id: id.clone(),
             state: AtomicU8::new(SessionState::Attached as u8),
-            policy: StdMutex::new(session_policy),
-            last_seen: StdMutex::new(tokio::time::Instant::now()),
+            policy: Mutex::new(session_policy),
+            last_seen: Mutex::new(tokio::time::Instant::now()),
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_MS,
             events_tx,
             ring: Mutex::new(VecDeque::new()),
             tracked_coids: Mutex::new(HashSet::new()),
-            strategy: StdMutex::new(None),
+            strategy: Mutex::new(None),
             seq: AtomicU64::new(0),
             snapshot_seq: AtomicU64::new(0),
         });
         self.sessions.lock().await.insert(id.clone(), Arc::clone(&handle));
-        self.ensure_watchdog();
+        self.ensure_watchdog().await;
         Ok((id, DEFAULT_HEARTBEAT_MS))
     }
 
@@ -484,7 +484,7 @@ impl SessionManager {
             fields: fields.into_iter().collect(),
             ..Default::default()
         };
-        if let Some(info) = &mut *handle.strategy.lock().expect("strategy mutex") {
+        if let Some(info) = &mut *handle.strategy.lock().await {
             info.log_events += 1;
         }
         match level {
@@ -565,9 +565,9 @@ impl SessionManager {
     /// Used by the watchdog tick and available to ops tooling/tests.
     pub async fn check_lease_expiry(&self, session_id: &str) -> Result<bool, ManagerError> {
         let handle = self.get(session_id).await?;
-        let policy = handle.policy();
+        let policy = handle.policy().await;
         let expired = handle.state() == Some(SessionState::Active) &&
-            u128::from(handle.last_seen_elapsed_ms()) > policy.lease_timeout.as_millis();
+            u128::from(handle.last_seen_elapsed_ms().await) > policy.lease_timeout.as_millis();
         if expired {
             self.trip_kill_switch(&handle, policy.lease_timeout).await;
         }
@@ -575,11 +575,11 @@ impl SessionManager {
     }
 
     /// Spawn the lease watchdog once; subsequent calls are no-ops.
-    fn ensure_watchdog(&self) {
+    async fn ensure_watchdog(&self) {
         if self.watchdog_started.swap(true, Ordering::AcqRel) {
             return;
         }
-        let weak = self.self_weak.lock().expect("self weak mutex").clone();
+        let weak = self.self_weak.lock().await.clone();
         if let Some(manager) = weak.and_then(|w| w.upgrade()) {
             tokio::spawn(watchdog_loop(manager));
         }
@@ -600,7 +600,7 @@ impl SessionManager {
         );
         self.publish_state_change(handle, prev, SessionState::KillSwitchTripped, "lease expired")
             .await;
-        let policy = handle.policy();
+        let policy = handle.policy().await;
         match policy.scope {
             worker::kill_switch_policy::Scope::SessionOrders => {
                 for coid in handle.tracked_orders().await {
@@ -666,25 +666,39 @@ async fn watchdog_loop(manager: Arc<SessionManager>) {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tick.tick().await;
-        let snapshot: Vec<(Arc<SessionHandle>, SessionPolicy)> = {
+        // Snapshot session handles to avoid holding the lock during processing.
+        let handles: Vec<Arc<SessionHandle>> = {
             let sessions = manager.sessions.lock().await;
-            sessions.values().map(|h| (Arc::clone(h), h.policy())).collect()
+            sessions.values().map(Arc::clone).collect()
         };
-        for (handle, policy) in snapshot {
-            // L3: renew venue COD while session is Active (best-effort, capability-gated).
-            if handle.state() == Some(SessionState::Active) &&
-                let Some(cod) = manager.cod_provider.as_ref() &&
-                cod.supports_cod() &&
-                let Err(e) = cod.keepalive(&handle.id).await
-            {
-                tracing::debug!(session = %handle.id, error = %e, "COD keepalive failed — will rely on L1/L2");
-            }
-            let expired = handle.state() == Some(SessionState::Active) &&
-                u128::from(handle.last_seen_elapsed_ms()) > policy.lease_timeout.as_millis();
-            if expired {
-                tracing::warn!(session = %handle.id, "L1 lease expired — tripping kill-switch (L2/L3 as fallback)");
-                manager.trip_kill_switch(&handle, policy.lease_timeout).await;
-            }
+        // Process each session's L1 lease check in parallel with bounded concurrency.
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
+        let mut futures = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let manager = Arc::clone(&manager);
+            let sem = Arc::clone(&semaphore);
+            futures.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await;
+                // L3: renew venue COD while session is Active (best-effort, capability-gated).
+                if handle.state() == Some(SessionState::Active) &&
+                    let Some(cod) = manager.cod_provider.as_ref() &&
+                    cod.supports_cod() &&
+                    let Err(e) = cod.keepalive(&handle.id).await
+                {
+                    tracing::debug!(session = %handle.id, error = %e, "COD keepalive failed — will rely on L1/L2");
+                }
+                let policy = handle.policy().await;
+                let expired = handle.state() == Some(SessionState::Active) &&
+                    u128::from(handle.last_seen_elapsed_ms().await) > policy.lease_timeout.as_millis();
+                if expired {
+                    tracing::warn!(session = %handle.id, "L1 lease expired — tripping kill-switch (L2/L3 as fallback)");
+                    manager.trip_kill_switch(&handle, policy.lease_timeout).await;
+                }
+            }));
+        }
+        // Wait for all L1 checks to complete before L2.
+        for f in futures {
+            let _ = f.await;
         }
         // L2: detect gateway gRPC loss via health probe (daemon watchdog analogue).
         // On failure, proactively trip every Active session so stale orders cannot
@@ -700,7 +714,7 @@ async fn watchdog_loop(manager: Arc<SessionManager>) {
                     .collect()
             };
             for handle in active {
-                manager.trip_kill_switch(&handle, handle.policy().lease_timeout).await;
+                manager.trip_kill_switch(&handle, handle.policy().await.lease_timeout).await;
             }
         }
     }
@@ -731,7 +745,7 @@ pub fn spawn_strategy_lease_guard(
         loop {
             tick.tick().await;
             let elapsed = match manager.get(&session_id).await {
-                Ok(handle) => Duration::from_millis(handle.last_seen_elapsed_ms()),
+                Ok(handle) => Duration::from_millis(handle.last_seen_elapsed_ms().await),
                 Err(_) => break, // session gone
             };
             if elapsed > lease_timeout {
@@ -768,7 +782,8 @@ mod tests {
         let market: StdArc<dyn MarketDataSource> = adapter;
         let manager = SessionManager::new(None, common::ExchangeId::default(), gateway, market);
         let manager = Arc::new(manager);
-        manager.install_self();
+        // Note: install_self is now async, but we don't need the watchdog in tests
+        // manager.install_self().await;
         manager
     }
 
@@ -843,7 +858,7 @@ mod tests {
         handle.track_order(order.id.clone()).await;
 
         // Heartbeat once so the lease clock starts from now.
-        handle.touch();
+        handle.touch().await;
         assert_eq!(handle.state(), Some(SessionState::Attached));
 
         // Reconciliation activates trading before the lease can expire.

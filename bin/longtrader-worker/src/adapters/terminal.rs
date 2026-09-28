@@ -24,7 +24,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -36,7 +36,6 @@ use longtrader_proto::{
 use rust_decimal::Decimal;
 
 use crate::{
-    overflow,
     ports::{MarketDataSource, MarketEventStream, OverflowPolicy, PortError, TradingGateway},
     proto::{account, common, market, trading, worker},
 };
@@ -581,7 +580,9 @@ impl TradingGateway for TerminalAdapter {
         exchange_id: &common::ExchangeId,
     ) -> Result<worker::ReconcileStateResponse, PortError> {
         // Best-effort snapshot over three terminal reads (NOT atomic).
-        // ponytail: same caveat as RemoteAdapter; server atomic snapshot when available.
+        // SECURITY NOTE: Same caveat as RemoteAdapter — the snapshot is NOT
+        // atomic and `snapshot_sequence` is a local monotonic counter.
+        // Strategies MUST replay deltas after `snapshot_sequence` to converge.
         let started_ms = ms_now();
         let venue = venue_of(exchange_id)?;
         let acc = self.client.get_account(&venue).await.map_err(map_client_err)?;
@@ -736,47 +737,11 @@ impl MarketDataSource for TerminalAdapter {
         req: market::StreamMarketDataRequest,
         policy: OverflowPolicy,
     ) -> Result<MarketEventStream, PortError> {
-        const POLL_INTERVAL_MS: u64 = 1_000;
-        const BUFFER_CAP: usize = 16;
-        let seq = Arc::new(AtomicU64::new(0));
-        let (tx, rx) =
-            overflow::policy_channel(BUFFER_CAP, policy, crate::adapters::market_event_key);
-        for sub in req.subscriptions {
-            let channel = match sub.channel {
-                buffa::EnumValue::Known(c) => c,
-                buffa::EnumValue::Unknown(_) => market::StreamChannel::Unspecified,
-            };
-            if sub.symbol.is_empty() {
-                continue;
-            }
-            let exchange_id = req.exchange_id.clone();
-            let client = self.clone();
-            let tx = tx.clone();
-            let seq = Arc::clone(&seq);
-            let symbol = sub.symbol;
-            tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(Duration::from_millis(POLL_INTERVAL_MS));
-                loop {
-                    if tx.is_closed() {
-                        break;
-                    }
-                    ticker.tick().await;
-                    if tx.is_closed() {
-                        break;
-                    }
-                    match client.poll_snapshot(channel, &exchange_id, &symbol, &seq).await {
-                        Ok(Some(event)) => {
-                            tx.send(event).await;
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            tracing::warn!(error = %err, symbol = %symbol, "terminal poll failed");
-                        }
-                    }
-                }
-            });
-        }
-        Ok(rx)
+        let this = self.clone();
+        Ok(crate::adapters::poll_market_data(req, policy, move |channel, exchange_id, symbol, seq| {
+            let this = this.clone();
+            async move { this.poll_snapshot(channel, &exchange_id, symbol, &seq).await }
+        }))
     }
 }
 
@@ -785,7 +750,7 @@ impl TerminalAdapter {
         &self,
         channel: market::StreamChannel,
         exchange_id: &common::ExchangeId,
-        symbol: &str,
+        symbol: String,
         seq: &AtomicU64,
     ) -> Result<Option<market::MarketDataEvent>, PortError> {
         let next = seq.fetch_add(1, Ordering::Relaxed) + 1;

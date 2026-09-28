@@ -45,7 +45,29 @@ use crate::proto::{common, trading};
 
 #[async_trait]
 pub trait Strategy: Send + Sync {
+    /// Called once before `run()` starts. Default implementation does nothing.
+    async fn start(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Main strategy loop. Runs until an error occurs or `stop()` is called.
     async fn run(&self) -> Result<()>;
+
+    /// Called once after `run()` exits (whether normally or due to error).
+    /// Default implementation does nothing.
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Request the strategy to pause. Default implementation does nothing.
+    async fn pause(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Request the strategy to resume. Default implementation does nothing.
+    async fn resume(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Builds a limit-order create request.

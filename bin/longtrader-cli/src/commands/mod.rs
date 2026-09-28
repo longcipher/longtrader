@@ -126,26 +126,19 @@ pub(crate) async fn dispatch(
         Commands::Search { query, limit } => {
             search::run(client, venue, &query, limit, output).await?;
         }
-        Commands::Account => match client.get_account(venue).await {
-            Ok(account) => output.render_account(&account),
-            Err(e) => {
-                return Err(e.into());
-            }
-        },
+        Commands::Account => {
+            let account = client.get_account(venue).await?;
+            output.render_account(&account);
+        }
         Commands::Positions => positions::run(client, venue, output).await?,
-        Commands::Orders { symbol } => match client.get_open_orders(venue, symbol.as_deref()).await
-        {
-            Ok(orders) => output.render_orders(&orders),
-            Err(e) => {
-                return Err(e.into());
-            }
-        },
-        Commands::History { limit } => match client.get_order_history(venue, limit).await {
-            Ok(orders) => output.render_orders(&orders),
-            Err(e) => {
-                return Err(e.into());
-            }
-        },
+        Commands::Orders { symbol } => {
+            let orders = client.get_open_orders(venue, symbol.as_deref()).await?;
+            output.render_orders(&orders);
+        }
+        Commands::History { limit } => {
+            let orders = client.get_order_history(venue, limit).await?;
+            output.render_orders(&orders);
+        }
         Commands::Buy { symbol, quantity, price, take_profit, stop_loss } => {
             orders::place_order(
                 client,
@@ -174,21 +167,17 @@ pub(crate) async fn dispatch(
             )
             .await?;
         }
-        Commands::Cancel { order_id } => match client.cancel_order(venue, &order_id).await {
-            Ok(order) => output.render_orders(&[order]),
-            Err(e) => {
-                return Err(e.into());
-            }
-        },
-        Commands::Close { position_id } => match client.close_position(venue, &position_id).await {
-            Ok(pos) => output.render_msg(&format!(
+        Commands::Cancel { order_id } => {
+            let order = client.cancel_order(venue, &order_id).await?;
+            output.render_orders(&[order]);
+        }
+        Commands::Close { position_id } => {
+            let pos = client.close_position(venue, &position_id).await?;
+            output.render_msg(&format!(
                 "Position {} closed (unrealized pnl={})",
                 pos.id, pos.unrealized_pnl
-            )),
-            Err(e) => {
-                return Err(e.into());
-            }
-        },
+            ));
+        }
         Commands::Stream { topics } => stream::run(client, venue, &topics, output).await?,
         Commands::Strategies => strategies::list(client, output).await?,
         Commands::StrategyStart { strategy_id, name } => {

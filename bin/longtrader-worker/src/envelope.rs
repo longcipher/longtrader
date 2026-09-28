@@ -50,11 +50,11 @@ pub fn decode_envelope_result(buf: &[u8]) -> Result<(u8, &[u8], usize), Envelope
 
 /// Decode one envelope from the front of `buf`.
 ///
-/// Returns `(flags, payload_slice, consumed_bytes)` on success, `None` if
-/// `buf` is too short or truncated. Caller advances by `consumed_bytes`.
+/// Returns `(flags, payload_slice, consumed_bytes)` on success, or an error
+/// if `buf` is too short or truncated. Caller advances by `consumed_bytes`.
 #[inline]
-pub fn decode_envelope(buf: &[u8]) -> Option<(u8, &[u8], usize)> {
-    decode_envelope_result(buf).ok()
+pub fn decode_envelope(buf: &[u8]) -> Result<(u8, &[u8], usize), EnvelopeError> {
+    decode_envelope_result(buf)
 }
 
 #[cfg(test)]
@@ -83,11 +83,11 @@ mod tests {
     }
 
     #[test]
-    fn decode_truncated_returns_none() {
-        assert!(decode_envelope(&[0x00, 0, 0, 0]).is_none());
+    fn decode_truncated_returns_err() {
+        assert!(decode_envelope(&[0x00, 0, 0, 0]).is_err());
         let mut truncated = encode_envelope(FLAG_MESSAGE, b"abc");
         truncated.truncate(6);
-        assert!(decode_envelope(&truncated).is_none());
+        assert!(decode_envelope(&truncated).is_err());
     }
 
     #[test]

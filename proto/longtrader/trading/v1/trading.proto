@@ -81,8 +81,8 @@ message Order {
   bool reduce_only = 19;
   map<string, string> info = 30;
   // ---- Terminal extensions (additive) ----
-  optional common.v1.Decimal take_profit = 20;
-  optional common.v1.Decimal stop_loss = 21;
+  optional common.v1.Decimal take_profit = 24;
+  optional common.v1.Decimal stop_loss = 25;
   // Creation / last update, Unix milliseconds.
   google.protobuf.Timestamp created_at = 22;
   google.protobuf.Timestamp updated_at = 23;

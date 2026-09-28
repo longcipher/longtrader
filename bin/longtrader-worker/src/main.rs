@@ -175,7 +175,7 @@ async fn start_with_ports(
             market,
         );
         let manager = Arc::new(manager);
-        manager.install_self();
+        manager.install_self().await;
         let bind = bind.clone();
         tokio::spawn(async move {
             if let Err(err) = longtrader_worker::session::server::run(bind, manager).await {
@@ -184,5 +184,11 @@ async fn start_with_ports(
         });
     }
 
-    strategy.run().await
+    // Call start() lifecycle hook before running the strategy.
+    strategy.start().await?;
+    // Run the strategy and ensure stop() is called when it exits.
+    let result = strategy.run().await;
+    // Call stop() lifecycle hook after the strategy exits.
+    strategy.stop().await?;
+    result
 }

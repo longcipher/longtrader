@@ -116,8 +116,8 @@ mod tests {
     #[tokio::test]
     async fn sweeps_each_completed_deposit_once() {
         let adapter = StdArc::new(MockAdapter::new(dec!(100)));
-        adapter.push_deposit(deposit("d1", dec!(50)));
-        adapter.push_deposit(deposit("d2", dec!(30)));
+        adapter.push_deposit(deposit("d1", dec!(50))).await;
+        adapter.push_deposit(deposit("d2", dec!(30))).await;
         let config = DepositTransferConfig::from_params(
             &toml::from_str("symbol = \"BTCUSDT\"\ndest_label = \"master\"").expect("toml"),
         )
@@ -129,8 +129,8 @@ mod tests {
         assert_eq!(s.tick().await.expect("tick"), 2);
         // Second cycle sees the same ledger but must not re-transfer.
         assert_eq!(s.tick().await.expect("tick"), 0);
-        assert_eq!(adapter.transfers().len(), 2);
-        assert_eq!(adapter.transfers()[0].2, "master");
+        assert_eq!(adapter.transfers().await.len(), 2);
+        assert_eq!(adapter.transfers().await[0].2, "master");
     }
 
     #[tokio::test]
@@ -138,8 +138,8 @@ mod tests {
         let adapter = StdArc::new(MockAdapter::new(dec!(100)));
         let mut pending = deposit("p1", dec!(99));
         pending.completed = false;
-        adapter.push_deposit(pending);
-        adapter.push_deposit(deposit("dust", dec!(1)));
+        adapter.push_deposit(pending).await;
+        adapter.push_deposit(deposit("dust", dec!(1))).await;
         let config = DepositTransferConfig::from_params(
             &toml::from_str("symbol = \"BTCUSDT\"\ndest_label = \"master\"\nignore_below = \"10\"")
                 .expect("toml"),

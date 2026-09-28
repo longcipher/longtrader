@@ -36,6 +36,32 @@ pub struct SimpleGridConfig {
     pub state_file: Option<String>,
 }
 
+impl SimpleGridConfig {
+    /// Build the unified grid configuration from strategy params.
+    ///
+    /// # Errors
+    /// Returns an error when required fields are missing.
+    pub fn from_config(config: &crate::config::Config) -> color_eyre::Result<Self> {
+        let params = &config.strategy.params;
+        let required = |value: Option<Decimal>, name: &str| -> color_eyre::Result<Decimal> {
+            value.ok_or_else(|| color_eyre::eyre::eyre!("{name} is required"))
+        };
+        Ok(Self {
+            profit_spread_pct: None,
+            state_file: None,
+            exchange_id: crate::adapters::exchange_id(
+                params.exchange_id.as_deref().unwrap_or("mock"),
+                params.label.as_deref().unwrap_or_default(),
+            ),
+            symbol: params.symbol.clone().ok_or_else(|| color_eyre::eyre::eyre!("symbol is required"))?,
+            lower_price: required(params.lower_price, "lower_price")?,
+            upper_price: required(params.upper_price, "upper_price")?,
+            num_levels: params.num_levels.ok_or_else(|| color_eyre::eyre::eyre!("num_levels is required"))?,
+            qty_per_level: required(params.qty_per_level, "qty_per_level")?,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct GridLevel {
     price: Decimal,
@@ -416,7 +442,7 @@ mod tests {
     #[tokio::test]
     async fn repeated_failures_trip_the_kill_switch_and_clear_levels() {
         let (adapter, grid) = build();
-        adapter.fail_next_creates(6); // more than max_consecutive_errors (5)
+        adapter.fail_next_creates(6).await; // more than max_consecutive_errors (5)
         let _ = grid.rebalance().await;
         let levels = grid.levels.lock().await;
         assert!(levels.is_empty(), "kill-switch clears the grid after repeated failures");

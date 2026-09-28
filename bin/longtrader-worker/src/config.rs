@@ -2,12 +2,10 @@ use std::path::Path;
 
 use color_eyre::{
     Result,
-    eyre::{WrapErr, eyre},
+    eyre::WrapErr,
 };
 use rust_decimal::Decimal;
 use serde::Deserialize;
-
-use crate::{adapters::exchange_id, strategies::simple_grid::SimpleGridConfig};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -112,27 +110,6 @@ impl Config {
                 String::new()
             }
         }
-    }
-
-    /// Build the unified grid configuration from strategy params.
-    pub fn grid_config(&self) -> Result<SimpleGridConfig> {
-        let params = &self.strategy.params;
-        let required = |value: Option<Decimal>, name: &str| -> Result<Decimal> {
-            value.ok_or_else(|| eyre!("{name} is required"))
-        };
-        Ok(SimpleGridConfig {
-            profit_spread_pct: None,
-            state_file: None,
-            exchange_id: exchange_id(
-                params.exchange_id.as_deref().unwrap_or("mock"),
-                params.label.as_deref().unwrap_or_default(),
-            ),
-            symbol: params.symbol.clone().ok_or_else(|| eyre!("symbol is required"))?,
-            lower_price: required(params.lower_price, "lower_price")?,
-            upper_price: required(params.upper_price, "upper_price")?,
-            num_levels: params.num_levels.ok_or_else(|| eyre!("num_levels is required"))?,
-            qty_per_level: required(params.qty_per_level, "qty_per_level")?,
-        })
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {

@@ -6,7 +6,7 @@
 
 use std::{
     sync::{
-        Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use buffa::{EnumValue, MessageField};
 use longtrader_contract::ext::decimal_to_common;
 use rust_decimal::Decimal;
-use tokio::time::{Duration, MissedTickBehavior, interval};
+use tokio::sync::Mutex;
 
 use crate::{
     ports::{MarketDataSource, MarketEventStream, OverflowPolicy, PortError, TradingGateway},
@@ -45,23 +45,24 @@ fn now_ts() -> buffa_types::google::protobuf::Timestamp {
 }
 
 /// Deterministic fake implementing both ports.
+#[derive(Clone)]
 pub struct MockAdapter {
-    state: Mutex<State>,
-    ids: AtomicU64,
+    state: Arc<Mutex<State>>,
+    ids: Arc<AtomicU64>,
 }
 
 impl MockAdapter {
     /// Create a mock whose ticker price starts at `initial_price`.
     pub fn new(initial_price: Decimal) -> Self {
         Self {
-            state: Mutex::new(State { price: initial_price, ..State::default() }),
-            ids: AtomicU64::new(1),
+            state: Arc::new(Mutex::new(State { price: initial_price, ..State::default() })),
+            ids: Arc::new(AtomicU64::new(1)),
         }
     }
 
     /// Script the next `n` order creations to fail (for error-path tests).
-    pub fn fail_next_creates(&self, n: u32) {
-        self.state.lock().expect("mock state").fail_next_creates = n;
+    pub async fn fail_next_creates(&self, n: u32) {
+        self.state.lock().await.fail_next_creates = n;
     }
 }
 
@@ -71,7 +72,7 @@ impl TradingGateway for MockAdapter {
         &self,
         req: trading::CreateOrderRequest,
     ) -> Result<trading::Order, PortError> {
-        let mut state = self.state.lock().expect("mock state");
+        let mut state = self.state.lock().await;
         if state.fail_next_creates > 0 {
             state.fail_next_creates -= 1;
             return Err(PortError::Rpc { code: 500, message: "scripted failure".to_string() });
@@ -128,7 +129,7 @@ impl TradingGateway for MockAdapter {
         &self,
         req: trading::CancelOrderRequest,
     ) -> Result<trading::Order, PortError> {
-        let mut state = self.state.lock().expect("mock state");
+        let mut state = self.state.lock().await;
         let order =
             state.orders.iter_mut().find(|o| o.id == req.order_id).ok_or_else(|| {
                 PortError::InvalidArgument(format!("unknown order {}", req.order_id))
@@ -141,7 +142,7 @@ impl TradingGateway for MockAdapter {
         &self,
         req: trading::CancelAllOrdersRequest,
     ) -> Result<Vec<trading::Order>, PortError> {
-        let mut state = self.state.lock().expect("mock state");
+        let mut state = self.state.lock().await;
         let mut canceled = Vec::new();
         for order in &mut state.orders {
             let is_open = order.status == EnumValue::Known(trading::OrderStatus::Open);
@@ -157,7 +158,7 @@ impl TradingGateway for MockAdapter {
         &self,
         req: trading::FetchOpenOrdersRequest,
     ) -> Result<Vec<trading::Order>, PortError> {
-        let state = self.state.lock().expect("mock state");
+        let state = self.state.lock().await;
         Ok(state
             .orders
             .iter()
@@ -171,7 +172,7 @@ impl TradingGateway for MockAdapter {
         &self,
         _exchange_id: &common::ExchangeId,
     ) -> Result<worker::ReconcileStateResponse, PortError> {
-        let state = self.state.lock().expect("mock state");
+        let state = self.state.lock().await;
         Ok(worker::ReconcileStateResponse {
             snapshot_sequence: 0,
             snapshot_time: MessageField::some(now_ts()),
@@ -198,7 +199,7 @@ impl TradingGateway for MockAdapter {
         req: trading::GetAccountRequest,
     ) -> Result<trading::GetAccountResponse, PortError> {
         let _ = &req;
-        let price = self.state.lock().expect("mock state").price;
+        let price = self.state.lock().await.price;
         let d = |v: Decimal| longtrader_contract::ext::decimal_to_common(v);
         Ok(trading::GetAccountResponse {
             account: Some(trading::Account {
@@ -256,7 +257,7 @@ impl MarketDataSource for MockAdapter {
         &self,
         _req: market::ListSymbolsRequest,
     ) -> Result<market::ListSymbolsResponse, PortError> {
-        let price = self.state.lock().expect("mock state").price;
+        let price = self.state.lock().await.price;
         let d = longtrader_contract::ext::decimal_to_common(price);
         let info = market::SymbolInfo {
             name: "MOCK-USDT".to_string(),
@@ -275,7 +276,7 @@ impl MarketDataSource for MockAdapter {
         &self,
         req: market::GetCandlesRequest,
     ) -> Result<market::GetCandlesResponse, PortError> {
-        let price = self.state.lock().expect("mock state").price;
+        let price = self.state.lock().await.price;
         let d = longtrader_contract::ext::decimal_to_common(price);
         let now: i64 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -301,7 +302,7 @@ impl MarketDataSource for MockAdapter {
         &self,
         req: market::FetchTickerRequest,
     ) -> Result<market::Ticker, PortError> {
-        let state = self.state.lock().expect("mock state");
+        let state = self.state.lock().await;
         Ok(market::Ticker {
             header: MessageField::some(common::EventHeader::default()),
             symbol: req.symbol,
@@ -317,7 +318,7 @@ impl MarketDataSource for MockAdapter {
         &self,
         req: market::FetchOrderBookRequest,
     ) -> Result<market::OrderBook, PortError> {
-        let state = self.state.lock().expect("mock state");
+        let state = self.state.lock().await;
         let step = Decimal::new(1, 2); // 0.01
         let depth =
             usize::try_from(req.pagination.as_option().map_or(1, |p| p.limit).max(1)).unwrap_or(10);
@@ -349,51 +350,41 @@ impl MarketDataSource for MockAdapter {
         req: market::StreamMarketDataRequest,
         policy: OverflowPolicy,
     ) -> Result<MarketEventStream, PortError> {
-        let symbols: Vec<String> = req
+        let _symbols: Vec<String> = req
             .subscriptions
             .iter()
             .filter(|s| s.channel == EnumValue::Known(market::StreamChannel::Ticker))
             .map(|s| s.symbol.clone())
             .collect();
-        let (tx, rx) = crate::overflow::policy_channel::<market::MarketDataEvent, String>(
-            16,
-            policy,
-            crate::adapters::market_event_key,
-        );
-        let price = self.state.lock().expect("mock state").price;
-        tokio::spawn(async move {
-            let mut tick = interval(Duration::from_millis(20));
-            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            let mut seq: u64 = 0;
-            loop {
-                if tx.is_closed() {
-                    break;
-                }
-                tick.tick().await;
-                seq += 1;
-                for symbol in &symbols {
-                    let ticker = market::Ticker {
-                        header: MessageField::some(common::EventHeader {
-                            trace_id: "mock".to_string(),
-                            sequence: seq,
-                            ..common::EventHeader::default()
-                        }),
-                        symbol: symbol.clone(),
-                        timestamp: MessageField::some(now_ts()),
-                        last: MessageField::some(decimal_to_common(price)),
-                        ..Default::default()
-                    };
-                    tx.send(market::MarketDataEvent {
-                        header: ticker.header.clone(),
-                        event: Some(market::market_data_event::Event::Ticker(Box::new(ticker))),
-                        resume_token: format!("{seq}"),
-                        ..Default::default()
-                    })
-                    .await;
-                }
+        let price = self.state.lock().await.price;
+        let this = self.clone();
+        Ok(crate::adapters::poll_market_data(req, policy, move |channel, exchange_id, symbol, seq| {
+            let this = this.clone();
+            let _ = (channel, exchange_id);
+            let price = price;
+            async move {
+                let _ = this;
+                let next = seq.fetch_add(1, Ordering::Relaxed) + 1;
+                let header = common::EventHeader {
+                    trace_id: "mock".to_string(),
+                    sequence: next,
+                    ..common::EventHeader::default()
+                };
+                let ticker = market::Ticker {
+                    header: MessageField::some(header),
+                    symbol,
+                    timestamp: MessageField::some(now_ts()),
+                    last: MessageField::some(decimal_to_common(price)),
+                    ..Default::default()
+                };
+                Ok(Some(market::MarketDataEvent {
+                    header: ticker.header.clone(),
+                    event: Some(market::market_data_event::Event::Ticker(Box::new(ticker))),
+                    resume_token: format!("{next}"),
+                    ..Default::default()
+                }))
             }
-        });
-        Ok(rx)
+        }))
     }
 }
 
@@ -474,7 +465,7 @@ mod tests {
     #[tokio::test]
     async fn scripted_failures_surface_as_rpc_errors() {
         let a = adapter();
-        a.fail_next_creates(1);
+        a.fail_next_creates(1).await;
         let err = a
             .create_order(trading::CreateOrderRequest {
                 exchange_id: MessageField::none(),
@@ -490,7 +481,11 @@ mod tests {
     async fn drop_oldest_stream_keeps_newest_tickers() {
         let a = adapter();
         let req = market::StreamMarketDataRequest {
-            exchange_id: MessageField::none(),
+            exchange_id: MessageField::some(common::ExchangeId {
+                id: "mock".to_string(),
+                label: String::new(),
+                ..Default::default()
+            }),
             subscriptions: vec![market::StreamSubscription {
                 channel: EnumValue::Known(market::StreamChannel::Ticker),
                 symbol: "BTC/USDT".to_string(),
@@ -504,7 +499,7 @@ mod tests {
             a.subscribe_market_data(req, OverflowPolicy::DropOldest).await.expect("test setup");
         // Advance enough virtual time for the 20ms emitter to produce many
         // events; the 16-slot DropOldest buffer keeps only the newest.
-        tokio::time::advance(Duration::from_millis(500)).await;
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
         // Yield a few times so the overflow pipe's forwarder task can move
         // buffered events into the channel before we assert on them.
         for _ in 0..8 {
@@ -538,7 +533,7 @@ impl FundingRateSource for MockAdapter {
         _exchange_id: &common::ExchangeId,
         symbol: &str,
     ) -> Result<FundingRateSnapshot, PortError> {
-        let state = self.state.lock().expect("mock state");
+        let state = self.state.lock().await;
         Ok(FundingRateSnapshot {
             symbol: symbol.to_string(),
             rate: state.funding_rate,
@@ -553,7 +548,7 @@ impl FundingRateSource for MockAdapter {
         _symbol: &str,
         limit: u32,
     ) -> Result<Vec<FundingRatePoint>, PortError> {
-        let state = self.state.lock().expect("mock state");
+        let state = self.state.lock().await;
         Ok((0..limit.min(64))
             .map(|i| FundingRatePoint {
                 rate: state.funding_rate,
@@ -570,7 +565,7 @@ impl TriggerOrderGateway for MockAdapter {
         _exchange_id: &common::ExchangeId,
         req: TriggerOrderRequest,
     ) -> Result<String, PortError> {
-        let mut state = self.state.lock().expect("mock state");
+        let mut state = self.state.lock().await;
         let id = format!("trigger-{}", self.ids.fetch_add(1, Ordering::Relaxed));
         state.trigger_orders.push((id.clone(), req));
         Ok(id)
@@ -582,7 +577,7 @@ impl TriggerOrderGateway for MockAdapter {
         order_id: &str,
         _symbol: &str,
     ) -> Result<(), PortError> {
-        let mut state = self.state.lock().expect("mock state");
+        let mut state = self.state.lock().await;
         state.trigger_orders.retain(|(id, _)| id != order_id);
         Ok(())
     }
@@ -596,7 +591,7 @@ impl VenueOpInvoker for MockAdapter {
         op: &str,
         _params: serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, PortError> {
-        let state = self.state.lock().expect("mock state");
+        let state = self.state.lock().await;
         tracing::warn!(
             op = op,
             "VenueOpInvoker invoked on MockAdapter — dry-run stub; no real venue operation is performed"
@@ -633,7 +628,7 @@ impl WalletGateway for MockAdapter {
         _exchange_id: &common::ExchangeId,
         limit: u32,
     ) -> Result<Vec<LedgerEntry>, PortError> {
-        let state = self.state.lock().expect("mock state");
+        let state = self.state.lock().await;
         Ok(state.deposits.iter().take(limit as usize).cloned().collect())
     }
 
@@ -644,7 +639,7 @@ impl WalletGateway for MockAdapter {
         amount: Decimal,
         dest_label: &str,
     ) -> Result<(), PortError> {
-        let mut state = self.state.lock().expect("mock state");
+        let mut state = self.state.lock().await;
         state.transfers.push((asset.to_string(), amount, dest_label.to_string()));
         Ok(())
     }
@@ -658,27 +653,27 @@ fn now_ms() -> i64 {
 
 impl MockAdapter {
     /// Sets the funding rate returned by [`FundingRateSource`].
-    pub fn set_funding_rate(&self, rate: Decimal) {
-        self.state.lock().expect("mock state").funding_rate = rate;
+    pub async fn set_funding_rate(&self, rate: Decimal) {
+        self.state.lock().await.funding_rate = rate;
     }
 
     /// Sets the balance returned by the `account.balance` venue op.
-    pub fn set_op_balance(&self, balance: Decimal) {
-        self.state.lock().expect("mock state").op_balance = balance;
+    pub async fn set_op_balance(&self, balance: Decimal) {
+        self.state.lock().await.op_balance = balance;
     }
 
     /// Pushes a completed deposit into the fake ledger.
-    pub fn push_deposit(&self, entry: LedgerEntry) {
-        self.state.lock().expect("mock state").deposits.push(entry);
+    pub async fn push_deposit(&self, entry: LedgerEntry) {
+        self.state.lock().await.deposits.push(entry);
     }
 
     /// Snapshot of transfers performed through [`WalletGateway::transfer`].
-    pub fn transfers(&self) -> Vec<(String, Decimal, String)> {
-        self.state.lock().expect("mock state").transfers.clone()
+    pub async fn transfers(&self) -> Vec<(String, Decimal, String)> {
+        self.state.lock().await.transfers.clone()
     }
 
     /// Snapshot of outstanding trigger orders.
-    pub fn trigger_orders(&self) -> Vec<(String, TriggerOrderRequest)> {
-        self.state.lock().expect("mock state").trigger_orders.clone()
+    pub async fn trigger_orders(&self) -> Vec<(String, TriggerOrderRequest)> {
+        self.state.lock().await.trigger_orders.clone()
     }
 }

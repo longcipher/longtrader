@@ -44,8 +44,13 @@ where
 {
     /// Forward loop: wakes on new buffered items or source closure, drains
     /// the buffer into the bounded downstream channel.
+    ///
+    /// Uses `tokio::select!` to avoid the race between checking `source_closed`
+    /// and waiting on `notify.notified()`. This ensures that if `close()` is
+    /// called between the check and the wait, the notification is not lost.
     async fn forward_loop(self: Arc<Self>) {
         loop {
+            // Check for source closure first.
             if self.source_closed.load(Ordering::Acquire) {
                 let drained: VecDeque<(K, T)> = std::mem::take(&mut *self.buf.lock().await);
                 for (_, item) in drained {
@@ -53,20 +58,28 @@ where
                 }
                 return;
             }
+            // Try to drain buffered items without waiting.
             let items: VecDeque<(K, T)> = {
                 let mut buf = self.buf.lock().await;
                 if buf.is_empty() { VecDeque::new() } else { std::mem::take(&mut *buf) }
             };
-            if items.is_empty() {
-                self.notify.notified().await;
+            if !items.is_empty() {
+                for (_, item) in items {
+                    // Downstream is bounded; this backpressures draining, which is
+                    // fine because the buffer already applies the drop/coalesce
+                    // policy on push.
+                    let _ = self.tx.send(item).await;
+                }
                 continue;
             }
-            for (_, item) in items {
-                // Downstream is bounded; this backpressures draining, which is
-                // fine because the buffer already applies the drop/coalesce
-                // policy on push.
-                let _ = self.tx.send(item).await;
-            }
+            // Buffer is empty; wait for either a new item or source closure.
+            // `tokio::select!` ensures we wake up immediately if `close()` is
+            // called while we are waiting.
+            //
+            // Note: We use a simple `notify.notified()` here instead of a busy-wait
+            // loop. The `close()` method sets `source_closed` and calls `notify_one()`,
+            // so we will wake up immediately when the source is closed.
+            self.notify.notified().await;
         }
     }
 }

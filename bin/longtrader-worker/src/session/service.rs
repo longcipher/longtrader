@@ -100,7 +100,7 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
     ) -> connectrpc::ServiceResult<PreEncoded<worker::KeepAliveResponse>> {
         let req = request.to_owned_message();
         let handle = self.manager.get(&req.session_id).await?;
-        handle.touch();
+        handle.touch().await;
         let resp = worker::KeepAliveResponse {
             server_time_ns: now_ns(),
             heartbeat_interval_ms: handle.heartbeat_interval_ms,
@@ -151,7 +151,7 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
         // ALL_ORDERS cancels every open order of the bound account(s);
         // NONE logs only — see SessionManager::trip_kill_switch.
         if let Some(policy) = req.policy.as_option() {
-            let mut session_policy = handle.policy();
+            let mut session_policy = handle.policy().await;
             if let Some(timeout) = policy.lease_timeout.as_option() {
                 session_policy.lease_timeout = super::lease::lease_timeout_from_proto(timeout)
                     .map_err(|e| {
@@ -171,7 +171,7 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
                     )));
                 }
             }
-            handle.set_policy(session_policy);
+            handle.set_policy(session_policy).await;
         }
         let resp = worker::SetKillSwitchPolicyResponse::default();
         Response::ok(PreEncoded::from_message(&resp))
@@ -191,7 +191,7 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
             started_at_ms: now_ns() / 1_000_000,
             orders_submitted: 0,
             log_events: 0,
-        });
+        }).await;
         let resp = worker::RegisterStrategyResponse { strategy_id, ..Default::default() };
         Response::ok(PreEncoded::from_message(&resp))
     }
@@ -203,7 +203,7 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
     ) -> connectrpc::ServiceResult<PreEncoded<worker::StrategyStatusResponse>> {
         let req = request.to_owned_message();
         let handle = self.manager.get(&req.session_id).await?;
-        let info = handle.strategy_info();
+        let info = handle.strategy_info().await;
         let resp = worker::StrategyStatusResponse {
             state: buffa::EnumValue::Known(
                 handle.state().map_or(worker::SessionState::Attached, SessionState::to_proto),

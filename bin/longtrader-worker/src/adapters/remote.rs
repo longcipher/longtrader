@@ -13,7 +13,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -21,7 +21,6 @@ use buffa::{Message, MessageField};
 use rust_decimal::Decimal;
 
 use crate::{
-    overflow,
     ports::{MarketDataSource, MarketEventStream, OverflowPolicy, PortError, TradingGateway},
     proto::{account, common, market, trading, worker},
 };
@@ -213,7 +212,12 @@ impl TradingGateway for RemoteAdapter {
         // Callers must treat `snapshot_sequence` as a local watermark and
         // replay deltas after it (see `SessionManager::complete_reconcile`).
         // A server-side single-RPC `ReconcileState` is the long-term fix.
-        // ponytail: 3 RPCs + local seq; server atomic snapshot when available.
+        //
+        // SECURITY NOTE: The snapshot is NOT atomic. There is a race window
+        // between the three RPCs where the backend state may change. The
+        // `snapshot_sequence` is a local monotonic counter, not a server-side
+        // watermark. Strategies MUST replay deltas after `snapshot_sequence`
+        // to converge to the correct state.
         let started_ms = ms_now();
         let account_resp: trading::GetAccountResponse = self
             .unary(
@@ -325,49 +329,11 @@ impl MarketDataSource for RemoteAdapter {
         // backend exposes server-streaming. Each subscription polls its snapshot
         // on a fixed cadence; the channel applies `policy` (DropOldest / Coalesce
         // / Block) so a slow consumer never stalls the worker or other sessions.
-        const POLL_INTERVAL_MS: u64 = 1_000;
-        const BUFFER_CAP: usize = 16;
-
-        let seq = Arc::new(AtomicU64::new(0));
-        let (tx, rx) =
-            overflow::policy_channel(BUFFER_CAP, policy, crate::adapters::market_event_key);
-
-        for sub in req.subscriptions {
-            let channel = match sub.channel {
-                buffa::EnumValue::Known(c) => c,
-                buffa::EnumValue::Unknown(_) => market::StreamChannel::Unspecified,
-            };
-            let symbol = sub.symbol;
-            if symbol.is_empty() {
-                continue;
-            }
-            let exchange_id = req.exchange_id.clone();
-            let adapter = self.clone();
-            let tx = tx.clone();
-            let seq = Arc::clone(&seq);
-            tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(Duration::from_millis(POLL_INTERVAL_MS));
-                loop {
-                    if tx.is_closed() {
-                        break;
-                    }
-                    ticker.tick().await;
-                    if tx.is_closed() {
-                        break;
-                    }
-                    match adapter.poll_snapshot(channel, &exchange_id, &symbol, &seq).await {
-                        Ok(Some(event)) => {
-                            tx.send(event).await;
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            tracing::warn!(error = %err, symbol = %symbol, "market poll failed");
-                        }
-                    }
-                }
-            });
-        }
-        Ok(rx)
+        let this = self.clone();
+        Ok(crate::adapters::poll_market_data(req, policy, move |channel, exchange_id, symbol, seq| {
+            let this = this.clone();
+            async move { this.poll_snapshot(channel, &exchange_id, symbol, &seq).await }
+        }))
     }
 }
 
@@ -378,7 +344,7 @@ impl RemoteAdapter {
         &self,
         channel: market::StreamChannel,
         exchange_id: &common::ExchangeId,
-        symbol: &str,
+        symbol: String,
         seq: &AtomicU64,
     ) -> Result<Option<market::MarketDataEvent>, PortError> {
         let next = seq.fetch_add(1, Ordering::Relaxed) + 1;
