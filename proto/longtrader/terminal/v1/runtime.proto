@@ -4,7 +4,7 @@ package longtrader.terminal.v1;
 
 import "longtrader/terminal/v1/messages.proto";
 
-// 运行时状态与订阅。
+// Runtime state and subscriptions.
 service RuntimeService {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc ListVenues(ListVenuesRequest) returns (ListVenuesResponse);

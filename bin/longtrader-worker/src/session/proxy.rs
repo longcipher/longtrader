@@ -199,6 +199,18 @@ impl trading::TradingService for TradingProxy {
         let resp = self.gateway.close_all_positions(req).await.map_err(internal)?;
         Response::ok(PreEncoded::from_message(&resp))
     }
+
+    async fn modify_position(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, trading::ModifyPositionRequest>,
+    ) -> connectrpc::ServiceResult<PreEncoded<trading::ModifyPositionResponse>> {
+        let mut req = request.to_owned_message();
+        req.exchange_id =
+            buffa::MessageField::some(resolved_exchange(&req.exchange_id, &self.default_exchange));
+        let resp = self.gateway.modify_position(req).await.map_err(internal)?;
+        Response::ok(PreEncoded::from_message(&resp))
+    }
 }
 
 /// Forwards unified market data RPCs onto the [`MarketDataSource`] port.

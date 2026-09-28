@@ -5,7 +5,7 @@ package longtrader.terminal.v1;
 import "longtrader/terminal/v1/messages.proto";
 import "longtrader/common/v1/types.proto";
 
-// 交易服务：账户 / 持仓 / 订单。
+// Trading service: account / positions / orders.
 service TradingService {
   rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
   rpc GetPositions(GetPositionsRequest) returns (GetPositionsResponse);
@@ -71,13 +71,13 @@ message PlaceOrderRequest {
   string symbol = 2;
   Side side = 3;
   OrderType order_type = 4;
-  string quantity = 5;                 // 字符串小数
+  string quantity = 5;                 // string decimal
   optional string price = 6;
   optional string stop_price = 7;
   optional string take_profit = 8;
   optional string stop_loss = 9;
   bool reduce_only = 10;
-  string client_order_id = 11;         // 幂等键
+  string client_order_id = 11;         // idempotency key
   optional string strategy_id = 12;
 }
 
@@ -106,7 +106,7 @@ message CancelAllResponse {
 message ClosePositionRequest {
   string venue = 1;
   string position_id = 2;
-  uint32 close_bps = 3;                // 平仓比例 basis points（10000 = 100%）
+  uint32 close_bps = 3;                // Close ratio basis points (10000 = 100%)
   oneof price_choice {
     string limit_price = 4;
     bool market = 5;
@@ -123,12 +123,12 @@ message CloseAllPositionsRequest {
 
 message CloseAllPositionsResponse {}
 
-// 修改持仓的止盈 / 止损。留空表示不改对应字段。
+// Modify the take-profit / stop-loss of a position. Empty means no change.
 message ModifyPositionRequest {
   string venue = 1;
   string position_id = 2;
-  optional string take_profit = 3;      // 字符串小数
-  optional string stop_loss = 4;        // 字符串小数
+  optional string take_profit = 3;      // string decimal
+  optional string stop_loss = 4;        // string decimal
 }
 
 message ModifyPositionResponse {

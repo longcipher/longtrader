@@ -76,14 +76,11 @@ pub fn market_event_key(event: &market::MarketDataEvent) -> String {
 /// # Returns
 /// A receiver that yields `MarketDataEvent`s
 ///
-/// # Panics
-/// Panics if `req.exchange_id` is `None`. The `exchange_id` is a required field
-/// in the proto definition, so this should never happen in practice. However,
-/// if it does, the function will panic with a descriptive error message.
+/// If `req.exchange_id` is `None`, returns an empty stream immediately.
 pub fn poll_market_data<F, Fut>(
     req: market::StreamMarketDataRequest,
     policy: OverflowPolicy,
-    mut fetcher: F,
+    fetcher: F,
 ) -> MarketEventStream
 where
     F: FnMut(market::StreamChannel, common::ExchangeId, String, Arc<AtomicU64>) -> Fut
@@ -101,10 +98,10 @@ where
     let (tx, rx) = overflow::policy_channel(BUFFER_CAP, policy, market_event_key);
 
     // exchange_id is a required field in the proto definition.
-    // If it is None, we cannot proceed.
-    let default_exchange = req.exchange_id.as_option().cloned().unwrap_or_else(|| {
-        panic!("poll_market_data: req.exchange_id is None, but it is a required field");
-    });
+    // If it is None, return an empty stream.
+    let Some(default_exchange) = req.exchange_id.as_option().cloned() else {
+        return rx;
+    };
     for sub in req.subscriptions {
         let channel = match sub.channel {
             buffa::EnumValue::Known(c) => c,

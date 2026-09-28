@@ -5,7 +5,7 @@ package longtrader.terminal.v1;
 import "longtrader/terminal/v1/messages.proto";
 import "longtrader/terminal/v1/trading.proto";
 
-// 策略生命周期与动作（worker 自动化）。
+// Strategy lifecycle and actions (worker automation).
 service StrategyService {
   rpc ListStrategies(ListStrategiesRequest) returns (ListStrategiesResponse);
   rpc StartStrategy(StartStrategyRequest) returns (StrategyStatus);
@@ -15,8 +15,8 @@ service StrategyService {
   rpc GetStrategyStatus(GetStrategyStatusRequest) returns (StrategyStatus);
   rpc SubmitAction(SubmitActionRequest) returns (ActionReceipt);
   rpc StreamStrategyEvents(StreamStrategyEventsRequest) returns (stream StrategyEvent);
-  // 策略描述目录：返回可配置的策略模板（内置/开源/自定义），UI 据此渲染
-  // 参数表单（schema 驱动），终端不必为每个策略写死界面。
+  // Strategy descriptor catalog: returns configurable strategy templates (builtin/open-source/custom), UI renders accordingly
+  // parameter form (schema-driven), terminal does not need hardcoded UI per strategy.
   rpc ListStrategyDescriptors(ListStrategyDescriptorsRequest) returns (ListStrategyDescriptorsResponse);
 }
 
@@ -36,7 +36,7 @@ message ListStrategiesResponse {
 message StartStrategyRequest {
   string strategy_id = 1;
   string name = 2;
-  // 策略参数（JSON 字符串，由 worker 与 API 约定 schema）。
+  // Strategy parameters (JSON string, schema agreed between worker and API).
   string params_json = 3;
 }
 
@@ -82,46 +82,46 @@ message StreamStrategyEventsRequest {
 }
 
 
-// ========== 策略描述目录（schema 驱动配置体验） ==========
+// ========== Strategy descriptor catalog (schema-driven configuration) ==========
 
-// 单个参数槽位的声明。UI 据此渲染输入控件：step 决定滑块粒度与展示
-// 小数位，min/max 给出值域，default 作为新建表单的预填值。
+// Declaration of a single parameter slot. UI renders input controls based on this: step determines slider granularity and display
+// decimal places, min/max define value range, default is the pre-filled value for new forms.
 message ParamSlot {
-  // 槽位名称（表单标签）。
+  // Slot name (form label).
   string label = 1;
-  // 量纲：percent / usd / decimal / duration / timestamp。
+  // Dimension: percent / usd / decimal / duration / timestamp.
   string dimension = 2;
-  // 值域下界（可缺席）。
+  // Lower bound of value range (optional).
   optional double min = 3;
-  // 值域上界（可缺席）。
+  // Upper bound of value range (optional).
   optional double max = 4;
-  // 输入网格步长（可缺席，缺省按量纲取默认档）。
+  // Input grid step (optional, defaults to dimension default).
   optional double step = 5;
-  // 新建表单的预填值（可缺席）。
+  // Pre-filled value for new form (optional).
   optional double default = 6;
 }
 
-// 一条可配置的策略模板。内置策略（builtin=true）只许调参数、
-// 结构禁改；自定义策略由用户自行创建。
+// A configurable strategy template. Builtin strategies (builtin=true) only allow parameter adjustment,
+// structure cannot be modified; custom strategies are created by users.
 message StrategyDescriptor {
-  // 策略 id，如 "grid_maker" / "cmdnc_arb" / 用户自定义 id。
+  // Strategy id, e.g. "grid_maker" / "cmdnc_arb" / user-defined id.
   string id = 1;
-  // 展示名。
+  // Display name.
   string name = 2;
-  // 一句话说明（这条策略在做什么、怎么调参）。
+  // One-line description (what this strategy does, how to tune parameters).
   string note = 3;
-  // 是否为内置策略（内置不可删除，结构禁改）。
+  // Whether it is a builtin strategy (builtin cannot be deleted, structure cannot be modified).
   bool builtin = 4;
-  // 参数槽位声明（下标即策略参数数组的序号）。
+  // Parameter slot declarations (index corresponds to strategy parameter array index).
   repeated ParamSlot params = 5;
-  // 策略类型：hedge（两腿组合对冲）/ maker（做市）/ arb（套利）。
+  // Strategy type: hedge (two-leg combination hedging) / maker (market making) / arb (arbitrage).
   string kind = 6;
 }
 
 message ListStrategyDescriptorsRequest {
-  // 按 id / 名称 / 类型搜索（不分大小写子串），空串即不筛。
+  // Search by id / name / type (case-insensitive substring), empty string means no filter.
   string search = 1;
-  // 是否只取内置策略。
+  // Whether to only return builtin strategies.
   optional bool builtin_only = 2;
 }
 

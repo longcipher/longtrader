@@ -249,6 +249,13 @@ impl TradingGateway for MockAdapter {
     ) -> Result<trading::CloseAllPositionsResponse, PortError> {
         Ok(trading::CloseAllPositionsResponse::default())
     }
+
+    async fn modify_position(
+        &self,
+        _req: trading::ModifyPositionRequest,
+    ) -> Result<trading::ModifyPositionResponse, PortError> {
+        Err(PortError::MissingField(format!("no open position {}", _req.position_id)))
+    }
 }
 
 #[async_trait]

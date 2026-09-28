@@ -4,135 +4,135 @@ package longtrader.terminal.v1;
 
 import "google/protobuf/timestamp.proto";
 
-// 可空参数值（proto3 repeated 无 null，用显式容器表达）。
+// Nullable parameter values (proto3 repeated has no null, use explicit container to express).
 message ParamValue {
   optional double value = 1;
 }
 
-// ========== 组合单元（Hedge Unit）契约 ==========
+// ========== Hedge Unit contract ==========
 //
-// 组合单元是策略执行的核算单元：两腿（long/short）跨所配对，策略
-// 表达式输出目标名义，执行引擎维持两腿仓位在这个值上。UI 的"策略
-// 详情页"按组合单元组织（每单元一个页面：配置 + 运行时追踪 + 套利）。
+// Hedge unit is the accounting unit for strategy execution: two legs (long/short) cross-exchange pairing, strategy
+// expression outputs target notional, execution engine maintains two-leg position at this value. UI's "strategy
+// detail page" is organized by hedge unit (one page per unit: config + runtime tracking + arbitrage).
 
-// 组合单元的一条腿。
+// One leg of a hedge unit.
 message HedgeLeg {
-  // 交易所 id（venue）。
+  // Exchange id (venue).
   string venue = 1;
-  // 交易所原生品种符号。
+  // Exchange native symbol.
   string symbol = 2;
-  // 腿方向：LONG / SHORT。
+  // Leg direction: LONG / SHORT.
   string side = 3;
 }
 
-// 一条调仓流水（策略调仓或价格波动调仓）。
+// One rebalance record (strategy rebalance or price drift rebalance).
 message Adjustment {
   string id = 1;
-  // 毫秒时间戳。
+  // Millisecond timestamp.
   int64 timestamp_ms = 2;
-  // 调仓种类：STRATEGY（策略调仓）/ DRIFT（价格波动调仓）/ MANUAL（手动）。
+  // Rebalance type: STRATEGY (strategy rebalance) / DRIFT (price drift rebalance) / MANUAL (manual).
   string kind = 3;
-  // 审计文本：表达式代入当拍实际值。
+  // Audit text: expression substituted with current actual values.
   string expression = 4;
-  // 目标名义（quote 金额）。
+  // Target notional (quote amount).
   double target_notional = 5;
-  // 目标数量（多腿单位，带符号）。
+  // Target quantity (multi leg units, signed).
   double target_quantity = 6;
-  // 调仓前名义（可缺席）。
+  // Pre-rebalance notional (optional).
   optional double from_notional = 7;
 }
 
-// 套利快照：一条腿一对的实时价差/资金费率读数，供"套利显示区"渲染。
+// Arbitrage snapshot: real-time spread/funding rate readings for one leg pair, for "arbitrage display area" rendering.
 message ArbitrageSnapshot {
-  // 跨所基差（spot vs perp 价格差，均值归一比率）。
+  // Cross-exchange basis (spot vs perp price difference, mean-normalized ratio).
   double basis = 1;
-  // 资金费率差（空腿费率 - 多腿费率，比率）。
+  // Funding rate diff (empty leg rate - multi leg rate, ratio).
   double funding_rate_diff = 2;
-  // 开仓动作侧可成交价差（多腿吃卖一、空腿吃买一）。
+  // Open action side executable spread (multi leg takes ask, empty leg takes bid).
   double open_spread = 3;
-  // 平仓动作侧可成交价差（多腿吃买一、空腿吃卖一）。
+  // Close action side executable spread (multi leg takes bid, empty leg takes ask).
   double close_spread = 4;
-  // 开仓阈值线（策略自定义，价差上穿建仓）。
+  // Open threshold line (strategy custom, spread crosses above to open).
   double open_line = 5;
-  // 平仓阈值线（策略自定义，价差跌破清仓）。
+  // Close threshold line (strategy custom, spread crosses below to close).
   double close_line = 6;
-  // 当前两腿名义合计（quote 金额）。
+  // Current total two-leg notional (quote amount).
   double current_notional = 7;
-  // 策略目标名义（quote 金额）。
+  // 策略Target notional (quote amount).
   double target_notional = 8;
-  // 净盈亏（价差盈亏 + 资金费净收 - 手续费，quote）。
+  // Net P&L (spread P&L + funding rate net income - fees, quote).
   double net_pnl = 9;
-  // 已实现盈亏（quote）。
+  // Realized P&L (quote).
   double realized_pnl = 10;
-  // 资金费累计净收（quote）。
+  // Cumulative funding rate net income (quote).
   double funding_accrued = 11;
-  // 手续费累计（quote）。
+  // Cumulative fees (quote).
   double fees_paid = 12;
-  // 多腿数量偏差（(实际-目标)/目标）。
+  // Multi leg quantity deviation ((actual-target)/target).
   double long_deviation = 13;
-  // 空腿数量偏差。
+  // Empty leg quantity deviation.
   double short_deviation = 14;
-  // 多腿爆仓接近度 [0,1]。
+  // Multi leg liquidation proximity [0,1].
   double long_liq_risk = 15;
-  // 空腿爆仓接近度 [0,1]。
+  // Empty leg liquidation proximity [0,1].
   double short_liq_risk = 16;
-  // 快照时刻（毫秒）。
+  // Snapshot time (milliseconds).
   int64 timestamp_ms = 17;
 }
 
-// 组合单元状态。
+// Hedge unit status.
 message HedgeUnit {
   string id = 1;
-  // 展示名。
+  // Display name.
   string name = 2;
   HedgeLeg long_leg = 3;
   HedgeLeg short_leg = 4;
-  // 空腿汇率：空腿价格族 × scale 折到多腿单位。
+  // Empty leg exchange rate: empty leg price family × scale converted to multi leg units.
   double scale = 5;
-  // 绑定策略 id（见 StrategyDescriptor）。
+  // Bound strategy id (see StrategyDescriptor).
   string strategy_id = 6;
-  // 参数值，与 descriptor 的 params 槽位逐位对齐；null = 该槽未填。
+  // Parameter values, aligned with descriptor's params slots; null = slot not filled.
   repeated ParamValue params = 7;
-  // 状态：RUNNING / REDUCE_ONLY / DISABLED / CLOSED。
+  // Status: RUNNING / REDUCE_ONLY / DISABLED / CLOSED.
   string status = 8;
-  // 目标名义（quote 金额）。
+  // Target notional (quote amount).
   double target_notional = 9;
-  // 目标数量（多腿单位，带符号）。
+  // Target quantity (multi leg units, signed).
   double target_quantity = 10;
-  // 多腿实际持仓数量。
+  // Multi leg actual position quantity.
   double long_quantity = 11;
-  // 空腿实际持仓数量（已折多腿单位，带符号为负）。
+  // Empty leg actual position quantity (converted to multi leg units, negative when signed).
   double short_quantity = 12;
-  // 最近调仓流水（按时间降序，最多保留最近 50 条）。
+  // Recent rebalance records (sorted by time descending, max 50 kept).
   repeated Adjustment adjustments = 13;
-  // 最新套利快照（可缺席）。
+  // Latest arbitrage snapshot (optional).
   optional ArbitrageSnapshot arbitrage = 14;
-  // 开仓时刻。
+  // Open time.
   google.protobuf.Timestamp opened_at = 15;
-  // 最近更新时间。
+  // Last update time.
   google.protobuf.Timestamp updated_at = 16;
 }
 
-// 组合单元实时事件（流）。
+// Hedge unit real-time events (stream).
 message HedgeUnitEvent {
   oneof payload {
-    // 单元整体状态更新（含目标/实际仓位、状态、最新套利快照）。
+    // Unit overall status update (including target/actual positions, status, latest arbitrage snapshot).
     HedgeUnit unit = 1;
-    // 新增一条调仓流水。
+    // New rebalance record.
     Adjustment adjustment = 2;
-    // 套利快照更新（高频，独立于单元低频状态）。
+    // Arbitrage snapshot update (high frequency, independent of unit low-frequency status).
     ArbitrageSnapshot arbitrage = 3;
   }
 }
 
-// ========== 组合单元服务 ==========
+// ========== Hedge unit services ==========
 
 message ListHedgeUnitsRequest {
-  // 按名称 / 腿符号搜索（不分大小写子串），空串即不筛。
+  // Search by name / leg symbol (case-insensitive substring), empty string means no filter.
   string search = 1;
-  // 状态白名单（RUNNING / REDUCE_ONLY / DISABLED / CLOSED），空数组即不筛。
+  // Status whitelist (RUNNING / REDUCE_ONLY / DISABLED / CLOSED), empty array means no filter.
   repeated string statuses = 2;
-  // 策略 id 白名单，空数组即不筛。
+  // Strategy id whitelist, empty array means no filter.
   repeated string strategy_ids = 3;
 }
 
@@ -151,7 +151,7 @@ message CreateHedgeUnitRequest {
   double scale = 4;
   string strategy_id = 5;
   repeated ParamValue params = 6;
-  // 初始状态：RUNNING / REDUCE_ONLY / DISABLED。
+  // Initial status: RUNNING / REDUCE_ONLY / DISABLED.
   string status = 7;
 }
 
@@ -176,7 +176,7 @@ message SetHedgeUnitStatusRequest {
 }
 
 message StreamHedgeUnitEventsRequest {
-  // 订阅的组合单元 id；空 = 全部。
+  // Subscribed hedge unit ids; empty = all.
   repeated string hedge_unit_ids = 1;
 }
 
@@ -187,6 +187,6 @@ service HedgeUnitService {
   rpc UpdateHedgeUnit(UpdateHedgeUnitRequest) returns (HedgeUnit);
   rpc DeleteHedgeUnit(DeleteHedgeUnitRequest) returns (DeleteHedgeUnitResponse);
   rpc SetHedgeUnitStatus(SetHedgeUnitStatusRequest) returns (HedgeUnit);
-  // 组合单元实时事件流（状态 / 调仓 / 套利快照）。
+  // Hedge unit real-time event stream (status / rebalance / arbitrage snapshot).
   rpc StreamHedgeUnitEvents(StreamHedgeUnitEventsRequest) returns (stream HedgeUnitEvent);
 }

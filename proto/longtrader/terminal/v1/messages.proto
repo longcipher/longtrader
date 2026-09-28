@@ -5,7 +5,7 @@ package longtrader.terminal.v1;
 import "longtrader/trading/v1/trading.proto";
 import "google/protobuf/timestamp.proto";
 
-// ========== 通用枚举 ==========
+// ========== Common enums ==========
 
 enum Timeframe {
   TIMEFRAME_UNSPECIFIED = 0;
@@ -45,18 +45,18 @@ enum OrderStatus {
   ORDER_STATUS_CANCELED = 3;
 }
 
-// 流订阅的分类桶，用于服务端分桶广播（慢客户端只影响其所订阅的桶）。
+// Classification buckets for stream subscriptions, used for server-side bucketed broadcast (slow clients only affect their subscribed buckets).
 enum TopicClass {
   TOPIC_CLASS_UNSPECIFIED = 0;
   TOPIC_CLASS_MARKET_LITE = 1;   // tick / ticker
   TOPIC_CLASS_MARKET_HEAVY = 2;  // book / trade
   TOPIC_CLASS_TRADING = 3;       // position / order / execution / account
   TOPIC_CLASS_RUNTIME = 4;       // runtime_status
-  TOPIC_CLASS_FUNDING = 5;       // funding_rate / basis（低频）
-  TOPIC_CLASS_DERIVATIVES = 6;   // liquidation / open_interest（清算峰值）
+  TOPIC_CLASS_FUNDING = 5;       // funding_rate / basis (low frequency)
+  TOPIC_CLASS_DERIVATIVES = 6;   // liquidation / open_interest (liquidation peak)
 }
 
-// 主动成交方向（足迹图正确性的根基；未知时前端降级为双列合计）。
+// Aggressor direction (foundation of footprint chart correctness; frontend degrades to two-column total when unknown).
 enum Aggressor {
   AGGRESSOR_UNSPECIFIED = 0;
   AGGRESSOR_BUY = 1;
@@ -64,9 +64,9 @@ enum Aggressor {
   AGGRESSOR_UNKNOWN = 3;
 }
 
-// ========== 通用消息 ==========
+// ========== Common messages ==========
 
-// 高精度十进制，字符串承载（避免浮点精度问题）。
+// High-precision decimal, carried as string (avoids floating-point precision issues).
 message Decimal {
   string value = 1;
 }
@@ -74,8 +74,8 @@ message Decimal {
 message Symbol {
   string name = 1;
   string display_name = 2;
-  string contract_size = 3;   // 字符串小数
-  string tick_size = 4;       // 字符串小数
+  string contract_size = 3;   // string decimal
+  string tick_size = 4;       // string decimal
   string base_asset = 5;
   string quote_asset = 6;
 }
@@ -119,7 +119,7 @@ message Book {
   repeated PriceLevel bids = 2;
   repeated PriceLevel asks = 3;
   int64 timestamp_ms = 4;
-  bool snapshot = 5;          // true = 全量快照；false = 增量
+  bool snapshot = 5;          // true = full snapshot; false = incremental
 }
 
 message Trade {
@@ -130,36 +130,36 @@ message Trade {
   string amount = 5;
   int64 timestamp_ms = 6;
   bool maker = 7;
-  Aggressor aggressor = 8;   // 主动方向：Buy/Sell/Unknown（Binance aggTrade m 字段映射，见 datasource 层）
+  Aggressor aggressor = 8;   // Aggressor direction: Buy/Sell/Unknown (Binance aggTrade m field mapping, see datasource layer)
 }
 
-// 爆仓事件（跨所字段归一后的统一形态）。
+// Liquidation event (unified form after cross-exchange field normalization).
 message Liquidation {
   string exchange = 1;
   string symbol = 2;
-  Side side = 3;               // 爆仓方向
-  string amount = 4;           // 名义价值/数量（decimal）
-  string price = 5;            // 爆仓价格（decimal）
+  Side side = 3;               // Liquidation direction
+  string amount = 4;           // Notional value/quantity (decimal)
+  string price = 5;            // Liquidation price (decimal)
   int64 timestamp_ms = 6;
 }
 
-// 订单簿增量（做市网关私有流 / 深度增量推送）。
+// Orderbook delta (market maker gateway private stream / depth delta push).
 message OrderbookDelta {
   string symbol = 1;
-  int64 seq = 2;               // 单调序号；seq 缺口 = 数据不连续 → 触发重同步
-  bool is_snapshot = 3;        // true=全量快照（重建起点）；false=增量（qty=0 表示删除档）
+  int64 seq = 2;               // Monotonic sequence; seq gap = data discontinuity → triggers resync
+  bool is_snapshot = 3;        // true=full snapshot (rebuild point); false=incremental (qty=0 means delete level)
   repeated PriceLevel bids = 4;
   repeated PriceLevel asks = 5;
 }
 
-// 做市商私单投影：网关推送的队列位置为权威（优先于本地估算）。
+// Market maker private order projection: gateway-pushed queue position is authoritative (takes precedence over local estimation).
 message MyOrderPosition {
   string order_id = 1;
   string symbol = 2;
   Side side = 3;
   string price = 4;            // decimal
   string quantity = 5;         // decimal
-  uint32 queue_position = 6;   // 排队位置（外部权威）
+  uint32 queue_position = 6;   // Queue position (external authority)
   uint32 total_in_queue = 7;
   google.protobuf.Timestamp updated_at = 8;
 }
@@ -243,7 +243,7 @@ message RuntimeStatus {
   int64 uptime_secs = 7;
 }
 
-// 流消息统一封装：带类型与单调序号。
+// Unified stream message envelope: with type and monotonic sequence.
 message UpdateEnvelope {
   uint64 seq = 1;
   TopicClass topic_class = 2;

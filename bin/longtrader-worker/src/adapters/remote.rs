@@ -204,6 +204,15 @@ impl TradingGateway for RemoteAdapter {
         Ok(resp)
     }
 
+    async fn modify_position(
+        &self,
+        req: trading::ModifyPositionRequest,
+    ) -> Result<trading::ModifyPositionResponse, PortError> {
+        let resp: trading::ModifyPositionResponse =
+            self.unary(SERVICE_TRADING, "ModifyPosition", req).await?;
+        Ok(resp)
+    }
+
     async fn sync_state(
         &self,
         exchange_id: &common::ExchangeId,
@@ -360,7 +369,7 @@ impl RemoteAdapter {
             let book = self
                 .fetch_order_book(market::FetchOrderBookRequest {
                     exchange_id: MessageField::some(exchange_id.clone()),
-                    symbol: symbol.to_string(),
+                    symbol: symbol.clone(),
                     pagination: crate::proto::common::Pagination {
                         limit: 100,
                         ..Default::default()
@@ -374,7 +383,7 @@ impl RemoteAdapter {
             let ticker = self
                 .fetch_ticker(market::FetchTickerRequest {
                     exchange_id: MessageField::some(exchange_id.clone()),
-                    symbol: symbol.to_string(),
+                    symbol: symbol.clone(),
                     ..Default::default()
                 })
                 .await?;

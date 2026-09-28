@@ -171,6 +171,12 @@ pub trait TradingGateway: Send + Sync {
         req: trading::CloseAllPositionsRequest,
     ) -> Result<trading::CloseAllPositionsResponse, PortError>;
 
+    /// Modify the take-profit / stop-loss of an open position.
+    async fn modify_position(
+        &self,
+        req: trading::ModifyPositionRequest,
+    ) -> Result<trading::ModifyPositionResponse, PortError>;
+
     /// Best-effort snapshot for deterministic recovery. Adapters aggregate
     /// their backend's balance/position/open-order reads; the three reads are
     /// NOT atomic on the open backend (see `RemoteAdapter::sync_state`).

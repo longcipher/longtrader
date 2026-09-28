@@ -575,6 +575,38 @@ impl TradingGateway for TerminalAdapter {
         Ok(trading::CloseAllPositionsResponse::default())
     }
 
+    async fn modify_position(
+        &self,
+        req: trading::ModifyPositionRequest,
+    ) -> Result<trading::ModifyPositionResponse, PortError> {
+        let venue = venue_of(
+            req.exchange_id
+                .as_option()
+                .ok_or_else(|| PortError::MissingField("exchange_id".to_string()))?,
+        )?;
+        let take_profit = req
+            .take_profit
+            .as_option()
+            .map(longtrader_contract::ext::common_to_decimal)
+            .transpose()?
+            .map(|v| v.to_string());
+        let stop_loss = req
+            .stop_loss
+            .as_option()
+            .map(longtrader_contract::ext::common_to_decimal)
+            .transpose()?
+            .map(|v| v.to_string());
+        let position = self
+            .client
+            .modify_position(&venue, &req.position_id, take_profit.as_deref(), stop_loss.as_deref())
+            .await
+            .map_err(map_client_err)?;
+        Ok(trading::ModifyPositionResponse {
+            position: MessageField::some(position_to_unified(&position)?),
+            ..Default::default()
+        })
+    }
+
     async fn sync_state(
         &self,
         exchange_id: &common::ExchangeId,
@@ -763,7 +795,7 @@ impl TerminalAdapter {
             let book = self
                 .fetch_order_book(market::FetchOrderBookRequest {
                     exchange_id: MessageField::some(exchange_id.clone()),
-                    symbol: symbol.to_string(),
+                    symbol: symbol.clone(),
                     pagination: common::Pagination { limit: 100, ..Default::default() }.into(),
                     ..Default::default()
                 })
@@ -773,7 +805,7 @@ impl TerminalAdapter {
             let ticker = self
                 .fetch_ticker(market::FetchTickerRequest {
                     exchange_id: MessageField::some(exchange_id.clone()),
-                    symbol: symbol.to_string(),
+                    symbol: symbol.clone(),
                     ..Default::default()
                 })
                 .await?;

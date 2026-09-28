@@ -6,7 +6,7 @@ import "longtrader/common/v1/types.proto";
 
 import "longtrader/terminal/v1/messages.proto";
 
-// 行情数据服务：symbols / candles / book / tickers / funding rates。
+// Market data service: symbols / candles / book / tickers / funding rates.
 service MarketDataService {
   rpc GetSymbols(GetSymbolsRequest) returns (GetSymbolsResponse);
   rpc GetCandles(GetCandlesRequest) returns (GetCandlesResponse);
@@ -17,7 +17,7 @@ service MarketDataService {
 }
 
 message GetSymbolsRequest {
-  string venue = 1;   // 空 = 全部已连接 venue
+  string venue = 1;   // empty = all connected venues
 }
 
 message GetSymbolsResponse {

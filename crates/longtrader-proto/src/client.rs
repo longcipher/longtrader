@@ -377,6 +377,29 @@ impl TerminalClient {
         Ok(())
     }
 
+    /// Modify the take-profit / stop-loss of an open position.
+    pub async fn modify_position(
+        &self,
+        venue: &str,
+        position_id: &str,
+        take_profit: Option<&str>,
+        stop_loss: Option<&str>,
+    ) -> Result<proto::Position, TerminalClientError> {
+        let req = proto::ModifyPositionRequest {
+            venue: venue.to_string(),
+            position_id: position_id.to_string(),
+            take_profit: take_profit.map(String::from),
+            stop_loss: stop_loss.map(String::from),
+            ..Default::default()
+        };
+        let resp: proto::ModifyPositionResponse =
+            self.unary(SERVICE_TRADING, "ModifyPosition", req).await?;
+        resp.position
+            .as_option()
+            .cloned()
+            .ok_or_else(|| TerminalClientError::MissingField("position".to_string()))
+    }
+
     // ---- StrategyService ----
 
     /// List strategies.
