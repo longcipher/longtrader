@@ -17,6 +17,7 @@ service TradingService {
   rpc CancelAll(CancelAllRequest) returns (CancelAllResponse);
   rpc ClosePosition(ClosePositionRequest) returns (ClosePositionResponse);
   rpc CloseAllPositions(CloseAllPositionsRequest) returns (CloseAllPositionsResponse);
+  rpc ModifyPosition(ModifyPositionRequest) returns (ModifyPositionResponse);
 }
 
 message GetAccountRequest {
@@ -121,3 +122,15 @@ message CloseAllPositionsRequest {
 }
 
 message CloseAllPositionsResponse {}
+
+// 修改持仓的止盈 / 止损。留空表示不改对应字段。
+message ModifyPositionRequest {
+  string venue = 1;
+  string position_id = 2;
+  optional string take_profit = 3;      // 字符串小数
+  optional string stop_loss = 4;        // 字符串小数
+}
+
+message ModifyPositionResponse {
+  Position position = 1;
+}

@@ -275,6 +275,7 @@ service TradingService {
   rpc GetClosedPositions(GetClosedPositionsRequest) returns (GetClosedPositionsResponse);
   rpc ClosePosition(ClosePositionRequest) returns (ClosePositionResponse);
   rpc CloseAllPositions(CloseAllPositionsRequest) returns (CloseAllPositionsResponse);
+  rpc ModifyPosition(ModifyPositionRequest) returns (ModifyPositionResponse);
 }
 
 message CancelAllOrdersRequest {
@@ -285,4 +286,20 @@ message CancelAllOrdersRequest {
 
 message CancelAllOrdersResponse {
   repeated Order orders = 1;
+}
+
+// ---- Position modification ----
+//
+// Edits the take-profit / stop-loss of an open position. A `None` field leaves
+// the corresponding bracket unchanged.
+
+message ModifyPositionRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  string position_id = 2;
+  optional common.v1.Decimal take_profit = 3;
+  optional common.v1.Decimal stop_loss = 4;
+}
+
+message ModifyPositionResponse {
+  Position position = 1;
 }
