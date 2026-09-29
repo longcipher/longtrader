@@ -257,6 +257,7 @@ just format     # rumdl fmt + cargo sort + cargo +nightly fmt
 just fix        # rumdl --fix + clippy --fix
 just mutation   # cargo mutants (focused on library crates)
 just ci         # lint + test + build (mirrors CI)
+just ci-all     # the above plus every SDK lint + test (needs Go/Node/Python)
 ```
 
 契约工具链：

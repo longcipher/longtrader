@@ -85,8 +85,18 @@ publish-all: publish-rs publish-py publish-ts
 check-cn:
   rg --line-number --column "\p{Han}"
 
-# Full CI check: lint and test everything, then every SDK.
-ci: lint test build sdk-lint sdk-test
+# Rust gate, mirroring the `rust` CI job: lint, test and build the workspace.
+#
+# The SDK gates live in their own recipes because each needs a different
+# toolchain (Go, Python+grpcio-tools, Node) plus generated stubs. Keep them
+# out of `ci` so the Rust job does not have to provision Node, Python and buf
+# just to re-run checks that the `go`, `python` and `typescript` jobs already
+# run with the right toolchain.
+ci: lint test build
+
+# Full local gate: the Rust checks plus every SDK. Needs the Go, Python and
+# Node toolchains and generated stubs (`just sdk-generate`) on PATH.
+ci-all: ci sdk-lint sdk-test
 
 # ============================================================
 # Maintenance & Tools
@@ -146,7 +156,14 @@ sdk-test-ts:
   cd sdks/typescript && npm test
 
 # Type-check the TypeScript SDK and vet the Go SDK without emitting
+#
+# Both SDKs are checked in place: the Go SDK is hand-written and stdlib-only,
+# while the TypeScript SDK imports generated stubs from src/gen (gitignored).
+# Type-checking without those stubs yields dozens of misleading "cannot find
+# module/name" errors, so assert the prerequisites first and fail with an
+# actionable message instead.
 sdk-lint: sdk-lint-go
+  bash scripts/check-sdk-deps.sh typescript
   cd sdks/typescript && npx tsc --noEmit -p tsconfig.json
 
 # Go SDK lint: gofmt cleanliness plus `go vet` (stdlib only, no codegen)

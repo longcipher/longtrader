@@ -35,7 +35,9 @@ jobs:
         with:
           tool: just,cargo-shear,cargo-sort,typos-cli,rumdl,cargo-workspace-inheritance-check
 
-      # `just ci` also vets and tests the Go SDK.
+      # `just ci` is the Rust gate only (lint + test + build). The Go, Python
+      # and TypeScript SDKs are checked by their own jobs below, each with the
+      # toolchain and generated stubs that SDK actually needs.
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -103,6 +105,11 @@ jobs:
 
       # The tests import the generated stubs, so generation must precede them.
       - uses: bufbuild/buf-setup-action@v1
+
+      # `just sdk-generate` / `just sdk-test-py` below need the runner.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
 
       - name: Install test dependencies
         run: |
