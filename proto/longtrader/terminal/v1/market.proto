@@ -50,7 +50,7 @@ message GetBookResponse {
 
 message GetTickersRequest {
   string venue = 1;
-  repeated string symbols = 2;   // 空 = 全部
+  repeated string symbols = 2;   // empty = all
 }
 
 message GetTickersResponse {

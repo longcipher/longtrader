@@ -32,11 +32,24 @@ message ExchangeId {
 }
 
 // Shared pagination envelope for list methods.
+//
+// `limit` caps page size; `since` is an optional inclusive lower bound in Unix
+// milliseconds (time-windowed paging); `cursor` is an opaque, server-issued
+// continuation token from a previous `Page.next_cursor`. Set exactly one of
+// `since`/`cursor` (prefer `cursor` for stable paging).
 message Pagination {
   uint64 limit = 1;
   // Unix timestamp in milliseconds.
   uint64 since = 2;
   string cursor = 3;
+}
+
+// Page metadata echoed on every list response. `next_cursor` is empty when the
+// last page was returned; `total` is best-effort and may be 0 when the backend
+// does not compute a count.
+message Page {
+  string next_cursor = 1;
+  uint32 total = 2;
 }
 
 // Multi-stage latency tracking attached to every streamed event.

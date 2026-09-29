@@ -10,9 +10,10 @@ import "google/protobuf/timestamp.proto";
 //
 // One server-streaming RPC fans every update class (market data, private
 // trading, account) to a consumer as tagged `UpdateEnvelope` messages.
-// Values use `common.v1.Decimal` (dual representation) and millisecond
-// Unix timestamps; reconnect/replay is negotiated through the envelope's
-// `resume_token`.
+// Values use `common.v1.Decimal` (dual representation); entity lifecycle
+// times use `google.protobuf.Timestamp` and high-frequency event times use
+// `int64 *_ms` (Unix milliseconds). Reconnect/replay is negotiated through
+// the envelope's `resume_token`.
 
 // Side as seen from the taker's perspective (public trades, liquidations,
 // own-order projections). `UNKNOWN` degrades consumers to two-column totals.

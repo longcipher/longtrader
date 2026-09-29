@@ -5,7 +5,7 @@ package longtrader.terminal.v1;
 import "longtrader/terminal/v1/messages.proto";
 import "longtrader/terminal/v1/trading.proto";
 
-// 策略生命周期与动作（worker 自动化）。
+// Strategy lifecycle and actions (worker automation).
 service StrategyService {
   rpc ListStrategies(ListStrategiesRequest) returns (ListStrategiesResponse);
   rpc StartStrategy(StartStrategyRequest) returns (StrategyStatus);
@@ -15,6 +15,9 @@ service StrategyService {
   rpc GetStrategyStatus(GetStrategyStatusRequest) returns (StrategyStatus);
   rpc SubmitAction(SubmitActionRequest) returns (ActionReceipt);
   rpc StreamStrategyEvents(StreamStrategyEventsRequest) returns (stream StrategyEvent);
+  // Strategy descriptor catalog: returns configurable strategy templates (builtin/open-source/custom), UI renders accordingly
+  // parameter form (schema-driven), terminal does not need hardcoded UI per strategy.
+  rpc ListStrategyDescriptors(ListStrategyDescriptorsRequest) returns (ListStrategyDescriptorsResponse);
 }
 
 message StrategyStatus {
@@ -33,7 +36,7 @@ message ListStrategiesResponse {
 message StartStrategyRequest {
   string strategy_id = 1;
   string name = 2;
-  // 策略参数（JSON 字符串，由 worker 与 API 约定 schema）。
+  // Strategy parameters (JSON string, schema agreed between worker and API).
   string params_json = 3;
 }
 
@@ -75,5 +78,53 @@ message ActionReceipt {
 }
 
 message StreamStrategyEventsRequest {
-  repeated string strategy_ids = 1;   // 空 = 全部
+  repeated string strategy_ids = 1;   // empty = all
+}
+
+
+// ========== Strategy descriptor catalog (schema-driven configuration) ==========
+
+// Declaration of a single parameter slot. UI renders input controls based on this: step determines slider granularity and display
+// decimal places, min/max define value range, default is the pre-filled value for new forms.
+message ParamSlot {
+  // Slot name (form label).
+  string label = 1;
+  // Dimension: percent / usd / decimal / duration / timestamp.
+  string dimension = 2;
+  // Lower bound of value range (optional).
+  optional double min = 3;
+  // Upper bound of value range (optional).
+  optional double max = 4;
+  // Input grid step (optional, defaults to dimension default).
+  optional double step = 5;
+  // Pre-filled value for new form (optional).
+  optional double default = 6;
+}
+
+// A configurable strategy template. Builtin strategies (builtin=true) only allow parameter adjustment,
+// structure cannot be modified; custom strategies are created by users.
+message StrategyDescriptor {
+  // Strategy id, e.g. "grid_maker" / "cmdnc_arb" / user-defined id.
+  string id = 1;
+  // Display name.
+  string name = 2;
+  // One-line description (what this strategy does, how to tune parameters).
+  string note = 3;
+  // Whether it is a builtin strategy (builtin cannot be deleted, structure cannot be modified).
+  bool builtin = 4;
+  // Parameter slot declarations (index corresponds to strategy parameter array index).
+  repeated ParamSlot params = 5;
+  // Strategy type: hedge (two-leg combination hedging) / maker (market making) / arb (arbitrage).
+  string kind = 6;
+}
+
+message ListStrategyDescriptorsRequest {
+  // Search by id / name / type (case-insensitive substring), empty string means no filter.
+  string search = 1;
+  // Whether to only return builtin strategies.
+  optional bool builtin_only = 2;
+}
+
+message ListStrategyDescriptorsResponse {
+  repeated StrategyDescriptor strategies = 1;
 }

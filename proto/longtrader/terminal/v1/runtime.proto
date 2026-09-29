@@ -32,7 +32,7 @@ message ListVenuesResponse {
 }
 
 message StreamUpdatesRequest {
-  repeated string venues = 1;          // 空 = 全部
-  repeated string symbols = 2;         // 空 = 全部
-  repeated TopicClass topics = 3;      // 空 = 全部
+  repeated string venues = 1;          // empty = all
+  repeated string symbols = 2;         // empty = all
+  repeated TopicClass topics = 3;      // empty = all
 }

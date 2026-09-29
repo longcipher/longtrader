@@ -157,7 +157,7 @@ message NotificationRecord {
   string title = 3;
   string body = 4;
   string channel = 5;
-  // SENT / FAILED。
+  // SENT / FAILED.
   string status = 6;
 }
 message ListNotificationsRequest {
@@ -196,7 +196,7 @@ message Episode {
   repeated EpisodeFill long_fills = 9;
   // Empty leg per-trade execution.
   repeated EpisodeFill short_fills = 10;
-  // OPEN / CLOSED。
+  // OPEN / CLOSED.
   string status = 11;
 }
 message ListEpisodesRequest {

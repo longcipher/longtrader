@@ -106,7 +106,9 @@ message MarketDataEvent {
   string resume_token = 6;
 }
 
-// OHLCV candle with millisecond Unix timestamp.
+// OHLCV candle. `timestamp_ms` is Unix milliseconds — the event-time convention
+// for candles (snapshot messages such as Ticker/Order use google.protobuf.Timestamp;
+// see docs/contract-style-guide.md §Timestamps).
 message Candle {
   int64 timestamp_ms = 1;
   common.v1.Decimal open = 2;
@@ -130,11 +132,12 @@ message FetchTickerResponse {
 message FetchOrderBookRequest {
   common.v1.ExchangeId exchange_id = 1;
   string symbol = 2;
-  uint32 limit = 3;
+  common.v1.Pagination pagination = 3;
 }
 
 message FetchOrderBookResponse {
   OrderBook orderbook = 1;
+  common.v1.Page page = 2;
 }
 
 message GetCandlesRequest {
@@ -143,11 +146,12 @@ message GetCandlesRequest {
   // Timeframe string, e.g. "100s", "1s", "1m", "5m", "15m", "30m",
   // "1h", "4h", "1d", "1w".
   string timeframe = 3;
-  uint32 limit = 4;
+  common.v1.Pagination pagination = 4;
 }
 
 message GetCandlesResponse {
   repeated Candle candles = 1;
+  common.v1.Page page = 2;
 }
 
 // Instrument metadata for one tradable symbol.

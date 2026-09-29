@@ -78,7 +78,7 @@ message ActionReceipt {
 }
 
 message StreamStrategyEventsRequest {
-  repeated string strategy_ids = 1;   // 空 = 全部
+  repeated string strategy_ids = 1;   // empty = all
 }
 
 

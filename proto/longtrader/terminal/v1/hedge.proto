@@ -58,7 +58,7 @@ message ArbitrageSnapshot {
   double close_line = 6;
   // Current total two-leg notional (quote amount).
   double current_notional = 7;
-  // 策略Target notional (quote amount).
+  // Strategy target notional (quote amount).
   double target_notional = 8;
   // Net P&L (spread P&L + funding rate net income - fees, quote).
   double net_pnl = 9;

@@ -171,11 +171,13 @@ message Order {
   bool reduce_only = 19;
   map<string, string> info = 20;
   // ---- Terminal extensions (additive) ----
-  optional common.v1.Decimal take_profit = 24;
-  optional common.v1.Decimal stop_loss = 25;
-  // Creation / last update, Unix milliseconds.
+  // 21 was briefly used and removed; never reuse.
+  reserved 21;
+  // Creation / last update.
   google.protobuf.Timestamp created_at = 22;
   google.protobuf.Timestamp updated_at = 23;
+  optional common.v1.Decimal take_profit = 24;
+  optional common.v1.Decimal stop_loss = 25;
 }
 
 message Account {
@@ -209,10 +211,18 @@ message Position {
   common.v1.Decimal entry_price = 6;
   common.v1.Decimal mark_price = 7;
   common.v1.Decimal unrealized_pnl = 8;
-  string order_id = 9;
+  // Absent when the venue does not report the originating order.
+  optional string order_id = 9;
   common.v1.Decimal current_price = 10;
   google.protobuf.Timestamp timestamp = 11;
-  // Position open time, Unix milliseconds.
+  // Bracket orders attached to the position. `ModifyPosition` leaves a
+  // bracket unchanged when the request field is absent; an unset bracket
+  // simply means "not set".
+  optional common.v1.Decimal take_profit = 12;
+  optional common.v1.Decimal stop_loss = 13;
+  // 14-16 were briefly used and removed; never reuse.
+  reserved 14, 15, 16;
+  // Position open time.
   google.protobuf.Timestamp opened_at = 17;
 }
 

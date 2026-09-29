@@ -22,6 +22,7 @@ lint:
   RUSTC_WRAPPER= cargo +nightly clippy --all -- -D warnings
   cargo shear
   cargo workspace-inheritance-check
+  scripts/sync-contract-proto.sh --check
 
 # Run tests
 test:
@@ -110,6 +111,11 @@ docs:
 # ---------------------------------------------------------------------------
 # Proto contract & SDK toolchain (buf-managed; see proto/buf.yaml)
 # ---------------------------------------------------------------------------
+
+# Copy the canonical proto/ tree into the longtrader-contract vendored
+# fallback (published crates compile from that copy).
+proto-sync:
+  scripts/sync-contract-proto.sh
 
 # Lint the language-neutral contract tree under proto/
 proto-lint:

@@ -32,6 +32,16 @@ note_ok() {
 }
 
 # ---------------------------------------------------------------------------
+# Step 0: keep the longtrader-contract vendored proto copy in sync with the
+# canonical proto/ tree (published crates fall back to the vendored copy).
+# ---------------------------------------------------------------------------
+if "${SCRIPT_DIR}/sync-contract-proto.sh"; then
+  note_ok "contract proto sync -> crates/longtrader-contract/proto"
+else
+  note_skip "contract proto sync (sync-contract-proto.sh failed)"
+fi
+
+# ---------------------------------------------------------------------------
 # Step TS: TypeScript stubs via repo-local protoc-gen-es (no remote plugin)
 # ---------------------------------------------------------------------------
 TS_DIR="${ROOT}/sdks/typescript"
