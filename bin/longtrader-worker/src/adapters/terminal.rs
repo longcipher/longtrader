@@ -248,7 +248,9 @@ fn position_to_unified(p: &tproto::Position) -> Result<trading::Position, PortEr
         entry_price: MessageField::some(dec_to_common(entry)),
         mark_price: MessageField::some(dec_to_common(mark)),
         unrealized_pnl: MessageField::some(dec_to_common(pnl)),
-        order_id: p.order_id.clone(),
+        // `trading.v1.Position.order_id` is optional: an empty terminal string
+        // means the venue did not report an originating order.
+        order_id: (!p.order_id.is_empty()).then(|| p.order_id.clone()),
         current_price: MessageField::some(dec_to_common(mark)),
         timestamp: MessageField::some(now_ts()),
         ..Default::default()
