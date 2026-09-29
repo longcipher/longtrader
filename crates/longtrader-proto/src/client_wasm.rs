@@ -1,9 +1,9 @@
-//! Native (non-WASM) Connect-RPC client backed by `hpx`.
+//! WASM-compatible Connect-RPC client backed by `gloo-net` (browser).
 //!
-//! Implements the `longtrader.terminal.v1` services over the Connect
-//! protocol's binary (`application/connect+proto`) encoding. Streaming
-//! (`RuntimeService::StreamUpdates`) is exposed as an NDJSON-free
-//! length-prefixed message stream.
+//! Mirrors the native [`client`](crate::client) API surface so browser
+//! frontends talk the same `longtrader.terminal.v1` protocol with identical
+//! method names. Streaming (`RuntimeService::StreamUpdates`) uses `web-sys`
+//! fetch + `ReadableStream` so chunked Connect framing works in the browser.
 
 #![allow(clippy::pedantic)]
 
@@ -18,11 +18,18 @@ use crate::{
         SERVICE_MARKET, SERVICE_RUNTIME, SERVICE_STRATEGY, SERVICE_TRADING, service_url,
         trim_base_url,
     },
-    proto::longtrader::terminal::v1 as proto,
-    transport::TransportError,
+    proto::longtrader::{common::v1 as common, terminal::v1 as proto},
 };
 
+/// Build a `common.v1.Pagination` from a simple `limit`.
+fn pagination(limit: u32) -> common::Pagination {
+    common::Pagination { limit: u64::from(limit), ..Default::default() }
+}
+
 /// Client errors.
+///
+/// The `Rpc` code is `u32` on every transport so call sites can match on one
+/// type regardless of native vs WASM.
 #[derive(Debug, Error)]
 pub enum TerminalClientError {
     #[error("HTTP transport error: {0}")]
@@ -35,55 +42,28 @@ pub enum TerminalClientError {
     MissingField(String),
 }
 
-/// Connect-RPC client for the trading terminal services.
-#[derive(Clone)]
+/// Connect-RPC client for the trading terminal services (browser/WASM).
+#[derive(Clone, Debug)]
 pub struct TerminalClient {
     base_url: String,
-    auth_token: Option<String>,
-    http: hpx::Client,
-}
-
-impl std::fmt::Debug for TerminalClient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TerminalClient").field("base_url", &self.base_url).finish_non_exhaustive()
-    }
 }
 
 impl TerminalClient {
-    /// Create a new client targeting `base_url` (e.g. `http://127.0.0.1:8810`).
+    /// Create a new client targeting `base_url`.
     #[must_use]
     pub fn new(base_url: &str) -> Self {
-        Self::new_inner(base_url, None)
+        Self { base_url: trim_base_url(base_url) }
     }
 
-    /// Create a client with a static bearer token.
+    /// Create a client with a static bearer token (ignored pre-CORS; the
+    /// server enforces auth via the same-origin session token when proxied).
     #[must_use]
-    pub fn new_with_token(base_url: &str, token: &str) -> Self {
-        Self::new_inner(base_url, Some(token.to_string()))
-    }
-
-    fn new_inner(base_url: &str, auth_token: Option<String>) -> Self {
-        let base_url = trim_base_url(base_url);
-        let http = match hpx::Client::builder().http1_only().build() {
-            Ok(client) => client,
-            Err(e) => {
-                tracing::warn!("failed to build hpx client, using default: {e}");
-                hpx::Client::new()
-            }
-        };
-        Self { base_url, auth_token, http }
+    pub fn new_with_token(base_url: &str, _token: &str) -> Self {
+        Self::new(base_url)
     }
 
     fn url(&self, service: &str, method: &str) -> String {
         service_url(&self.base_url, service, method)
-    }
-
-    fn request(&self, url: &str, body: Vec<u8>, content_type: &str) -> hpx::RequestBuilder {
-        let mut builder = self.http.post(url).header("content-type", content_type).body(body);
-        if let Some(token) = self.auth_token.as_deref().filter(|t| !t.is_empty()) {
-            builder = builder.header("authorization", format!("Bearer {token}"));
-        }
-        builder
     }
 
     async fn unary<Q: Message, R: Message + Default>(
@@ -92,20 +72,30 @@ impl TerminalClient {
         method: &str,
         req: Q,
     ) -> Result<R, TerminalClientError> {
-        crate::transport::unary(
-            &self.http,
-            &self.base_url,
-            service,
-            method,
-            self.auth_token.as_deref(),
-            req,
-        )
-        .await
-        .map_err(|e| match e {
-            TransportError::Http(m) => TerminalClientError::Http(m),
-            TransportError::Rpc { code, message } => TerminalClientError::Rpc { code, message },
-            TransportError::Decode(m) => TerminalClientError::Decode(m),
-        })
+        let body = req.encode_to_vec();
+        let resp = gloo_net::http::Request::post(&self.url(service, method))
+            .header("content-type", "application/proto")
+            .body(body)
+            .map_err(|e| TerminalClientError::Http(e.to_string()))?
+            .send()
+            .await
+            .map_err(|e| TerminalClientError::Http(e.to_string()))?;
+
+        let status = u32::from(resp.status());
+        if !(200..300).contains(&status) {
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| TerminalClientError::Http(format!("read error: {e}")))?;
+            return Err(TerminalClientError::Rpc { code: status, message: text });
+        }
+
+        let bytes = resp
+            .binary()
+            .await
+            .map_err(|e| TerminalClientError::Http(format!("read error: {e}")))?;
+        R::decode_from_slice(&bytes)
+            .map_err(|e| TerminalClientError::Decode(format!("decode {method}: {e}")))
     }
 
     // ---- MarketDataService ----
@@ -147,11 +137,7 @@ impl TerminalClient {
             timeframe: buffa::EnumValue::Known(timeframe),
             start_ms,
             end_ms,
-            pagination: crate::proto::longtrader::common::v1::Pagination {
-                limit: u64::from(limit),
-                ..Default::default()
-            }
-            .into(),
+            pagination: buffa::MessageField::some(pagination(limit)),
             ..Default::default()
         };
         let resp: proto::GetCandlesResponse = self.unary(SERVICE_MARKET, "GetCandles", req).await?;
@@ -203,11 +189,7 @@ impl TerminalClient {
         let req = proto::SearchSymbolsRequest {
             venue: venue.to_string(),
             query: query.to_string(),
-            pagination: crate::proto::longtrader::common::v1::Pagination {
-                limit: u64::from(limit),
-                ..Default::default()
-            }
-            .into(),
+            pagination: buffa::MessageField::some(pagination(limit)),
             ..Default::default()
         };
         let resp: proto::SearchSymbolsResponse =
@@ -263,11 +245,7 @@ impl TerminalClient {
     ) -> Result<Vec<proto::Order>, TerminalClientError> {
         let req = proto::GetOrderHistoryRequest {
             venue: venue.to_string(),
-            pagination: crate::proto::longtrader::common::v1::Pagination {
-                limit: u64::from(limit),
-                ..Default::default()
-            }
-            .into(),
+            pagination: buffa::MessageField::some(pagination(limit)),
             ..Default::default()
         };
         let resp: proto::GetOrderHistoryResponse =
@@ -283,11 +261,7 @@ impl TerminalClient {
     ) -> Result<Vec<proto::ClosedPosition>, TerminalClientError> {
         let req = proto::GetClosedPositionsRequest {
             venue: venue.to_string(),
-            pagination: crate::proto::longtrader::common::v1::Pagination {
-                limit: u64::from(limit),
-                ..Default::default()
-            }
-            .into(),
+            pagination: buffa::MessageField::some(pagination(limit)),
             ..Default::default()
         };
         let resp: proto::GetClosedPositionsResponse =
@@ -296,6 +270,7 @@ impl TerminalClient {
     }
 
     /// Place an order.
+    #[expect(clippy::too_many_arguments)]
     pub async fn place_order(
         &self,
         venue: &str,
@@ -393,6 +368,8 @@ impl TerminalClient {
     }
 
     /// Modify the take-profit / stop-loss of an open position.
+    ///
+    /// `None` leaves the corresponding bracket unchanged.
     pub async fn modify_position(
         &self,
         venue: &str,
@@ -505,11 +482,10 @@ impl TerminalClient {
     /// Health check.
     pub async fn health(&self) -> Result<proto::HealthResponse, TerminalClientError> {
         let req = proto::HealthRequest::default();
-        let resp: proto::HealthResponse = self.unary(SERVICE_RUNTIME, "Health", req).await?;
-        Ok(resp)
+        self.unary(SERVICE_RUNTIME, "Health", req).await
     }
 
-    /// List venues.
+    /// List connected venues.
     pub async fn list_venues(&self) -> Result<Vec<proto::VenueStatus>, TerminalClientError> {
         let req = proto::ListVenuesRequest::default();
         let resp: proto::ListVenuesResponse =
@@ -519,52 +495,77 @@ impl TerminalClient {
 
     /// Open the streaming updates channel.
     ///
-    /// Returns a stream of `UpdateEnvelope` messages. The response body is
-    /// read incrementally with the Connect streaming encoding (no NDJSON).
+    /// Returns a stream of `UpdateEnvelope` messages decoded from the Connect
+    /// streaming framing (1-byte flag + 4-byte BE length + protobuf payload).
     pub async fn stream_updates(
         &self,
         venues: &[String],
         symbols: &[String],
         topics: &[proto::TopicClass],
     ) -> Result<
-        Pin<Box<dyn Stream<Item = Result<proto::UpdateEnvelope, TerminalClientError>> + Send>>,
+        Pin<Box<dyn Stream<Item = Result<proto::UpdateEnvelope, TerminalClientError>>>>,
         TerminalClientError,
     > {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen_futures::JsFuture;
+
         let url = self.url(SERVICE_RUNTIME, "StreamUpdates");
-        let req = proto::StreamUpdatesRequest {
+        let req_msg = proto::StreamUpdatesRequest {
             venues: venues.to_vec(),
             symbols: symbols.to_vec(),
             topics: topics.iter().map(|t| buffa::EnumValue::Known(*t)).collect(),
             ..Default::default()
         };
-        let payload = req.encode_to_vec();
-        // Connect streaming framing for the request: 1 flag byte (0 =
-        // uncompressed) + 4-byte big-endian length + protobuf payload.
+        let payload = req_msg.encode_to_vec();
         let mut body = Vec::with_capacity(5 + payload.len());
         body.push(0);
         body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         body.extend_from_slice(&payload);
 
-        let resp = self
-            .request(&url, body, crate::transport::CONNECT_PROTO_STREAM)
-            .send()
-            .await
-            .map_err(|e| TerminalClientError::Http(e.to_string()))?;
+        let opts = web_sys::RequestInit::new();
+        opts.set_method("POST");
+        let uint8 = js_sys::Uint8Array::from(body.as_slice());
+        opts.set_body(&uint8);
 
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp
-                .text()
+        let headers =
+            web_sys::Headers::new().map_err(|e| TerminalClientError::Http(format!("{e:?}")))?;
+        headers
+            .set("content-type", "application/connect+proto")
+            .map_err(|e| TerminalClientError::Http(format!("{e:?}")))?;
+        opts.set_headers(&headers);
+
+        let request = web_sys::Request::new_with_str_and_init(&url, &opts)
+            .map_err(|e| TerminalClientError::Http(format!("{e:?}")))?;
+
+        let window =
+            web_sys::window().ok_or_else(|| TerminalClientError::Http("no window".into()))?;
+        let resp_val = JsFuture::from(window.fetch_with_request(&request))
+            .await
+            .map_err(|e| TerminalClientError::Http(format!("{e:?}")))?;
+        let resp: web_sys::Response =
+            resp_val.dyn_into().map_err(|e| TerminalClientError::Http(format!("{e:?}")))?;
+
+        if !resp.ok() {
+            let status = u32::from(resp.status());
+            let text_promise =
+                resp.text().map_err(|e| TerminalClientError::Http(format!("{e:?}")))?;
+            let text = JsFuture::from(text_promise)
                 .await
-                .map_err(|e| TerminalClientError::Http(format!("read error: {e}")))?;
-            return Err(TerminalClientError::Rpc { code: status.as_u16().into(), message: text });
+                .map_err(|e| TerminalClientError::Http(format!("{e:?}")))?;
+            let msg = text.as_string().unwrap_or_default();
+            return Err(TerminalClientError::Rpc { code: status, message: msg });
         }
 
-        // Connect streaming framing: per-message prefix of 1 byte flags +
-        // 4-byte big-endian length, followed by the raw protobuf payload.
+        let body_stream =
+            resp.body().ok_or_else(|| TerminalClientError::Http("no response body".into()))?;
+        let reader: web_sys::ReadableStreamDefaultReader = body_stream
+            .get_reader()
+            .dyn_into()
+            .map_err(|e| TerminalClientError::Http(format!("failed to get reader: {e:?}")))?;
+
         let stream = futures_util::stream::unfold(
-            (resp, Vec::<u8>::new()),
-            |(mut resp, mut buf)| async move {
+            (reader, Vec::<u8>::new()),
+            |(reader, mut buf)| async move {
                 loop {
                     if buf.len() >= 5 {
                         let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
@@ -573,26 +574,52 @@ impl TerminalClient {
                             let payload: Vec<u8> = buf[5..total].to_vec();
                             buf.drain(..total);
                             match proto::UpdateEnvelope::decode_from_slice(&payload) {
-                                Ok(env) => return Some((Ok(env), (resp, buf))),
+                                Ok(env) => return Some((Ok(env), (reader, buf))),
                                 Err(e) => {
                                     return Some((
                                         Err(TerminalClientError::Decode(e.to_string())),
-                                        (resp, buf),
+                                        (reader, buf),
                                     ));
                                 }
                             }
                         }
                     }
-                    match resp.chunk().await {
-                        Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
-                        Ok(None) => return None,
+                    let result = match JsFuture::from(reader.read()).await {
+                        Ok(v) => v,
                         Err(e) => {
                             return Some((
-                                Err(TerminalClientError::Http(format!("stream read: {e}"))),
-                                (resp, buf),
+                                Err(TerminalClientError::Http(format!("{e:?}"))),
+                                (reader, buf),
                             ));
                         }
+                    };
+                    let done =
+                        js_sys::Reflect::get(&result, &wasm_bindgen::JsValue::from_str("done"))
+                            .ok()
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                    if done {
+                        return None;
                     }
+                    let value = match js_sys::Reflect::get(
+                        &result,
+                        &wasm_bindgen::JsValue::from_str("value"),
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Some((
+                                Err(TerminalClientError::Http(format!("{e:?}"))),
+                                (reader, buf),
+                            ));
+                        }
+                    };
+                    if value.is_undefined() || value.is_null() {
+                        return None;
+                    }
+                    let uint8 = js_sys::Uint8Array::new(&value);
+                    let mut chunk = vec![0u8; uint8.length() as usize];
+                    uint8.copy_to(&mut chunk);
+                    buf.extend_from_slice(&chunk);
                 }
             },
         );

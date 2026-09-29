@@ -16,15 +16,25 @@
 /// Single source of truth for every generated protobuf type.
 pub use longtrader_contract::proto;
 
-#[cfg(feature = "client-native")]
+#[cfg(any(feature = "client-native", feature = "client-wasm"))]
 mod client_core;
 
 /// Native (hpx) client for the terminal services.
 #[cfg(feature = "client-native")]
 pub mod client;
 
-#[cfg(feature = "client-native")]
+/// WASM-compatible client (gloo-net / web-sys) for the terminal services.
+#[cfg(feature = "client-wasm")]
+pub mod client_wasm;
+
+// Re-export the active client types. When only one of `client-native` /
+// `client-wasm` is enabled, this is a simple re-export. When both are enabled,
+// the caller must disambiguate via `longtrader_proto::client::TerminalClient`
+// or `longtrader_proto::client_wasm::TerminalClient`.
+#[cfg(all(feature = "client-native", not(feature = "client-wasm")))]
 pub use client::{TerminalClient, TerminalClientError};
+#[cfg(all(feature = "client-wasm", not(feature = "client-native")))]
+pub use client_wasm::{TerminalClient, TerminalClientError};
 
 /// Shared Connect-RPC unary transport, reused by every client in the workspace
 /// (the worker's `RemoteAdapter` and this crate's `TerminalClient`) so the

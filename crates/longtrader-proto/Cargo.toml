@@ -18,17 +18,40 @@ ignored = ["serde", "serde_json"]
 
 [features]
 default = []
+# Native (non-WASM) HTTP/1.1 client backed by hpx.
 client-native = ["dep:hpx", "dep:futures-util"]
+# WASM-compatible client backed by gloo-net / web-sys (browser).
+client-wasm = [
+    "dep:futures-util",
+    "dep:gloo-net",
+    "dep:js-sys",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+]
 
 [dependencies]
 buffa = { workspace = true, features = ["json"] }
 futures-util = { workspace = true, optional = true }
+gloo-net = { workspace = true, optional = true, features = ["http"] }
 hpx = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
 longtrader-contract = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = [
+    "Headers",
+    "Request",
+    "RequestInit",
+    "Response",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "Window",
+] }
 
 [lints]
 workspace = true
