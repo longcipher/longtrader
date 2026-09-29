@@ -6,7 +6,6 @@ license.workspace = true
 repository.workspace = true
 
 authors.workspace = true
-homepage = "https://docs.rs/longtrader-cli"
 readme = "../../README.md"
 description = "Connect-RPC CLI client for longtrader-api (longtrader.terminal.v1)"
 documentation = "https://docs.rs/longtrader-cli"

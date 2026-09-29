@@ -6,7 +6,6 @@ license.workspace = true
 repository.workspace = true
 
 authors.workspace = true
-homepage = "https://docs.rs/longtrader-proto"
 readme = "../../README.md"
 description = "Connect-RPC protocol definitions and client for longtrader.terminal.v1"
 documentation = "https://docs.rs/longtrader-proto"

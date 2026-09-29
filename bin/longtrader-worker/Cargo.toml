@@ -6,7 +6,6 @@ license.workspace = true
 repository.workspace = true
 
 authors.workspace = true
-homepage = "https://docs.rs/longtrader-worker"
 readme = "../../README.md"
 description = "Local strategy host running portable strategies against pluggable backends (exchange daemon / terminal API / mock)"
 documentation = "https://docs.rs/longtrader-worker"
