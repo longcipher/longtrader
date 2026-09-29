@@ -20,9 +20,10 @@ just build    # cargo build --workspace
 just sdk-generate      # regenerates Python + TypeScript stubs via scripts/gen-proto.sh
 ```
 
-> The Go SDK (`sdks/go`) is a **generated-stub scaffold** — `scripts/gen-proto.sh`
-> currently generates Python + TypeScript only; its `gen/` is produced by `buf`
-> directly. Its `Session` API is not yet implemented.
+> The Go SDK (`sdks/go`) needs **no** generation step: `contract/` is a
+> hand-written, stdlib-only protobuf codec for the same wire format, so
+> `go build` and `go test` work in a fresh checkout. `buf generate` can still
+> populate the optional, gitignored `sdks/go/gen/`, which nothing imports.
 
 ## 3. Configure `config.toml`
 
@@ -91,5 +92,17 @@ console.log(s.sessionId, s.state, snap.snapshotSequence);
 s.stop();
 ```
 
+```go
+// Go (github.com/longcipher/longtrader/sdks/go)
+s, err := session.Attach(ctx, "http://127.0.0.1:8080", "YOUR_TERMINAL_TOKEN", nil, "")
+if err != nil { log.Fatal(err) }
+defer s.Close()
+s.StartHeartbeat(ctx)
+snap, err := s.ReconcileState(ctx)
+if err != nil { log.Fatal(err) }
+fmt.Println(s.SessionID(), s.State(), snap.SnapshotSequence)
+s.Stop()
+```
+
 Attach → heartbeat → reconcile → gate to `ACTIVE`. This is the contract every
-language implements identically. The Go SDK does not yet expose these methods.
+language implements identically.

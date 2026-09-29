@@ -65,8 +65,16 @@ impl DepositTransfer {
             if entry.amount < self.config.ignore_below {
                 continue;
             }
+            // Key the transfer on the deposit id: a sweep that fails midway
+            // and is retried must not send the same deposit twice.
             self.wallet
-                .transfer(&exchange, &entry.currency, entry.amount, &self.config.dest_label)
+                .transfer(
+                    &exchange,
+                    &entry.currency,
+                    entry.amount,
+                    &self.config.dest_label,
+                    &format!("deposit-sweep:{}", entry.id),
+                )
                 .await?;
             tracing::info!(
                 currency = %entry.currency,

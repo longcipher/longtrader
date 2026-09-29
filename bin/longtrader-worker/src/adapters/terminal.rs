@@ -37,7 +37,7 @@ use rust_decimal::Decimal;
 
 use crate::{
     ports::{MarketDataSource, MarketEventStream, OverflowPolicy, PortError, TradingGateway},
-    proto::{account, common, market, trading, worker},
+    proto::{account, common, market, ops, trading, worker},
 };
 
 fn map_client_err(e: TerminalClientError) -> PortError {
@@ -394,6 +394,27 @@ impl TradingGateway for TerminalAdapter {
             }
             None => None,
         };
+        // The unified contract's `trigger_price` maps onto the terminal
+        // surface's `stop_price`; it is mapped here rather than dropped.
+        let stop_price = match inner.trigger_price.as_option() {
+            Some(p) => {
+                let v = longtrader_contract::ext::common_to_decimal(p)?;
+                Some(v.to_string())
+            }
+            None => None,
+        };
+        // A conditional order with no trigger can never fire, so reject it
+        // rather than sending the venue an ordinary order that would execute
+        // at market — the worst possible failure mode for a STOP.
+        if matches!(otype, tproto::OrderType::Stop | tproto::OrderType::StopLimit) &&
+            stop_price.is_none()
+        {
+            return Err(PortError::InvalidArgument(
+                "conditional order requires trigger_price".to_string(),
+            ));
+        }
+        // `reduce_only` is mapped, not dropped: silently ignoring it turns a
+        // risk-reducing close into an order that can open opposite exposure.
         let order = self
             .client
             .place_order(
@@ -407,9 +428,11 @@ impl TradingGateway for TerminalAdapter {
                 otype,
                 &amount.to_string(),
                 price.as_deref(),
+                stop_price.as_deref(),
                 None,
                 None,
                 &inner.client_order_id,
+                inner.reduce_only,
             )
             .await
             .map_err(map_client_err)?;
@@ -640,19 +663,26 @@ impl TradingGateway for TerminalAdapter {
     }
 }
 
-fn timeframe_to_terminal(tf: &str) -> tproto::Timeframe {
-    match tf {
-        "S100" => tproto::Timeframe::S100,
-        "S1" => tproto::Timeframe::S1,
-        "M1" => tproto::Timeframe::M1,
-        "M5" => tproto::Timeframe::M5,
-        "M15" => tproto::Timeframe::M15,
-        "M30" => tproto::Timeframe::M30,
-        "H1" => tproto::Timeframe::H1,
-        "H4" => tproto::Timeframe::H4,
-        "D1" => tproto::Timeframe::D1,
-        "W1" => tproto::Timeframe::W1,
-        _ => tproto::Timeframe::M1,
+/// Map the contract's timeframe string onto the terminal enum.
+///
+/// An unknown timeframe is an error, not a silent `M1`: a strategy asking for
+/// `H4` and receiving 1-minute candles gets a signal that looks plausible and
+/// is wrong, which is far worse than a rejected request.
+fn timeframe_to_terminal(tf: &str) -> Result<tproto::Timeframe, PortError> {
+    match tf.trim().to_ascii_uppercase().as_str() {
+        "" | "M1" => Ok(tproto::Timeframe::M1),
+        "S100" => Ok(tproto::Timeframe::S100),
+        "S1" => Ok(tproto::Timeframe::S1),
+        "M5" => Ok(tproto::Timeframe::M5),
+        "M15" => Ok(tproto::Timeframe::M15),
+        "M30" => Ok(tproto::Timeframe::M30),
+        "H1" => Ok(tproto::Timeframe::H1),
+        "H4" => Ok(tproto::Timeframe::H4),
+        "D1" => Ok(tproto::Timeframe::D1),
+        "W1" => Ok(tproto::Timeframe::W1),
+        other => Err(PortError::InvalidArgument(format!(
+            "unsupported timeframe {other:?} (supported: S1/S100/M1/M5/M15/M30/H1/H4/D1/W1)"
+        ))),
     }
 }
 
@@ -706,39 +736,26 @@ impl MarketDataSource for TerminalAdapter {
         let limit = req.pagination.as_option().map_or(200, |p| p.limit.min(1000) as u32);
         let candles = self
             .client
-            .get_candles(&venue, &req.symbol, timeframe_to_terminal(&req.timeframe), limit)
+            .get_candles(&venue, &req.symbol, timeframe_to_terminal(&req.timeframe)?, limit)
             .await
             .map_err(map_client_err)?;
-        Ok(market::GetCandlesResponse {
-            candles: candles
-                .iter()
-                .map(|c| market::Candle {
-                    timestamp_ms: c.timestamp_ms,
-                    open: MessageField::some(
-                        str_to_common(&c.open, "open")
-                            .unwrap_or_else(|_| dec_to_common(Decimal::ZERO)),
-                    ),
-                    high: MessageField::some(
-                        str_to_common(&c.high, "high")
-                            .unwrap_or_else(|_| dec_to_common(Decimal::ZERO)),
-                    ),
-                    low: MessageField::some(
-                        str_to_common(&c.low, "low")
-                            .unwrap_or_else(|_| dec_to_common(Decimal::ZERO)),
-                    ),
-                    close: MessageField::some(
-                        str_to_common(&c.close, "close")
-                            .unwrap_or_else(|_| dec_to_common(Decimal::ZERO)),
-                    ),
-                    volume: MessageField::some(
-                        str_to_common(&c.volume, "volume")
-                            .unwrap_or_else(|_| dec_to_common(Decimal::ZERO)),
-                    ),
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        })
+        // A malformed OHLCV field is propagated as an error instead of being
+        // coerced to zero. A zero price is a plausible-looking candle that
+        // corrupts every downstream indicator, whereas a failed request is
+        // something a strategy can retry or degrade from.
+        let mut out = Vec::with_capacity(candles.len());
+        for c in &candles {
+            out.push(market::Candle {
+                timestamp_ms: c.timestamp_ms,
+                open: MessageField::some(str_to_common(&c.open, "open")?),
+                high: MessageField::some(str_to_common(&c.high, "high")?),
+                low: MessageField::some(str_to_common(&c.low, "low")?),
+                close: MessageField::some(str_to_common(&c.close, "close")?),
+                volume: MessageField::some(str_to_common(&c.volume, "volume")?),
+                ..Default::default()
+            });
+        }
+        Ok(market::GetCandlesResponse { candles: out, ..Default::default() })
     }
 
     async fn list_symbols(
@@ -822,34 +839,271 @@ impl TerminalAdapter {
     }
 }
 
-// Extended caps: terminal backends don't expose these; explicit Unsupported.
+// Extended capabilities: funding, venue-side conditional orders, venue ops and
+// wallet. These map onto the `terminal.v1` funding / trigger / ledger / transfer
+// RPCs, so a terminal backend supports exactly the same strategies as the
+// paper venue. Every conversion is explicit: a decimal that fails to parse is
+// an error, and an `optional` field the venue left unset stays `None` rather
+// than becoming a zero that a strategy would read as a real measurement.
 use crate::ports::{
-    FundingRatePoint, FundingRateSnapshot, FundingRateSource, LedgerEntry, TriggerOrderGateway,
-    TriggerOrderRequest, VenueOpInvoker, WalletGateway,
+    FundingRatePoint, FundingRateSnapshot, FundingRateSource, LedgerEntry, TransferReceipt,
+    TriggerOrder, TriggerOrderGateway, TriggerOrderRequest, TriggerOrderStatus, VenueOpDescriptor,
+    VenueOpInvoker, VenueOpParam, VenueOpParamType, WalletGateway,
 };
 
-fn unsupported(capability: &str) -> PortError {
-    PortError::Unsupported(format!(
-        "terminal backend does not expose '{capability}' yet; use mock or venue daemon"
-    ))
+/// The server bounds `limit` itself; this is the value a client asks for when
+/// it has no opinion, matching the historical default.
+const DEFAULT_LIMIT: u32 = 100;
+
+/// Parse an optional string decimal, treating an empty string as absent.
+///
+/// The terminal surface carries decimals as strings, so "not reported" and
+/// "reported as empty" are the same thing on the wire.
+fn opt_dec_str(s: &str, field: &str) -> Result<Option<Decimal>, PortError> {
+    if s.is_empty() {
+        Ok(None)
+    } else {
+        s.parse::<Decimal>()
+            .map(Some)
+            .map_err(|_| PortError::InvalidArgument(format!("bad decimal {field}={s:?}")))
+    }
+}
+
+/// Map a terminal `FundingRate` message onto the port snapshot.
+fn funding_rate_to_port(rate: &tproto::FundingRate) -> Result<FundingRateSnapshot, PortError> {
+    Ok(FundingRateSnapshot {
+        symbol: rate.symbol.clone(),
+        rate: parse_dec(&rate.rate, "funding_rate.rate")?,
+        next_funding_time_ms: rate.next_funding_ts_ms,
+        mark_price: opt_dec_str(&rate.mark_price, "funding_rate.mark_price")?,
+    })
+}
+
+/// Map an `account.v1.LedgerEntry` onto the port record.
+///
+/// `direction` is deliberately dropped: the port's `amount` is signed, so a
+/// "withdrawal" must arrive negative. Trusting a venue's unsigned amount
+/// instead would let a withdrawal look like a deposit.
+fn ledger_entry_to_port(entry: &account::LedgerEntry) -> Result<LedgerEntry, PortError> {
+    let amount = entry
+        .amount
+        .as_option()
+        .ok_or_else(|| PortError::MissingField("ledger_entry.amount".to_string()))?;
+    let magnitude = longtrader_contract::ext::common_to_decimal(amount)?;
+    let out_of = entry.direction.eq_ignore_ascii_case("out");
+    Ok(LedgerEntry {
+        id: entry.id.clone(),
+        currency: entry.currency.clone(),
+        amount: if out_of { -magnitude } else { magnitude },
+        entry_type: entry.r#type.clone(),
+        completed: entry.status.eq_ignore_ascii_case("completed"),
+        time_ms: entry
+            .timestamp
+            .as_option()
+            .map_or(0, |ts| ts.seconds * 1000 + i64::from(ts.nanos / 1_000_000)),
+    })
+}
+
+/// Map an `ops.v1.OpDescriptor` onto the port descriptor.
+///
+/// `mutating` is preserved rather than defaulted: a client reads it to decide
+/// whether a call needs a confirmation prompt, so reporting a fund-moving
+/// operation as read-only would be a real safety regression.
+fn op_descriptor_to_port(d: &ops::OpDescriptor) -> Result<VenueOpDescriptor, PortError> {
+    Ok(VenueOpDescriptor {
+        name: d.name.clone(),
+        category: d.category.clone(),
+        summary: d.summary.clone(),
+        mutating: d.mutating,
+        params: d
+            .params
+            .iter()
+            .map(|p| VenueOpParam {
+                name: p.name.clone(),
+                r#type: param_type_from_wire(p.r#type),
+                required: p.required,
+                doc: p.doc.clone(),
+                enum_values: p.enum_values.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Map an `ops.v1.ParamType` onto the port enum; unknown degrades to
+/// `Unspecified` rather than being guessed at.
+fn param_type_from_wire(t: buffa::EnumValue<ops::ParamType>) -> VenueOpParamType {
+    use ops::ParamType as W;
+    match t {
+        buffa::EnumValue::Known(W::String) => VenueOpParamType::String,
+        buffa::EnumValue::Known(W::Int64) => VenueOpParamType::Int64,
+        buffa::EnumValue::Known(W::Decimal) => VenueOpParamType::Decimal,
+        buffa::EnumValue::Known(W::Bool) => VenueOpParamType::Bool,
+        buffa::EnumValue::Known(W::Enum) => VenueOpParamType::Enum,
+        buffa::EnumValue::Known(W::List) => VenueOpParamType::List,
+        buffa::EnumValue::Known(W::Map) => VenueOpParamType::Map,
+        buffa::EnumValue::Known(W::Unspecified) | buffa::EnumValue::Unknown(_) => {
+            VenueOpParamType::Unspecified
+        }
+    }
+}
+
+/// Map a terminal `TriggerOrder` message onto the port record.
+///
+/// An unknown status is an error rather than defaulting to `Open`: reporting a
+/// dead backstop as live is the one failure mode this port cannot tolerate.
+fn trigger_order_to_port(order: &tproto::TriggerOrder) -> Result<TriggerOrder, PortError> {
+    let is_buy = match order.side {
+        buffa::EnumValue::Known(trading::OrderSide::Buy) => true,
+        buffa::EnumValue::Known(trading::OrderSide::Sell) => false,
+        buffa::EnumValue::Known(other) => {
+            return Err(PortError::InvalidArgument(format!(
+                "trigger order {id} has invalid side {other:?}",
+                id = order.id
+            )));
+        }
+        buffa::EnumValue::Unknown(v) => {
+            return Err(PortError::InvalidArgument(format!(
+                "trigger order {id} has unknown side discriminant {v}",
+                id = order.id
+            )));
+        }
+    };
+    let status = match order.status {
+        buffa::EnumValue::Known(trading::TriggerOrderStatus::Open) => TriggerOrderStatus::Open,
+        buffa::EnumValue::Known(trading::TriggerOrderStatus::Triggered) => {
+            TriggerOrderStatus::Triggered
+        }
+        buffa::EnumValue::Known(trading::TriggerOrderStatus::Canceled) => {
+            TriggerOrderStatus::Canceled
+        }
+        buffa::EnumValue::Known(trading::TriggerOrderStatus::Rejected) => {
+            TriggerOrderStatus::Rejected
+        }
+        buffa::EnumValue::Known(other) => {
+            return Err(PortError::InvalidArgument(format!(
+                "trigger order {id} has invalid status {other:?}",
+                id = order.id
+            )));
+        }
+        buffa::EnumValue::Unknown(v) => {
+            return Err(PortError::InvalidArgument(format!(
+                "trigger order {id} has unknown status discriminant {v}",
+                id = order.id
+            )));
+        }
+    };
+    Ok(TriggerOrder {
+        id: order.id.clone(),
+        client_order_id: order.client_order_id.clone(),
+        symbol: order.symbol.clone(),
+        is_buy,
+        trigger_price: parse_dec(&order.trigger_price, "trigger_price")?,
+        qty: parse_dec(&order.qty, "qty")?,
+        reduce_only: order.reduce_only,
+        status,
+        created_at_ms: order
+            .created_at
+            .as_option()
+            .map_or(0, |ts| ts.seconds * 1000 + i64::from(ts.nanos / 1_000_000)),
+        order_id: order.order_id.clone(),
+        triggered_at_ms: order
+            .triggered_at
+            .as_option()
+            .map(|ts| ts.seconds * 1000 + i64::from(ts.nanos / 1_000_000)),
+    })
+}
+
+/// Map the port's trigger request onto a terminal `TriggerOrderRequest`.
+fn trigger_request_to_terminal(
+    req: &TriggerOrderRequest,
+) -> Result<tproto::TriggerOrderRequest, PortError> {
+    if req.symbol.trim().is_empty() {
+        return Err(PortError::InvalidArgument("trigger order requires a symbol".to_string()));
+    }
+    if req.qty.is_sign_negative() || req.qty.is_zero() {
+        let qty = req.qty;
+        return Err(PortError::InvalidArgument(format!(
+            "trigger order qty must be positive, got {qty}"
+        )));
+    }
+    if req.trigger_price.is_sign_negative() || req.trigger_price.is_zero() {
+        // A zero trigger fires immediately and silently becomes a market
+        // order, which is the exact opposite of what a STOP is for.
+        let trigger_price = req.trigger_price;
+        return Err(PortError::InvalidArgument(format!(
+            "trigger order trigger_price must be positive, got {trigger_price}"
+        )));
+    }
+    Ok(tproto::TriggerOrderRequest {
+        client_order_id: req.client_order_id.clone(),
+        symbol: req.symbol.clone(),
+        side: buffa::EnumValue::Known(if req.is_buy {
+            trading::OrderSide::Buy
+        } else {
+            trading::OrderSide::Sell
+        }),
+        trigger_price: req.trigger_price.to_string(),
+        qty: req.qty.to_string(),
+        reduce_only: req.reduce_only,
+        trigger_type: buffa::EnumValue::Known(trading::TriggerPriceType::Last),
+        // `order_price` stays unset and `order_type` is MARKET: a protective
+        // stop should fire into liquidity rather than rest unfilled at a price
+        // the market has already passed through.
+        order_price: None,
+        order_type: buffa::EnumValue::Known(tproto::OrderType::Market),
+        ..Default::default()
+    })
 }
 
 #[async_trait]
 impl FundingRateSource for TerminalAdapter {
     async fn fetch_funding_rate(
         &self,
-        _exchange_id: &common::ExchangeId,
-        _symbol: &str,
+        exchange_id: &common::ExchangeId,
+        symbol: &str,
     ) -> Result<FundingRateSnapshot, PortError> {
-        Err(unsupported("fetch_funding_rate"))
+        let venue = venue_of(exchange_id)?;
+        let rates = self
+            .client
+            .get_funding_rates(&venue, std::slice::from_ref(&symbol.to_string()))
+            .await
+            .map_err(map_client_err)?;
+        // An empty list is a legitimate answer: the venue tracks no perps for
+        // that symbol. It is distinct from the venue having no funding surface
+        // at all, which arrives as an error.
+        rates
+            .iter()
+            .find(|r| r.symbol == symbol)
+            .ok_or_else(|| PortError::NotFound(format!("no funding rate for {venue}/{symbol}")))
+            .and_then(funding_rate_to_port)
     }
+
     async fn fetch_funding_rate_history(
         &self,
-        _exchange_id: &common::ExchangeId,
-        _symbol: &str,
-        _limit: u32,
+        exchange_id: &common::ExchangeId,
+        symbol: &str,
+        limit: u32,
     ) -> Result<Vec<FundingRatePoint>, PortError> {
-        Err(unsupported("fetch_funding_rate_history"))
+        let venue = venue_of(exchange_id)?;
+        let points = self
+            .client
+            .get_funding_rate_history(&venue, symbol, limit)
+            .await
+            .map_err(map_client_err)?;
+        points
+            .iter()
+            .map(|p| {
+                Ok(FundingRatePoint {
+                    rate: p.rate.parse::<Decimal>().map_err(|_| {
+                        PortError::InvalidArgument(format!(
+                            "bad decimal funding_rate_point.rate={:?}",
+                            p.rate
+                        ))
+                    })?,
+                    time_ms: p.funding_time_ms,
+                })
+            })
+            .collect()
     }
 }
 
@@ -857,18 +1111,53 @@ impl FundingRateSource for TerminalAdapter {
 impl TriggerOrderGateway for TerminalAdapter {
     async fn create_trigger_order(
         &self,
-        _exchange_id: &common::ExchangeId,
-        _req: TriggerOrderRequest,
-    ) -> Result<String, PortError> {
-        Err(unsupported("create_trigger_order"))
+        exchange_id: &common::ExchangeId,
+        req: TriggerOrderRequest,
+    ) -> Result<TriggerOrder, PortError> {
+        let venue = venue_of(exchange_id)?;
+        let order = self
+            .client
+            .create_trigger_order(&venue, trigger_request_to_terminal(&req)?)
+            .await
+            .map_err(map_client_err)?;
+        if order.id.is_empty() {
+            // Returning an empty id would leave the caller unable to cancel the
+            // backstop it just placed, which is the one thing it must be able
+            // to do.
+            return Err(PortError::Transport(
+                "venue returned a trigger order with no id".to_string(),
+            ));
+        }
+        trigger_order_to_port(&order)
     }
+
     async fn cancel_trigger_order(
         &self,
-        _exchange_id: &common::ExchangeId,
-        _order_id: &str,
-        _symbol: &str,
-    ) -> Result<(), PortError> {
-        Err(unsupported("cancel_trigger_order"))
+        exchange_id: &common::ExchangeId,
+        order_id: &str,
+        symbol: &str,
+    ) -> Result<TriggerOrder, PortError> {
+        let venue = venue_of(exchange_id)?;
+        self.client
+            .cancel_trigger_order(&venue, order_id, symbol)
+            .await
+            .map_err(map_client_err)
+            .and_then(|o| trigger_order_to_port(&o))
+    }
+
+    async fn list_trigger_orders(
+        &self,
+        exchange_id: &common::ExchangeId,
+        symbols: &[String],
+    ) -> Result<Vec<TriggerOrder>, PortError> {
+        let venue = venue_of(exchange_id)?;
+        self.client
+            .list_trigger_orders(&venue, symbols)
+            .await
+            .map_err(map_client_err)?
+            .iter()
+            .map(trigger_order_to_port)
+            .collect()
     }
 }
 
@@ -876,36 +1165,316 @@ impl TriggerOrderGateway for TerminalAdapter {
 impl VenueOpInvoker for TerminalAdapter {
     async fn invoke_venue_op(
         &self,
-        _exchange_id: &common::ExchangeId,
+        exchange_id: &common::ExchangeId,
         op: &str,
-        _params: serde_json::Map<String, serde_json::Value>,
+        params: serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, PortError> {
-        Err(unsupported(&format!("invoke_venue_op({op})")))
+        if op.trim().is_empty() {
+            return Err(PortError::MissingField("op".to_string()));
+        }
+        self.client
+            .invoke_venue_op(exchange_id, op, &serde_json::Value::Object(params))
+            .await
+            .map_err(map_client_err)
     }
+
     async fn list_venue_ops(
         &self,
-        _exchange_id: &common::ExchangeId,
-    ) -> Result<Vec<String>, PortError> {
-        Err(unsupported("list_venue_ops"))
+        exchange_id: &common::ExchangeId,
+    ) -> Result<Vec<VenueOpDescriptor>, PortError> {
+        self.client
+            .list_venue_ops(exchange_id)
+            .await
+            .map_err(map_client_err)?
+            .iter()
+            .map(op_descriptor_to_port)
+            .collect()
+    }
+
+    async fn describe_venue_op(
+        &self,
+        exchange_id: &common::ExchangeId,
+        op: &str,
+    ) -> Result<VenueOpDescriptor, PortError> {
+        if op.trim().is_empty() {
+            return Err(PortError::MissingField("op".to_string()));
+        }
+        self.client
+            .describe_venue_op(exchange_id, op)
+            .await
+            .map_err(map_client_err)
+            .and_then(|d| op_descriptor_to_port(&d))
     }
 }
 
 #[async_trait]
 impl WalletGateway for TerminalAdapter {
-    async fn fetch_deposits(
+    async fn list_ledger_entries(
         &self,
-        _exchange_id: &common::ExchangeId,
-        _limit: u32,
+        exchange_id: &common::ExchangeId,
+        currency: &str,
+        entry_type: &str,
+        limit: u32,
     ) -> Result<Vec<LedgerEntry>, PortError> {
-        Err(unsupported("fetch_deposits"))
+        let venue = venue_of(exchange_id)?;
+        let limit = if limit == 0 { DEFAULT_LIMIT } else { limit };
+        self.client
+            .get_ledger_entries(&venue, currency, entry_type, limit)
+            .await
+            .map_err(map_client_err)?
+            .iter()
+            .map(ledger_entry_to_port)
+            .collect()
     }
+
     async fn transfer(
         &self,
-        _exchange_id: &common::ExchangeId,
-        _asset: &str,
-        _amount: Decimal,
-        _dest_label: &str,
-    ) -> Result<(), PortError> {
-        Err(unsupported("transfer"))
+        exchange_id: &common::ExchangeId,
+        asset: &str,
+        amount: Decimal,
+        dest_label: &str,
+        client_transfer_id: &str,
+    ) -> Result<TransferReceipt, PortError> {
+        let venue = venue_of(exchange_id)?;
+        if asset.trim().is_empty() {
+            return Err(PortError::MissingField("asset".to_string()));
+        }
+        if amount.is_sign_negative() || amount.is_zero() {
+            return Err(PortError::InvalidArgument(format!(
+                "transfer amount must be positive, got {amount:?}"
+            )));
+        }
+        if dest_label.trim().is_empty() {
+            return Err(PortError::MissingField("dest_label".to_string()));
+        }
+        let resp = self
+            .client
+            .transfer(&venue, asset, &amount.to_string(), dest_label, client_transfer_id)
+            .await
+            .map_err(map_client_err)?;
+        Ok(TransferReceipt {
+            transfer_id: resp.transfer_id,
+            entry: resp.entry.as_option().map(ledger_entry_to_port).transpose()?,
+        })
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// These conversions sit between the unified contract and the venue
+    /// surface, where a silent default is the dangerous outcome: a wrong
+    /// timeframe or a zeroed price looks like valid data to a strategy.
+
+    #[test]
+    fn timeframe_accepts_documented_values() {
+        for tf in ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "S1", "S100"] {
+            assert!(timeframe_to_terminal(tf).is_ok(), "{tf} must be supported");
+        }
+    }
+
+    #[test]
+    fn timeframe_is_case_and_space_insensitive() {
+        assert_eq!(timeframe_to_terminal("h4").expect("h4"), tproto::Timeframe::H4);
+        assert_eq!(timeframe_to_terminal(" H4 ").expect("padded H4"), tproto::Timeframe::H4);
+    }
+
+    #[test]
+    fn empty_timeframe_defaults_to_m1() {
+        assert_eq!(timeframe_to_terminal("").expect("empty"), tproto::Timeframe::M1);
+    }
+
+    #[test]
+    fn unknown_timeframe_is_rejected_not_defaulted() {
+        // The previous behaviour silently returned M1, so a strategy asking
+        // for H4 received 1-minute candles and computed a plausible, wrong
+        // signal. An error is the only safe answer.
+        let err = timeframe_to_terminal("H3").expect_err("H3 must not silently map to M1");
+        assert!(matches!(err, PortError::InvalidArgument(_)), "got {err:?}");
+        assert!(err.to_string().contains("H4"), "message should list valid options: {err}");
+    }
+
+    #[test]
+    fn str_to_common_rejects_garbage() {
+        assert!(str_to_common("not-a-number", "close").is_err());
+        assert!(str_to_common("", "close").is_err());
+    }
+
+    #[test]
+    fn str_to_common_accepts_valid_decimal_strings() {
+        let d = str_to_common("1.25", "close").expect("valid");
+        assert_eq!(d.unscaled, 125);
+        assert_eq!(d.scale, 2);
+    }
+
+    #[test]
+    fn venue_of_requires_a_non_empty_id() {
+        let empty = common::ExchangeId::default();
+        assert!(venue_of(&empty).is_err());
+        let named = common::ExchangeId { id: "mock".to_string(), ..Default::default() };
+        assert_eq!(venue_of(&named).expect("named"), "mock");
+    }
+
+    #[test]
+    fn order_type_rejects_unsupported_variants() {
+        // Anything outside Market/Limit/Stop/StopLimit must be an explicit
+        // error rather than being coerced.
+        assert!(order_type_to_terminal_type(trading::OrderType::Unspecified).is_err());
+        for t in [trading::OrderType::Market, trading::OrderType::Limit, trading::OrderType::Stop] {
+            assert!(order_type_to_terminal_type(t).is_ok(), "{t:?}");
+        }
+    }
+
+    /// `reduce_only` must be carried, not dropped. Silently ignoring it turns a
+    /// risk-reducing close into an order that can open opposite exposure — the
+    /// single most dangerous thing to lose on a conditional order.
+    #[test]
+    fn trigger_request_carries_reduce_only_and_a_market_leg() {
+        use rust_decimal_macros::dec;
+        let req = TriggerOrderRequest {
+            client_order_id: "coid-1".into(),
+            symbol: "BTC/USDT".into(),
+            is_buy: false,
+            trigger_price: dec!(95000),
+            qty: dec!(0.001),
+            reduce_only: true,
+        };
+        let wire = trigger_request_to_terminal(&req).expect("valid");
+        assert!(wire.reduce_only, "reduce_only must reach the venue");
+        assert_eq!(wire.symbol, "BTC/USDT");
+        assert_eq!(wire.client_order_id, "coid-1");
+        assert_eq!(wire.trigger_price, "95000");
+        assert_eq!(wire.qty, "0.001");
+        assert_eq!(wire.side, buffa::EnumValue::Known(trading::OrderSide::Sell));
+        // A protective stop fires into liquidity; a limit leg with no price
+        // would rest unfilled at a level the market has already passed.
+        assert_eq!(wire.order_type, buffa::EnumValue::Known(tproto::OrderType::Market));
+        assert!(wire.order_price.is_none(), "no invented limit price");
+        assert_eq!(wire.trigger_type, buffa::EnumValue::Known(trading::TriggerPriceType::Last));
+    }
+
+    #[test]
+    fn trigger_request_rejects_a_degenerate_order() {
+        use rust_decimal_macros::dec;
+        let base = TriggerOrderRequest {
+            client_order_id: String::new(),
+            symbol: "BTC/USDT".into(),
+            is_buy: true,
+            trigger_price: dec!(95000),
+            qty: dec!(1),
+            reduce_only: false,
+        };
+        assert!(trigger_request_to_terminal(&base).is_ok());
+
+        // A closed-book "add" of each degenerate case, rather than a label
+        // match: the label indirection made the intent harder to read than the
+        // explicit variants.
+        let mut zero_qty = base.clone();
+        zero_qty.qty = dec!(0);
+        let mut negative_qty = base.clone();
+        negative_qty.qty = dec!(-1);
+        let mut zero_trigger = base.clone();
+        zero_trigger.trigger_price = dec!(0);
+        let mut negative_trigger = base.clone();
+        negative_trigger.trigger_price = dec!(-95000);
+        let mut blank_symbol = base;
+        blank_symbol.symbol = "   ".into();
+
+        for (label, req) in [
+            ("zero qty", zero_qty),
+            ("negative qty", negative_qty),
+            ("zero trigger", zero_trigger),
+            ("negative trigger", negative_trigger),
+            ("blank symbol", blank_symbol),
+        ] {
+            assert!(
+                trigger_request_to_terminal(&req).is_err(),
+                "{label} must be rejected before it reaches the venue"
+            );
+        }
+    }
+
+    /// A withdrawal must arrive negative. Trusting the venue's unsigned amount
+    /// would let a withdrawal read as a deposit.
+    #[test]
+    fn ledger_entry_sign_comes_from_direction() {
+        use rust_decimal_macros::dec;
+        let mk = |direction: &str, amount: &str| account::LedgerEntry {
+            id: "l-1".into(),
+            currency: "USDT".into(),
+            direction: direction.into(),
+            r#type: "transfer".into(),
+            amount: str_to_common(amount, "amount").expect("decimal").into(),
+            timestamp: buffa::MessageField::none(),
+            status: "completed".into(),
+            ..Default::default()
+        };
+        assert_eq!(ledger_entry_to_port(&mk("out", "100")).expect("mapped").amount, dec!(-100));
+        assert_eq!(ledger_entry_to_port(&mk("in", "100")).expect("mapped").amount, dec!(100));
+    }
+
+    /// A pending row must not be reported as settled, or a strategy would sweep
+    /// funds that have not arrived.
+    #[test]
+    fn ledger_entry_completed_is_case_insensitive() {
+        let mk = |status: &str| account::LedgerEntry {
+            id: "l-1".into(),
+            currency: "USDT".into(),
+            direction: "in".into(),
+            r#type: "deposit".into(),
+            amount: str_to_common("1", "amount").expect("decimal").into(),
+            timestamp: buffa::MessageField::none(),
+            status: status.into(),
+            ..Default::default()
+        };
+        assert!(ledger_entry_to_port(&mk("COMPLETED")).expect("mapped").completed);
+        assert!(!ledger_entry_to_port(&mk("pending")).expect("mapped").completed);
+    }
+
+    /// An unreported optional stays `None`; it must not become a zero that a
+    /// strategy reads as a real measurement.
+    #[test]
+    fn an_unreported_mark_price_stays_absent() {
+        let rate = tproto::FundingRate {
+            symbol: "BTC/USDT".into(),
+            rate: "0.0001".into(),
+            next_funding_ts_ms: 1_700_000_000_000,
+            mark_price: String::new(),
+            venue: "binance".into(),
+            ..Default::default()
+        };
+        let snapshot = funding_rate_to_port(&rate).expect("mapped");
+        assert_eq!(snapshot.rate, rust_decimal_macros::dec!(0.0001));
+        assert_eq!(snapshot.mark_price, None);
+    }
+
+    /// An unknown status is an error, never `Open`: reporting a dead backstop as
+    /// live is the one failure this port cannot tolerate.
+    #[test]
+    fn a_trigger_order_with_an_unknown_status_is_rejected() {
+        let order = tproto::TriggerOrder {
+            id: "t-1".into(),
+            side: buffa::EnumValue::Known(trading::OrderSide::Sell),
+            trigger_price: "95000".into(),
+            qty: "1".into(),
+            status: buffa::EnumValue::Unknown(99),
+            ..Default::default()
+        };
+        assert!(trigger_order_to_port(&order).is_err());
+    }
+
+    /// A side-less conditional order must be rejected, not defaulted to Buy —
+    /// which would silently invert a stop.
+    #[test]
+    fn a_trigger_order_with_an_unset_side_is_rejected() {
+        let order = tproto::TriggerOrder {
+            id: "t-1".into(),
+            side: buffa::EnumValue::Known(trading::OrderSide::Unspecified),
+            trigger_price: "95000".into(),
+            qty: "1".into(),
+            status: buffa::EnumValue::Known(trading::TriggerOrderStatus::Open),
+            ..Default::default()
+        };
+        assert!(trigger_order_to_port(&order).is_err());
     }
 }

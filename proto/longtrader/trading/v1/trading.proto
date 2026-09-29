@@ -3,6 +3,7 @@ syntax = "proto3";
 package longtrader.trading.v1;
 
 import "longtrader/common/v1/types.proto";
+import "longtrader/account/v1/account.proto";
 import "google/protobuf/timestamp.proto";
 
 // Trading service: unified surface for account / positions / orders.
@@ -19,11 +20,28 @@ service TradingService {
   rpc ClosePosition(ClosePositionRequest) returns (ClosePositionResponse);
   rpc CloseAllPositions(CloseAllPositionsRequest) returns (CloseAllPositionsResponse);
   rpc ModifyPosition(ModifyPositionRequest) returns (ModifyPositionResponse);
+  // Venue-side conditional orders (a crash-safe stop backstop). Separate from
+  // `OrderRequest.trigger_price`, which is a stop order on the main book.
+  rpc CreateTriggerOrder(CreateTriggerOrderRequest) returns (CreateTriggerOrderResponse);
+  rpc CancelTriggerOrder(CancelTriggerOrderRequest) returns (CancelTriggerOrderResponse);
+  rpc ListTriggerOrders(ListTriggerOrdersRequest) returns (ListTriggerOrdersResponse);
+  // Wallet ledger: deposits, withdrawals and internal transfers.
+  rpc FetchLedgerEntries(FetchLedgerEntriesRequest) returns (FetchLedgerEntriesResponse);
+  rpc Transfer(TransferRequest) returns (TransferResponse);
 }
 
 message CreateOrderRequest {
   common.v1.ExchangeId exchange_id = 1;
   OrderRequest order = 2;
+  // Session that submits the order, as issued by `worker.v1.AttachSession`.
+  //
+  // When non-empty the host binds the order to that session: the submission is
+  // rejected with reason `SYNC_IN_PROGRESS` unless the session is ACTIVE, and
+  // the resulting order id is recorded so `KillSwitchPolicy.SCOPE_SESSION_ORDERS`
+  // and `StopStrategy.cancel_open_orders` can cancel exactly this session's
+  // orders. When empty the call is an unscoped operator action (the CLI) and is
+  // neither gated nor tracked.
+  string session_id = 3;
 }
 
 message CreateOrderResponse {
@@ -33,6 +51,9 @@ message CreateOrderResponse {
 message CreateOrdersRequest {
   common.v1.ExchangeId exchange_id = 1;
   repeated OrderRequest orders = 2;
+  // Same session binding semantics as `CreateOrderRequest.session_id`;
+  // an all-or-nothing gate applies to the whole batch.
+  string session_id = 3;
 }
 
 message CreateOrdersResponse {
@@ -286,4 +307,145 @@ enum TimeInForce {
   TIME_IN_FORCE_IOC = 2;
   TIME_IN_FORCE_FOK = 3;
   TIME_IN_FORCE_GTD = 4;
+}
+
+// ---- Venue-side conditional (trigger) orders ----
+//
+// A trigger order rests on the venue's own matching engine and fires when the
+// market crosses the trigger price, even if the strategy process is dead. It is
+// therefore the only reliable stop backstop, and is deliberately a different
+// surface from `OrderRequest.trigger_price`, which places a stop order on the
+// main book through the strategy's own session.
+
+enum TriggerOrderStatus {
+  TRIGGER_ORDER_STATUS_UNSPECIFIED = 0;
+  // Resting at the venue, waiting for the trigger price.
+  TRIGGER_ORDER_STATUS_OPEN = 1;
+  // Trigger fired; `order_id` names the resulting order.
+  TRIGGER_ORDER_STATUS_TRIGGERED = 2;
+  TRIGGER_ORDER_STATUS_CANCELED = 3;
+  TRIGGER_ORDER_STATUS_REJECTED = 4;
+}
+
+// What the venue does once the trigger price is crossed.
+enum TriggerPriceType {
+  TRIGGER_PRICE_TYPE_UNSPECIFIED = 0;
+  TRIGGER_PRICE_TYPE_LAST = 1;
+  TRIGGER_PRICE_TYPE_MARK = 2;
+  TRIGGER_PRICE_TYPE_INDEX = 3;
+}
+
+message TriggerOrderRequest {
+  // Optional idempotency key; the venue dedupes on it when supplied.
+  string client_order_id = 1;
+  string symbol = 2;
+  OrderSide side = 3;
+  common.v1.Decimal trigger_price = 4;
+  common.v1.Decimal qty = 5;
+  // When true the order may only reduce exposure, never open a new one.
+  bool reduce_only = 6;
+  // Defaults to LAST when unspecified.
+  TriggerPriceType trigger_type = 7;
+  // Limit price used after the trigger. When unset the venue submits a market
+  // order, which carries slippage risk the caller should opt into knowingly.
+  optional common.v1.Decimal order_price = 8;
+  // Order type used after the trigger. Defaults to LIMIT when `order_price`
+  // is set and MARKET otherwise.
+  OrderType order_type = 9;
+}
+
+message TriggerOrder {
+  string id = 1;
+  string client_order_id = 2;
+  string symbol = 3;
+  OrderSide side = 4;
+  common.v1.Decimal trigger_price = 5;
+  common.v1.Decimal qty = 6;
+  TriggerPriceType trigger_type = 7;
+  optional common.v1.Decimal order_price = 8;
+  OrderType order_type = 9;
+  bool reduce_only = 10;
+  TriggerOrderStatus status = 11;
+  google.protobuf.Timestamp created_at = 12;
+  // Set when the trigger fired; names the resulting order.
+  optional string order_id = 13;
+  optional google.protobuf.Timestamp triggered_at = 14;
+}
+
+message CreateTriggerOrderRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  TriggerOrderRequest order = 2;
+  // Same session binding semantics as `CreateOrderRequest.session_id`: a
+  // non-empty value is rejected with `failed_precondition` /
+  // `SYNC_IN_PROGRESS` unless that session is `ACTIVE`.
+  //
+  // Conditional orders deliberately survive the kill-switch — that is what
+  // makes one a usable crash backstop — so the session id gates *placement*,
+  // it does not make the order attributable for cancellation.
+  string session_id = 3;
+}
+
+message CreateTriggerOrderResponse {
+  TriggerOrder order = 1;
+}
+
+message CancelTriggerOrderRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  string order_id = 2;
+  string symbol = 3;
+}
+
+message CancelTriggerOrderResponse {
+  TriggerOrder order = 1;
+}
+
+message ListTriggerOrdersRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  // Empty lists trigger orders across every symbol.
+  repeated string symbols = 2;
+}
+
+message ListTriggerOrdersResponse {
+  repeated TriggerOrder orders = 1;
+}
+
+// ---- Wallet ledger and transfers ----
+
+message FetchLedgerEntriesRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  // Restrict to one currency; empty returns every currency.
+  string currency = 2;
+  // Restrict to one `LedgerEntry.type` (e.g. "deposit"); empty returns all.
+  string type = 3;
+  common.v1.Pagination pagination = 4;
+}
+
+message FetchLedgerEntriesResponse {
+  // Newest first.
+  repeated account.v1.LedgerEntry entries = 1;
+  common.v1.Page page = 2;
+}
+
+message TransferRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  string asset = 2;
+  common.v1.Decimal amount = 3;
+  // Same session binding semantics as `CreateOrderRequest.session_id`. A
+  // transfer moves real funds, so a session-scoped call is rejected with
+  // `failed_precondition` / `SYNC_IN_PROGRESS` unless that session is
+  // `ACTIVE`. An empty value marks an unscoped operator call.
+  // Destination account label, as reported by the venue's account listing
+  // (e.g. "spot", "futures", or a named sub-account).
+  string dest_label = 4;
+  // Optional idempotency key. Transfers move funds, so a retry without one
+  // risks a double spend; supply it whenever the caller can retry.
+  string client_transfer_id = 5;
+  string session_id = 6;
+}
+
+message TransferResponse {
+  // Venue-assigned transfer id, empty when the venue does not report one.
+  string transfer_id = 1;
+  // Absent when the venue does not report a resulting ledger entry.
+  optional account.v1.LedgerEntry entry = 2;
 }

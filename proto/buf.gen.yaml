@@ -3,6 +3,13 @@ version: v2
 # network access for remote plugins).
 managed:
   enabled: true
+  override:
+    # Go has no default in managed mode: without this, protoc-gen-go fails
+    # ("go_package is required") and buf aborts the whole generate run, so the
+    # Go output silently disappears. Setting the prefix here keeps
+    # go_package out of the language-neutral .proto files.
+    - file_option: go_package_prefix
+      value: github.com/longcipher/longtrader/sdks/go/gen
 plugins:
   - remote: buf.build/protocolbuffers/python:v31.1
     out: ../sdks/python/longtrader_sdk/proto

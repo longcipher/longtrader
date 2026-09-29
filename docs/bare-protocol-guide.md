@@ -1,9 +1,9 @@
 # Bare Protocol Guide — speaking LongTrader ConnectRPC without an SDK
 
-This guide is for clients that do **not** use a generated SDK (Python
-`longtrader-sdk`, TypeScript `@longcipher/longtrader-sdk`, or the Go scaffold).
-It documents the exact wire contract so you can implement a client by hand with
-any HTTP/1.1 or HTTP/2 stack. The contract under `proto/` (buf v2,
+This guide is for clients that do **not** use an SDK (i.e. neither
+`longtrader-sdk` for Python, `@longcipher/longtrader-sdk` for TypeScript, nor
+`sdks/go`). It documents the exact wire contract so you can implement a client
+by hand with any HTTP/1.1 or HTTP/2 stack. The contract under `proto/` (buf v2,
 `longtrader.*.v1`) is the single source of truth.
 
 > Everything here is also implemented for you in
@@ -195,6 +195,21 @@ Orders submitted **before** `ReconcileState` succeeds are rejected with
 `SYNC_IN_PROGRESS`. If the lease (default `3 × heartbeat_interval_ms`) expires
 while `ACTIVE`, the configured `KillSwitchPolicy` scope is executed
 (`KILL_SWITCH_TRIPPED`).
+
+To attribute an order to its session — which is what makes `SESSION_ORDERS`
+scoping and `StopStrategy.cancel_open_orders` possible — set
+`session_id` on the request:
+
+```protobuf
+message CreateOrderRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  OrderRequest order = 2;
+  string session_id = 3;   // from AttachSessionResponse.session_id
+}
+```
+
+A non-empty `session_id` is gated on the session reaching `ACTIVE`; an empty
+one marks an unscoped operator call (the CLI) that is neither gated nor tracked.
 
 ## Reference
 

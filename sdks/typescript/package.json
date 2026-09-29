@@ -40,10 +40,11 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "format": "prettier --write \"src/**/*.ts\" \"examples/**/*.ts\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"examples/**/*.ts\"",
+    "build": "tsc -p tsconfig.build.json",
+    "format": "prettier --write \"src/**/*.ts\" \"examples/**/*.ts\" \"tests/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"examples/**/*.ts\" \"tests/**/*.ts\"",
     "lint": "tsc --noEmit -p tsconfig.json",
+    "test": "tsx --test tests/*.test.ts",
     "example:grid": "tsx examples/grid_strategy.ts",
     "prepublishOnly": "npm run build"
   },

@@ -54,6 +54,10 @@ impl From<ManagerError> for ConnectError {
             ManagerError::NotFound(msg) => Self::not_found(msg),
             ManagerError::Unauthenticated => Self::unauthenticated("authentication failed"),
             ManagerError::InvalidArgument(msg) => Self::invalid_argument(msg),
+            // `failed_precondition` (not `unavailable`): retrying without first
+            // reconciling can never succeed, and the message carries the stable
+            // `SYNC_IN_PROGRESS` token that clients branch on.
+            ManagerError::SyncInProgress { .. } => Self::failed_precondition(err.to_string()),
             ManagerError::Port(e) => Self::internal(e.to_string()),
         }
     }
@@ -220,7 +224,9 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
                     ..Default::default()
                 })
             }),
-            orders_submitted: info.as_ref().map_or(0, |i| i.orders_submitted),
+            // Reported from the handle, not the strategy record, so a session
+            // that traded before `RegisterStrategy` still reports its count.
+            orders_submitted: handle.orders_submitted_count(),
             log_events: info.as_ref().map_or(0, |i| i.log_events),
             ..Default::default()
         };
@@ -233,32 +239,14 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
         request: ServiceRequest<'_, worker::StopStrategyRequest>,
     ) -> connectrpc::ServiceResult<PreEncoded<worker::StopStrategyResponse>> {
         let req = request.to_owned_message();
-        let handle = self.manager.get(&req.session_id).await?;
-        if req.cancel_open_orders {
-            for coid in handle.tracked_orders().await {
-                let cancel = crate::proto::trading::CancelOrderRequest {
-                    exchange_id: buffa::MessageField::some(self.manager.default_exchange().clone()),
-                    order_id: coid.clone(),
-                    symbol: String::new(),
-                    ..Default::default()
-                };
-                if let Err(err) = self.manager.gateway().cancel_order(cancel).await {
-                    tracing::warn!(coid = %coid, error = %err, "stop_strategy cancel failed");
-                }
-            }
-        }
-        if let Some(prev) = handle.swap_state(SessionState::GracefulShutdown) {
-            self.manager
-                .publish_state_change(
-                    &handle,
-                    prev,
-                    SessionState::GracefulShutdown,
-                    "stop requested",
-                )
-                .await;
-        }
+        // Cancel + transition live in the manager so the RPC and embedders
+        // share one implementation (and one tested path).
+        let final_state =
+            self.manager.stop_session(&req.session_id, req.cancel_open_orders).await?;
         let resp = worker::StopStrategyResponse {
-            final_state: buffa::EnumValue::Known(worker::SessionState::GracefulShutdown),
+            final_state: buffa::EnumValue::Known(
+                final_state.map_or(worker::SessionState::GracefulShutdown, SessionState::to_proto),
+            ),
             ..Default::default()
         };
         Response::ok(PreEncoded::from_message(&resp))

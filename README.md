@@ -92,11 +92,11 @@ sdks/{python,typescript,go}/  # thin wrappers over generated stubs (contract/ses
 
 | Canonical dir | Rust | Python | TypeScript | Go |
 |---|---|---|---|---|
-| `contract/` | `crates/longtrader-contract` | `sdks/python/longtrader_sdk/proto/` | `sdks/typescript/src/gen/` | `sdks/go/gen/` |
+| `contract/` | `crates/longtrader-contract` | `sdks/python/longtrader_sdk/proto/` | `sdks/typescript/src/gen/` | `sdks/go/contract/` (hand-written codec) + optional `sdks/go/gen/` |
 | `session/` | `bin/longtrader-worker/src/session/` | `longtrader_sdk/session.py` | `src/session.ts` | `session/` |
 | `ports/` | `src/ports.rs` | `longtrader_sdk/ports.py` | `src/ports.ts` | `ports/` |
 | `adapters/` | `src/adapters/{remote,mock}.rs` | Connect-over-httpx in `session.py` | Connect-over-undici in `session.ts` | Connect-over-http in `session/` |
-| `strategies/` | `src/strategies/` | `examples/grid_strategy.py` | `examples/grid_strategy.ts` | `strategies/` |
+| `strategies/` | `src/strategies/` | `examples/grid_strategy.py` | `examples/grid_strategy.ts` | `examples/grid_strategy.go` |
 | `examples/` | `examples/` / `docs/` | `sdks/python/examples/` | `sdks/typescript/examples/` | `sdks/go/examples/` |
 
 ---
@@ -113,7 +113,9 @@ sdks/{python,typescript,go}/  # thin wrappers over generated stubs (contract/ses
 | TypeScript | [`@longcipher/longtrader-sdk`](https://www.npmjs.com/package/@longcipher/longtrader-sdk) | [![npm](https://img.shields.io/npm/v/@longcipher/longtrader-sdk.svg)](https://www.npmjs.com/package/@longcipher/longtrader-sdk) |
 | Go | [`sdks/go`](https://pkg.go.dev/github.com/longcipher/longtrader/sdks/go) | [![Go Reference](https://pkg.go.dev/badge/github.com/longcipher/longtrader/sdks/go.svg)](https://pkg.go.dev/github.com/longcipher/longtrader/sdks/go) |
 
-> The Go SDK is a generated-stub scaffold; the `Session` API is available in Rust, Python, and TypeScript today. See [sdks/go/README.md](sdks/go/README.md).
+> The Go SDK implements the same `Session` lifecycle, the full trading and
+> market surfaces, and the `TradingPort`/`MarketPort` seam, with a
+> dependency-free hand-written protobuf codec — see [sdks/go/README.md](sdks/go/README.md).
 
 ---
 

@@ -32,7 +32,108 @@ struct State {
     op_balance: Decimal,
     deposits: Vec<LedgerEntry>,
     transfers: Vec<(String, Decimal, String)>,
-    trigger_orders: Vec<(String, TriggerOrderRequest)>,
+    /// id -> (request, status, created_at_ms).
+    trigger_orders: Vec<(String, TriggerOrderRequest, TriggerOrderStatus, i64)>,
+    /// client_transfer_id -> receipt, for idempotent retries.
+    transfer_receipts: Vec<(String, TransferReceipt)>,
+    /// Symbols the mock reports funding for. Empty means "every symbol", which
+    /// is the pre-existing permissive default; a test that cares can narrow it.
+    funding_symbols: Vec<String>,
+}
+
+/// The mock venue's self-describing operation table.
+///
+/// Built per call rather than held in a `static`: the descriptor owns `String`s
+/// and cloning a small table is cheaper than the `LazyLock` this would need.
+fn mock_ops() -> Vec<VenueOpDescriptor> {
+    vec![
+        VenueOpDescriptor {
+            name: "account.balance".to_string(),
+            category: "account".to_string(),
+            summary: "Free balance for one currency.".to_string(),
+            mutating: false,
+            params: vec![VenueOpParam {
+                name: "currency".to_string(),
+                r#type: VenueOpParamType::String,
+                required: true,
+                doc: "Currency to report, e.g. \"USDT\".".to_string(),
+                enum_values: Vec::new(),
+            }],
+        },
+        VenueOpDescriptor {
+            name: "margin.borrow".to_string(),
+            category: "margin".to_string(),
+            summary: "Borrow an asset against margin.".to_string(),
+            mutating: true,
+            params: vec![
+                VenueOpParam {
+                    name: "asset".to_string(),
+                    r#type: VenueOpParamType::String,
+                    required: true,
+                    doc: "Asset to borrow.".to_string(),
+                    enum_values: Vec::new(),
+                },
+                VenueOpParam {
+                    name: "amount".to_string(),
+                    r#type: VenueOpParamType::Decimal,
+                    required: true,
+                    doc: "Amount to borrow; must be positive.".to_string(),
+                    enum_values: Vec::new(),
+                },
+            ],
+        },
+        VenueOpDescriptor {
+            name: "wallet.convert".to_string(),
+            category: "wallet".to_string(),
+            summary: "Convert between currencies at the venue's rate.".to_string(),
+            mutating: true,
+            params: vec![
+                VenueOpParam {
+                    name: "asset".to_string(),
+                    r#type: VenueOpParamType::String,
+                    required: true,
+                    doc: "Asset to convert from.".to_string(),
+                    enum_values: Vec::new(),
+                },
+                VenueOpParam {
+                    name: "dest".to_string(),
+                    r#type: VenueOpParamType::String,
+                    required: true,
+                    doc: "Currency to convert to.".to_string(),
+                    enum_values: Vec::new(),
+                },
+            ],
+        },
+        VenueOpDescriptor {
+            name: "account.transfer".to_string(),
+            category: "account".to_string(),
+            summary: "Move funds between accounts on the same venue.".to_string(),
+            mutating: true,
+            params: vec![
+                VenueOpParam {
+                    name: "asset".to_string(),
+                    r#type: VenueOpParamType::String,
+                    required: true,
+                    doc: "Asset to move, e.g. \"USDT\".".to_string(),
+                    enum_values: Vec::new(),
+                },
+                VenueOpParam {
+                    name: "amount".to_string(),
+                    r#type: VenueOpParamType::Decimal,
+                    required: true,
+                    doc: "Amount to move; must be positive.".to_string(),
+                    enum_values: Vec::new(),
+                },
+                VenueOpParam {
+                    name: "dest".to_string(),
+                    r#type: VenueOpParamType::String,
+                    required: true,
+                    doc: "Destination account label, e.g. \"futures\".".to_string(),
+                    enum_values: Vec::new(),
+                },
+            ],
+        },
+    ]
 }
 
 fn now_ts() -> buffa_types::google::protobuf::Timestamp {
@@ -525,6 +626,54 @@ mod tests {
         }
         assert!(last_seq > 0, "must have received events");
     }
+
+    /// The ledger is documented as "newest first". `transfer` prepends its row
+    /// while `push_deposit` appends, so relying on insertion order would report
+    /// a transfer as newer than a deposit that happened after it. Timestamps
+    /// below are chosen so the two orderings disagree.
+    #[tokio::test]
+    async fn ledger_is_newest_first_regardless_of_insertion_site() {
+        let adapter = MockAdapter::new(dec!(1000));
+        let t0 = now_ms();
+        adapter
+            .push_deposit(LedgerEntry {
+                id: "old".into(),
+                currency: "USDT".into(),
+                amount: dec!(1),
+                entry_type: "deposit".into(),
+                completed: true,
+                time_ms: t0 - 2_000,
+            })
+            .await;
+        // Stamped `t0`, and written to the FRONT of the vec.
+        adapter
+            .transfer(&common::ExchangeId::default(), "USDT", dec!(2), "futures", "ordering-1")
+            .await
+            .expect("transfer");
+        adapter
+            .push_deposit(LedgerEntry {
+                id: "new".into(),
+                currency: "USDT".into(),
+                amount: dec!(3),
+                entry_type: "deposit".into(),
+                completed: true,
+                time_ms: t0 + 2_000,
+            })
+            .await;
+
+        let rows = adapter
+            .list_ledger_entries(&common::ExchangeId::default(), "USDT", "", 10)
+            .await
+            .expect("listed");
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["new", "ordering-1", "old"],
+            "newest first by timestamp, not by insertion site"
+        );
+        let times: Vec<i64> = rows.iter().map(|r| r.time_ms).collect();
+        assert!(times.windows(2).all(|w| w[0] >= w[1]), "descending: {times:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -533,9 +682,13 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 use crate::ports::{
-    FundingRatePoint, FundingRateSnapshot, FundingRateSource, LedgerEntry, TriggerOrderGateway,
-    TriggerOrderRequest, VenueOpInvoker, WalletGateway,
+    FundingRatePoint, FundingRateSnapshot, FundingRateSource, LedgerEntry, TransferReceipt,
+    TriggerOrder, TriggerOrderGateway, TriggerOrderRequest, TriggerOrderStatus, VenueOpDescriptor,
+    VenueOpInvoker, VenueOpParam, VenueOpParamType, WalletGateway,
 };
+
+/// The funding settlement interval the mock models, in milliseconds.
+const MOCK_FUNDING_INTERVAL_MS: i64 = 8 * 60 * 60 * 1000;
 
 #[async_trait]
 impl FundingRateSource for MockAdapter {
@@ -545,10 +698,20 @@ impl FundingRateSource for MockAdapter {
         symbol: &str,
     ) -> Result<FundingRateSnapshot, PortError> {
         let state = self.state.lock().await;
+        if !state.funding_symbols.is_empty() && !state.funding_symbols.iter().any(|s| s == symbol) {
+            // A venue tracks perps for a subset of its symbols. Answering for
+            // an unlisted one would hand a carry strategy another contract's
+            // rate, and it would act on it.
+            return Err(PortError::NotFound(format!(
+                "the mock venue lists no funding for {symbol}"
+            )));
+        }
         Ok(FundingRateSnapshot {
             symbol: symbol.to_string(),
             rate: state.funding_rate,
-            next_funding_time_ms: now_ms(),
+            // The next settlement is snapped to the interval grid, so repeated
+            // calls agree instead of drifting with wall time.
+            next_funding_time_ms: next_funding_boundary(now_ms()),
             mark_price: Some(state.price),
         })
     }
@@ -560,13 +723,23 @@ impl FundingRateSource for MockAdapter {
         limit: u32,
     ) -> Result<Vec<FundingRatePoint>, PortError> {
         let state = self.state.lock().await;
+        // Deterministic, evenly spaced settlements on the interval grid. Wall
+        // time is deliberately not used: a strategy that backtests against the
+        // mock must see the same history on every run.
+        let now = now_ms();
+        let grid = now.div_euclid(MOCK_FUNDING_INTERVAL_MS) * MOCK_FUNDING_INTERVAL_MS;
         Ok((0..limit.min(64))
             .map(|i| FundingRatePoint {
                 rate: state.funding_rate,
-                time_ms: now_ms() - i64::from(i * 8),
+                time_ms: grid - i64::from(i) * MOCK_FUNDING_INTERVAL_MS,
             })
             .collect())
     }
+}
+
+/// The next settlement boundary strictly after `now_ms`.
+fn next_funding_boundary(now: i64) -> i64 {
+    (now / MOCK_FUNDING_INTERVAL_MS + 1) * MOCK_FUNDING_INTERVAL_MS
 }
 
 #[async_trait]
@@ -575,11 +748,30 @@ impl TriggerOrderGateway for MockAdapter {
         &self,
         _exchange_id: &common::ExchangeId,
         req: TriggerOrderRequest,
-    ) -> Result<String, PortError> {
+    ) -> Result<TriggerOrder, PortError> {
+        validate_trigger_request(&req)?;
         let mut state = self.state.lock().await;
         let id = format!("trigger-{}", self.ids.fetch_add(1, Ordering::Relaxed));
-        state.trigger_orders.push((id.clone(), req));
-        Ok(id)
+        let created_at_ms = now_ms();
+        state.trigger_orders.push((
+            id.clone(),
+            req.clone(),
+            TriggerOrderStatus::Open,
+            created_at_ms,
+        ));
+        Ok(TriggerOrder {
+            id,
+            client_order_id: req.client_order_id,
+            symbol: req.symbol,
+            is_buy: req.is_buy,
+            trigger_price: req.trigger_price,
+            qty: req.qty,
+            reduce_only: req.reduce_only,
+            status: TriggerOrderStatus::Open,
+            created_at_ms,
+            order_id: None,
+            triggered_at_ms: None,
+        })
     }
 
     async fn cancel_trigger_order(
@@ -587,10 +779,60 @@ impl TriggerOrderGateway for MockAdapter {
         _exchange_id: &common::ExchangeId,
         order_id: &str,
         _symbol: &str,
-    ) -> Result<(), PortError> {
+    ) -> Result<TriggerOrder, PortError> {
         let mut state = self.state.lock().await;
-        state.trigger_orders.retain(|(id, _)| id != order_id);
-        Ok(())
+        let Some((_, req, status, created_at_ms)) =
+            state.trigger_orders.iter_mut().find(|(id, _, _, _)| id == order_id)
+        else {
+            return Err(PortError::NotFound(format!("trigger order {order_id}")));
+        };
+        // A fired order is live on the venue; reporting a successful cancel
+        // would tell a strategy its backstop is gone when it is not.
+        if *status != TriggerOrderStatus::Open {
+            return Err(PortError::InvalidArgument(format!(
+                "trigger order {order_id} is {status} and can no longer be cancelled"
+            )));
+        }
+        *status = TriggerOrderStatus::Canceled;
+        Ok(TriggerOrder {
+            id: order_id.to_string(),
+            client_order_id: req.client_order_id.clone(),
+            symbol: req.symbol.clone(),
+            is_buy: req.is_buy,
+            trigger_price: req.trigger_price,
+            qty: req.qty,
+            reduce_only: req.reduce_only,
+            status: TriggerOrderStatus::Canceled,
+            created_at_ms: *created_at_ms,
+            order_id: None,
+            triggered_at_ms: None,
+        })
+    }
+
+    async fn list_trigger_orders(
+        &self,
+        _exchange_id: &common::ExchangeId,
+        symbols: &[String],
+    ) -> Result<Vec<TriggerOrder>, PortError> {
+        let state = self.state.lock().await;
+        Ok(state
+            .trigger_orders
+            .iter()
+            .filter(|(_, req, _, _)| symbols.is_empty() || symbols.contains(&req.symbol))
+            .map(|(id, req, status, created_at_ms)| TriggerOrder {
+                id: id.clone(),
+                client_order_id: req.client_order_id.clone(),
+                symbol: req.symbol.clone(),
+                is_buy: req.is_buy,
+                trigger_price: req.trigger_price,
+                qty: req.qty,
+                reduce_only: req.reduce_only,
+                status: *status,
+                created_at_ms: *created_at_ms,
+                order_id: None,
+                triggered_at_ms: None,
+            })
+            .collect())
     }
 }
 
@@ -622,25 +864,38 @@ impl VenueOpInvoker for MockAdapter {
     async fn list_venue_ops(
         &self,
         _exchange_id: &common::ExchangeId,
-    ) -> Result<Vec<String>, PortError> {
-        Ok(vec![
-            String::from("account.balance"),
-            String::from("margin.borrow"),
-            String::from("wallet.convert"),
-            String::from("account.transfer"),
-        ])
+    ) -> Result<Vec<VenueOpDescriptor>, PortError> {
+        // Descriptors, not bare names: `mutating` is what a client reads to
+        // decide whether a call needs a confirmation prompt, and `account.
+        // transfer` must not be reported as read-only.
+        Ok(mock_ops())
     }
 }
 
 #[async_trait]
 impl WalletGateway for MockAdapter {
-    async fn fetch_deposits(
+    async fn list_ledger_entries(
         &self,
         _exchange_id: &common::ExchangeId,
+        currency: &str,
+        entry_type: &str,
         limit: u32,
     ) -> Result<Vec<LedgerEntry>, PortError> {
         let state = self.state.lock().await;
-        Ok(state.deposits.iter().take(limit as usize).cloned().collect())
+        let mut rows: Vec<LedgerEntry> = state
+            .deposits
+            .iter()
+            .filter(|e| currency.is_empty() || e.currency == currency)
+            .filter(|e| entry_type.is_empty() || e.entry_type == entry_type)
+            .cloned()
+            .collect();
+        // Newest first, as a property of the read rather than of where a row
+        // happened to be inserted. `push_deposit` appends and `transfer`
+        // prepends, so relying on insertion order would report seeded deposits
+        // and transfer rows in opposite orders.
+        rows.sort_by_key(|e| std::cmp::Reverse(e.time_ms));
+        rows.truncate(limit as usize);
+        Ok(rows)
     }
 
     async fn transfer(
@@ -649,11 +904,73 @@ impl WalletGateway for MockAdapter {
         asset: &str,
         amount: Decimal,
         dest_label: &str,
-    ) -> Result<(), PortError> {
+        client_transfer_id: &str,
+    ) -> Result<TransferReceipt, PortError> {
+        if asset.trim().is_empty() {
+            return Err(PortError::MissingField("asset".to_string()));
+        }
+        if amount.is_sign_negative() || amount.is_zero() {
+            return Err(PortError::InvalidArgument(format!(
+                "transfer amount must be positive, got {amount:?}"
+            )));
+        }
+        if dest_label.trim().is_empty() {
+            return Err(PortError::MissingField("dest_label".to_string()));
+        }
         let mut state = self.state.lock().await;
+        // Idempotency first: a retry must not move funds twice.
+        if !client_transfer_id.is_empty() &&
+            let Some(receipt) = state
+                .transfer_receipts
+                .iter()
+                .find(|(_, r)| r.transfer_id == client_transfer_id)
+                .map(|(_, r)| r.clone())
+        {
+            return Ok(receipt);
+        }
         state.transfers.push((asset.to_string(), amount, dest_label.to_string()));
-        Ok(())
+        let transfer_id = if client_transfer_id.is_empty() {
+            format!("transfer-{}", self.ids.fetch_add(1, Ordering::Relaxed))
+        } else {
+            client_transfer_id.to_string()
+        };
+        // The transfer appears on the ledger as an outgoing row, so a
+        // strategy that scans the ledger sees its own capital movements.
+        let entry = LedgerEntry {
+            id: transfer_id.clone(),
+            currency: asset.to_string(),
+            amount: -amount,
+            entry_type: "transfer".to_string(),
+            completed: true,
+            time_ms: now_ms(),
+        };
+        state.deposits.insert(0, entry.clone());
+        let receipt = TransferReceipt { transfer_id, entry: Some(entry) };
+        state.transfer_receipts.push((client_transfer_id.to_string(), receipt.clone()));
+        Ok(receipt)
     }
+}
+
+/// Reject the two ways a conditional order is silently useless: a non-positive
+/// quantity, and a non-positive trigger price (which would fire immediately and
+/// degenerate into a market order).
+fn validate_trigger_request(req: &TriggerOrderRequest) -> Result<(), PortError> {
+    if req.symbol.trim().is_empty() {
+        return Err(PortError::MissingField("symbol".to_string()));
+    }
+    if req.qty.is_sign_negative() || req.qty.is_zero() {
+        return Err(PortError::InvalidArgument(format!(
+            "trigger order qty must be positive, got {:?}",
+            req.qty
+        )));
+    }
+    if req.trigger_price.is_sign_negative() || req.trigger_price.is_zero() {
+        return Err(PortError::InvalidArgument(format!(
+            "trigger order trigger_price must be positive, got {:?}",
+            req.trigger_price
+        )));
+    }
+    Ok(())
 }
 
 fn now_ms() -> i64 {
@@ -666,6 +983,12 @@ impl MockAdapter {
     /// Sets the funding rate returned by [`FundingRateSource`].
     pub async fn set_funding_rate(&self, rate: Decimal) {
         self.state.lock().await.funding_rate = rate;
+    }
+
+    /// Restrict funding to `symbols`, so a strategy cannot read another
+    /// contract's rate.
+    pub async fn set_funding_symbols(&self, symbols: Vec<String>) {
+        self.state.lock().await.funding_symbols = symbols;
     }
 
     /// Sets the balance returned by the `account.balance` venue op.
@@ -683,8 +1006,30 @@ impl MockAdapter {
         self.state.lock().await.transfers.clone()
     }
 
-    /// Snapshot of outstanding trigger orders.
+    /// Snapshot of trigger orders that are still resting, as `(id, request)`.
+    ///
+    /// Canceled and fired orders are excluded: this is the "what protective
+    /// orders do I have live right now?" view, which is the question a
+    /// strategy actually asks.
     pub async fn trigger_orders(&self) -> Vec<(String, TriggerOrderRequest)> {
-        self.state.lock().await.trigger_orders.clone()
+        self.state
+            .lock()
+            .await
+            .trigger_orders
+            .iter()
+            .filter(|(_, _, status, _)| *status == TriggerOrderStatus::Open)
+            .map(|(id, req, _, _)| (id.clone(), req.clone()))
+            .collect()
+    }
+
+    /// Every trigger order ever placed, including canceled ones.
+    pub async fn all_trigger_orders(&self) -> Vec<(String, TriggerOrderStatus)> {
+        self.state
+            .lock()
+            .await
+            .trigger_orders
+            .iter()
+            .map(|(id, _, status, _)| (id.clone(), *status))
+            .collect()
     }
 }

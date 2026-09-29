@@ -31,9 +31,12 @@ against the ports, and ship a `README.md`. Details in the
 
 ### What languages are supported?
 
-Rust, Python, and TypeScript today (complete SDKs). The **Go** SDK
-(`sdks/go`) is a generated-stub **scaffold** — its `Session` API is not yet
-implemented.
+Rust, Python, TypeScript, and Go. All four implement the same `Session`
+lifecycle (attach → heartbeat → reconcile → trade), the full `worker.v1`,
+`trading.v1` and `market.v1` surfaces, and the `TradingPort`/`MarketPort` seam.
+The Go SDK is additionally **dependency-free**: its `contract/` is a
+hand-written protobuf codec, so `go get` pulls in nothing and no code
+generation is required.
 
 ### How is the contract versioned / are breaking changes caught?
 
@@ -51,6 +54,18 @@ to mock. No credentials required.
 `ATTACHED → SYNCING → ACTIVE → KILL_SWITCH_TRIPPED`, plus `GRACEFUL_SHUTDOWN`
 on explicit stop. Orders before `ACTIVE` are rejected `SYNC_IN_PROGRESS`; lease
 expiry (3× heartbeat) trips the kill-switch. See [Architecture](architecture.md).
+
+### Why does my order get rejected with `SYNC_IN_PROGRESS`?
+
+The request carried a `session_id` but that session had not finished
+`ReconcileState`. This is deliberate: the host refuses to let a strategy trade
+on state it has not yet recovered. Call `reconcile_state()` /
+`reconcileState()` and wait for it to succeed, then trade. The SDKs also fail
+fast locally, so you normally see this before the round trip.
+
+If you are deliberately placing an operator-level order outside any session
+(for example from the CLI), leave `session_id` empty: an unscoped order is
+neither gated nor tracked by the kill-switch.
 
 ### How does the lease / kill-switch work?
 

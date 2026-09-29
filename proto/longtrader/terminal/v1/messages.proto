@@ -169,6 +169,39 @@ message FundingRate {
   string rate = 2;
   int64 next_funding_ts_ms = 3;
   string mark_price = 4;
+  // Venue that produced the rate; empty when the request named exactly one.
+  // Present because a single `GetFundingRates` call can span venues, and a
+  // cross-venue basis comparison is meaningless without attribution.
+  string venue = 5;
+  // Hours between settlements; 0 when unknown.
+  uint32 funding_interval_hours = 6;
+  // Absent semantics: empty string when the venue does not report it.
+  string open_interest = 7;
+  string volume_24h = 8;
+}
+
+// One historical funding settlement.
+message FundingRatePoint {
+  string rate = 1;
+  int64 funding_time_ms = 2;
+}
+
+// Venue-side conditional (trigger) order resting on the venue's own engine.
+message TriggerOrder {
+  string id = 1;
+  string client_order_id = 2;
+  string symbol = 3;
+  trading.v1.OrderSide side = 4;
+  string trigger_price = 5;
+  string qty = 6;
+  trading.v1.TriggerPriceType trigger_type = 7;
+  optional string order_price = 8;
+  OrderType order_type = 9;
+  bool reduce_only = 10;
+  trading.v1.TriggerOrderStatus status = 11;
+  google.protobuf.Timestamp created_at = 12;
+  optional string order_id = 13;
+  optional google.protobuf.Timestamp triggered_at = 14;
 }
 
 message Order {

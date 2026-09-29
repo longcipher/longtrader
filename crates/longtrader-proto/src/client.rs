@@ -18,7 +18,10 @@ use crate::{
         SERVICE_MARKET, SERVICE_RUNTIME, SERVICE_STRATEGY, SERVICE_TRADING, service_url,
         trim_base_url,
     },
-    proto::longtrader::terminal::v1 as proto,
+    proto::longtrader::{
+        account::v1 as account, common::v1 as common, market::v1 as umarket, ops::v1 as ops,
+        terminal::v1 as proto, trading::v1 as utrading,
+    },
     transport::TransportError,
 };
 
@@ -296,6 +299,12 @@ impl TerminalClient {
     }
 
     /// Place an order.
+    ///
+    /// `stop_price` carries the unified contract's `trigger_price` and
+    /// `reduce_only` its risk flag. Both are mapped rather than dropped:
+    /// omitting them silently turned a conditional order into a plain one and
+    /// a risk-reducing close into one that could open opposite exposure.
+    #[expect(clippy::too_many_arguments)]
     pub async fn place_order(
         &self,
         venue: &str,
@@ -304,28 +313,168 @@ impl TerminalClient {
         order_type: proto::OrderType,
         quantity: &str,
         price: Option<&str>,
+        stop_price: Option<&str>,
         take_profit: Option<&str>,
         stop_loss: Option<&str>,
         client_order_id: &str,
+        reduce_only: bool,
     ) -> Result<proto::Order, TerminalClientError> {
-        let req = proto::PlaceOrderRequest {
-            venue: venue.to_string(),
-            symbol: symbol.to_string(),
-            side: buffa::EnumValue::Known(side),
-            order_type: buffa::EnumValue::Known(order_type),
-            quantity: quantity.to_string(),
-            price: price.map(String::from),
-            take_profit: take_profit.map(String::from),
-            stop_loss: stop_loss.map(String::from),
-            client_order_id: client_order_id.to_string(),
-            ..Default::default()
-        };
+        let req = build_place_order_request(
+            venue,
+            symbol,
+            side,
+            order_type,
+            quantity,
+            price,
+            stop_price,
+            take_profit,
+            stop_loss,
+            client_order_id,
+            reduce_only,
+        );
         let resp: proto::PlaceOrderResponse =
             self.unary(SERVICE_TRADING, "PlaceOrder", req).await?;
         resp.order
             .as_option()
             .cloned()
             .ok_or_else(|| TerminalClientError::MissingField("order".to_string()))
+    }
+
+    /// Current funding rates for `symbols` (empty = every symbol).
+    pub async fn get_funding_rates(
+        &self,
+        venue: &str,
+        symbols: &[String],
+    ) -> Result<Vec<proto::FundingRate>, TerminalClientError> {
+        let req = proto::GetFundingRatesRequest {
+            venue: venue.to_string(),
+            symbols: symbols.to_vec(),
+            ..Default::default()
+        };
+        let resp: proto::GetFundingRatesResponse =
+            self.unary(SERVICE_MARKET, "GetFundingRates", req).await?;
+        Ok(resp.funding_rates)
+    }
+
+    /// Recent funding settlements, newest first.
+    pub async fn get_funding_rate_history(
+        &self,
+        venue: &str,
+        symbol: &str,
+        limit: u32,
+    ) -> Result<Vec<proto::FundingRatePoint>, TerminalClientError> {
+        let req = proto::GetFundingRateHistoryRequest {
+            venue: venue.to_string(),
+            symbol: symbol.to_string(),
+            limit,
+            ..Default::default()
+        };
+        let resp: proto::GetFundingRateHistoryResponse =
+            self.unary(SERVICE_MARKET, "GetFundingRateHistory", req).await?;
+        Ok(resp.points)
+    }
+
+    /// Place a venue-side conditional order that fires even if this process dies.
+    pub async fn create_trigger_order(
+        &self,
+        venue: &str,
+        order: proto::TriggerOrderRequest,
+    ) -> Result<proto::TriggerOrder, TerminalClientError> {
+        let req = proto::CreateTriggerOrderRequest {
+            venue: venue.to_string(),
+            order: order.into(),
+            ..Default::default()
+        };
+        let resp: proto::CreateTriggerOrderResponse =
+            self.unary(SERVICE_TRADING, "CreateTriggerOrder", req).await?;
+        resp.order
+            .as_option()
+            .cloned()
+            .ok_or_else(|| TerminalClientError::MissingField("order".to_string()))
+    }
+
+    /// Cancel a resting conditional order. Returns the updated order.
+    pub async fn cancel_trigger_order(
+        &self,
+        venue: &str,
+        order_id: &str,
+        symbol: &str,
+    ) -> Result<proto::TriggerOrder, TerminalClientError> {
+        let req = proto::CancelTriggerOrderRequest {
+            venue: venue.to_string(),
+            order_id: order_id.to_string(),
+            symbol: symbol.to_string(),
+            ..Default::default()
+        };
+        let resp: proto::CancelTriggerOrderResponse =
+            self.unary(SERVICE_TRADING, "CancelTriggerOrder", req).await?;
+        resp.order
+            .as_option()
+            .cloned()
+            .ok_or_else(|| TerminalClientError::MissingField("order".to_string()))
+    }
+
+    /// Resting conditional orders, optionally filtered by symbol.
+    pub async fn list_trigger_orders(
+        &self,
+        venue: &str,
+        symbols: &[String],
+    ) -> Result<Vec<proto::TriggerOrder>, TerminalClientError> {
+        let req = proto::ListTriggerOrdersRequest {
+            venue: venue.to_string(),
+            symbols: symbols.to_vec(),
+            ..Default::default()
+        };
+        let resp: proto::ListTriggerOrdersResponse =
+            self.unary(SERVICE_TRADING, "ListTriggerOrders", req).await?;
+        Ok(resp.orders)
+    }
+
+    /// Wallet ledger rows, newest first, optionally filtered.
+    pub async fn get_ledger_entries(
+        &self,
+        venue: &str,
+        currency: &str,
+        entry_type: &str,
+        limit: u32,
+    ) -> Result<Vec<account::LedgerEntry>, TerminalClientError> {
+        let req = proto::GetLedgerEntriesRequest {
+            venue: venue.to_string(),
+            currency: currency.to_string(),
+            r#type: entry_type.to_string(),
+            pagination: crate::proto::longtrader::common::v1::Pagination {
+                limit: u64::from(limit),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        };
+        let resp: proto::GetLedgerEntriesResponse =
+            self.unary(SERVICE_TRADING, "GetLedgerEntries", req).await?;
+        Ok(resp.entries)
+    }
+
+    /// Move `amount` of `asset` to `dest_label` on the same venue.
+    ///
+    /// `client_transfer_id` makes the call idempotent: a retry with the same
+    /// id returns the first receipt instead of moving funds twice.
+    pub async fn transfer(
+        &self,
+        venue: &str,
+        asset: &str,
+        amount: &str,
+        dest_label: &str,
+        client_transfer_id: &str,
+    ) -> Result<proto::TransferResponse, TerminalClientError> {
+        let req = proto::TransferRequest {
+            venue: venue.to_string(),
+            asset: asset.to_string(),
+            amount: amount.to_string(),
+            dest_label: dest_label.to_string(),
+            client_transfer_id: client_transfer_id.to_string(),
+            ..Default::default()
+        };
+        self.unary(SERVICE_TRADING, "Transfer", req).await
     }
 
     /// Cancel an open order.
@@ -598,5 +747,426 @@ impl TerminalClient {
         );
 
         Ok(Box::pin(stream))
+    }
+}
+
+/// Build a `PlaceOrderRequest` from its parts.
+///
+/// Extracted from [`TerminalClient::place_order`] so the field mapping can be
+/// asserted without a live venue — this is where a dropped field would
+/// otherwise only show up as wrong behaviour on a real account.
+#[expect(clippy::too_many_arguments)]
+pub fn build_place_order_request(
+    venue: &str,
+    symbol: &str,
+    side: proto::Side,
+    order_type: proto::OrderType,
+    quantity: &str,
+    price: Option<&str>,
+    stop_price: Option<&str>,
+    take_profit: Option<&str>,
+    stop_loss: Option<&str>,
+    client_order_id: &str,
+    reduce_only: bool,
+) -> proto::PlaceOrderRequest {
+    proto::PlaceOrderRequest {
+        venue: venue.to_string(),
+        symbol: symbol.to_string(),
+        side: buffa::EnumValue::Known(side),
+        order_type: buffa::EnumValue::Known(order_type),
+        quantity: quantity.to_string(),
+        price: price.map(String::from),
+        stop_price: stop_price.map(String::from),
+        take_profit: take_profit.map(String::from),
+        stop_loss: stop_loss.map(String::from),
+        client_order_id: client_order_id.to_string(),
+        reduce_only,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod place_order_tests {
+    use super::*;
+
+    fn base() -> (proto::Side, proto::OrderType) {
+        (proto::Side::Buy, proto::OrderType::Limit)
+    }
+
+    #[test]
+    fn maps_every_optional_field() {
+        let (side, order_type) = base();
+        let req = build_place_order_request(
+            "mock",
+            "BTC/USDT",
+            side,
+            order_type,
+            "1",
+            Some("95000"),
+            Some("94000"),
+            Some("96000"),
+            Some("93000"),
+            "coid-1",
+            true,
+        );
+        assert_eq!(req.venue, "mock");
+        assert_eq!(req.symbol, "BTC/USDT");
+        assert_eq!(req.quantity, "1");
+        assert_eq!(req.price.as_deref(), Some("95000"));
+        assert_eq!(req.stop_price.as_deref(), Some("94000"));
+        assert_eq!(req.take_profit.as_deref(), Some("96000"));
+        assert_eq!(req.stop_loss.as_deref(), Some("93000"));
+        assert_eq!(req.client_order_id, "coid-1");
+        assert!(req.reduce_only, "reduce_only must reach the venue");
+    }
+
+    #[test]
+    fn absent_optionals_stay_unset() {
+        let (side, order_type) = base();
+        let req = build_place_order_request(
+            "mock", "BTC/USDT", side, order_type, "1", None, None, None, None, "", false,
+        );
+        assert_eq!(req.price, None);
+        assert_eq!(req.stop_price, None);
+        assert!(!req.reduce_only);
+    }
+
+    #[test]
+    fn stop_price_is_carried_not_dropped() {
+        // Regression: `stop_price` was absent from the struct literal, so a
+        // conditional order reached the venue with no trigger at all.
+        let (side, order_type) = base();
+        let req = build_place_order_request(
+            "mock",
+            "BTC/USDT",
+            side,
+            order_type,
+            "1",
+            Some("95000"),
+            Some("94000"),
+            None,
+            None,
+            "coid",
+            false,
+        );
+        assert_eq!(req.stop_price.as_deref(), Some("94000"));
+    }
+
+    #[test]
+    fn request_survives_a_protobuf_round_trip() {
+        use buffa::Message;
+
+        let (side, order_type) = base();
+        let req = build_place_order_request(
+            "mock",
+            "BTC/USDT",
+            side,
+            order_type,
+            "1",
+            Some("95000"),
+            Some("94000"),
+            None,
+            None,
+            "coid",
+            true,
+        );
+        let bytes = req.encode_to_vec();
+        let back = proto::PlaceOrderRequest::decode_from_slice(&bytes).expect("decodes");
+        assert_eq!(back.stop_price.as_deref(), Some("94000"));
+        assert_eq!(back.price.as_deref(), Some("95000"));
+        assert!(back.reduce_only);
+    }
+}
+
+// ---- Unified surface: funding, conditional orders, wallet, venue ops ----
+//
+// These target the `longtrader.*.v1` services the `RemoteAdapter` speaks, as
+// opposed to the `terminal.v1` methods above. `longtrader.terminal.v1` keeps
+// decimals as strings (the desktop UI round-trips what it was sent); the
+// unified contract uses typed `common.v1.Decimal`, so these convert.
+
+/// `longtrader.ops.v1.VenueOpService` — the self-describing registry of
+/// exchange-specific operations.
+pub const SERVICE_VENUE_OPS: &str = "longtrader.ops.v1.VenueOpService";
+/// `longtrader.market.v1.MarketDataService` (unified).
+pub const SERVICE_UNIFIED_MARKET: &str = "longtrader.market.v1.MarketDataService";
+/// `longtrader.trading.v1.TradingService` (unified).
+pub const SERVICE_UNIFIED_TRADING: &str = "longtrader.trading.v1.TradingService";
+
+/// Build the `common.v1.Decimal` message the unified contract expects.
+///
+/// All three fields are populated: the host's decoder trusts the numeric pair
+/// when `raw_str` is empty, so writing only the string form arrives as zero.
+fn unified_decimal(v: rust_decimal::Decimal) -> common::Decimal {
+    longtrader_contract::ext::decimal_to_common(v)
+}
+
+fn unified_exchange_id(id: &common::ExchangeId) -> common::ExchangeId {
+    id.clone()
+}
+
+impl TerminalClient {
+    // ---- ops.v1 ----------------------------------------------------------
+
+    /// Names of the venue-specific operations `exchange_id` supports.
+    pub async fn list_venue_ops(
+        &self,
+        exchange_id: &common::ExchangeId,
+    ) -> Result<Vec<ops::OpDescriptor>, TerminalClientError> {
+        let req =
+            ops::ListVenueOpsRequest { exchange_id: exchange_id.id.clone(), ..Default::default() };
+        let resp: ops::ListVenueOpsResponse =
+            self.unary(SERVICE_VENUE_OPS, "ListVenueOps", req).await?;
+        Ok(resp.ops)
+    }
+
+    /// Full schema of one venue operation.
+    pub async fn describe_venue_op(
+        &self,
+        exchange_id: &common::ExchangeId,
+        op: &str,
+    ) -> Result<ops::OpDescriptor, TerminalClientError> {
+        let req = ops::DescribeVenueOpRequest {
+            exchange_id: exchange_id.id.clone(),
+            op: op.to_string(),
+            ..Default::default()
+        };
+        let resp: ops::DescribeVenueOpResponse =
+            self.unary(SERVICE_VENUE_OPS, "DescribeVenueOp", req).await?;
+        resp.op
+            .as_option()
+            .cloned()
+            .ok_or_else(|| TerminalClientError::MissingField("op".to_string()))
+    }
+
+    /// Invoke a venue operation with dynamically-typed parameters.
+    pub async fn invoke_venue_op(
+        &self,
+        exchange_id: &common::ExchangeId,
+        op: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, TerminalClientError> {
+        let req = ops::InvokeVenueOpRequest {
+            exchange_id: exchange_id.id.clone(),
+            op: op.to_string(),
+            params: json_to_struct(params)?.into(),
+            ..Default::default()
+        };
+        let resp: ops::InvokeVenueOpResponse =
+            self.unary(SERVICE_VENUE_OPS, "InvokeVenueOp", req).await?;
+        struct_to_json(
+            resp.result
+                .as_option()
+                .ok_or_else(|| TerminalClientError::MissingField("result".to_string()))?,
+        )
+    }
+
+    // ---- unified market: funding -----------------------------------------
+
+    /// Current funding rate for one perpetual contract.
+    ///
+    /// `Ok(None)` means the venue tracks no perps for the symbol, which is
+    /// distinct from the venue having no funding surface at all (an error).
+    pub async fn fetch_funding_rate(
+        &self,
+        exchange_id: &common::ExchangeId,
+        symbol: &str,
+    ) -> Result<Option<umarket::FundingRate>, TerminalClientError> {
+        let req = umarket::FetchFundingRateRequest {
+            exchange_id: unified_exchange_id(exchange_id).into(),
+            symbol: symbol.to_string(),
+            ..Default::default()
+        };
+        let resp: umarket::FetchFundingRateResponse =
+            self.unary(SERVICE_UNIFIED_MARKET, "FetchFundingRate", req).await?;
+        Ok(resp.funding_rate.as_option().cloned())
+    }
+
+    /// Recent funding settlements, newest first.
+    pub async fn fetch_funding_rate_history(
+        &self,
+        exchange_id: &common::ExchangeId,
+        symbol: &str,
+        limit: u32,
+    ) -> Result<Vec<umarket::FundingRatePoint>, TerminalClientError> {
+        let req = umarket::FetchFundingRateHistoryRequest {
+            exchange_id: unified_exchange_id(exchange_id).into(),
+            symbol: symbol.to_string(),
+            limit,
+            ..Default::default()
+        };
+        let resp: umarket::FetchFundingRateHistoryResponse =
+            self.unary(SERVICE_UNIFIED_MARKET, "FetchFundingRateHistory", req).await?;
+        Ok(resp.points)
+    }
+
+    // ---- unified trading: conditional orders -----------------------------
+
+    /// Place a venue-side conditional order that fires even if this process dies.
+    pub async fn create_trigger_order_unified(
+        &self,
+        exchange_id: &common::ExchangeId,
+        order: utrading::TriggerOrderRequest,
+    ) -> Result<utrading::TriggerOrder, TerminalClientError> {
+        let req = utrading::CreateTriggerOrderRequest {
+            exchange_id: unified_exchange_id(exchange_id).into(),
+            order: order.into(),
+            ..Default::default()
+        };
+        let resp: utrading::CreateTriggerOrderResponse =
+            self.unary(SERVICE_UNIFIED_TRADING, "CreateTriggerOrder", req).await?;
+        resp.order
+            .as_option()
+            .cloned()
+            .ok_or_else(|| TerminalClientError::MissingField("order".to_string()))
+    }
+
+    /// Cancel a resting conditional order. Returns the updated order.
+    pub async fn cancel_trigger_order_unified(
+        &self,
+        exchange_id: &common::ExchangeId,
+        order_id: &str,
+        symbol: &str,
+    ) -> Result<utrading::TriggerOrder, TerminalClientError> {
+        let req = utrading::CancelTriggerOrderRequest {
+            exchange_id: unified_exchange_id(exchange_id).into(),
+            order_id: order_id.to_string(),
+            symbol: symbol.to_string(),
+            ..Default::default()
+        };
+        let resp: utrading::CancelTriggerOrderResponse =
+            self.unary(SERVICE_UNIFIED_TRADING, "CancelTriggerOrder", req).await?;
+        resp.order
+            .as_option()
+            .cloned()
+            .ok_or_else(|| TerminalClientError::MissingField("order".to_string()))
+    }
+
+    /// Resting conditional orders, optionally filtered by symbol.
+    pub async fn list_trigger_orders_unified(
+        &self,
+        exchange_id: &common::ExchangeId,
+        symbols: &[String],
+    ) -> Result<Vec<utrading::TriggerOrder>, TerminalClientError> {
+        let req = utrading::ListTriggerOrdersRequest {
+            exchange_id: unified_exchange_id(exchange_id).into(),
+            symbols: symbols.to_vec(),
+            ..Default::default()
+        };
+        let resp: utrading::ListTriggerOrdersResponse =
+            self.unary(SERVICE_UNIFIED_TRADING, "ListTriggerOrders", req).await?;
+        Ok(resp.orders)
+    }
+
+    // ---- unified trading: wallet -----------------------------------------
+
+    /// Wallet ledger rows, newest first, optionally filtered.
+    pub async fn fetch_ledger_entries(
+        &self,
+        exchange_id: &common::ExchangeId,
+        currency: &str,
+        entry_type: &str,
+        limit: u32,
+    ) -> Result<Vec<account::LedgerEntry>, TerminalClientError> {
+        let req = utrading::FetchLedgerEntriesRequest {
+            exchange_id: unified_exchange_id(exchange_id).into(),
+            currency: currency.to_string(),
+            r#type: entry_type.to_string(),
+            pagination: common::Pagination { limit: u64::from(limit), ..Default::default() }.into(),
+            ..Default::default()
+        };
+        let resp: utrading::FetchLedgerEntriesResponse =
+            self.unary(SERVICE_UNIFIED_TRADING, "FetchLedgerEntries", req).await?;
+        Ok(resp.entries)
+    }
+
+    /// Move `amount` of `asset` to `dest_label` on the same venue.
+    ///
+    /// `client_transfer_id` makes the call idempotent.
+    pub async fn transfer_unified(
+        &self,
+        exchange_id: &common::ExchangeId,
+        asset: &str,
+        amount: rust_decimal::Decimal,
+        dest_label: &str,
+        client_transfer_id: &str,
+    ) -> Result<utrading::TransferResponse, TerminalClientError> {
+        let req = utrading::TransferRequest {
+            exchange_id: unified_exchange_id(exchange_id).into(),
+            asset: asset.to_string(),
+            amount: unified_decimal(amount).into(),
+            dest_label: dest_label.to_string(),
+            client_transfer_id: client_transfer_id.to_string(),
+            ..Default::default()
+        };
+        self.unary(SERVICE_UNIFIED_TRADING, "Transfer", req).await
+    }
+}
+
+/// Convert a JSON value into a `google.protobuf.Struct` for the ops wire.
+fn json_to_struct(
+    v: &serde_json::Value,
+) -> Result<buffa_types::google::protobuf::Struct, TerminalClientError> {
+    let json = serde_json::to_string(v)
+        .map_err(|e| TerminalClientError::Decode(format!("params not serializable: {e}")))?;
+    let out: buffa_types::google::protobuf::Struct = serde_json::from_str(&json)
+        .map_err(|e| TerminalClientError::Decode(format!("params not a Struct: {e}")))?;
+    Ok(out)
+}
+
+/// Convert a `google.protobuf.Struct` reply back into JSON.
+fn struct_to_json(
+    s: &buffa_types::google::protobuf::Struct,
+) -> Result<serde_json::Value, TerminalClientError> {
+    serde_json::to_value(s)
+        .map_err(|e| TerminalClientError::Decode(format!("result not convertible to JSON: {e}")))
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+
+    #[test]
+    fn unified_decimal_is_lossless_through_the_host_decoder() {
+        // The host decodes with `longtrader_contract::ext::common_to_decimal`,
+        // which trusts the numeric pair when `raw_str` is empty. The invariant
+        // that matters is therefore a lossless round trip, not that all three
+        // representations are written.
+        for value in [
+            rust_decimal::Decimal::new(125, 2),   // 1.25
+            rust_decimal::Decimal::new(1, 3),     // 0.001
+            rust_decimal::Decimal::new(90000, 0), // 90000
+            rust_decimal::Decimal::new(-5, 1),    // -0.5
+            rust_decimal::Decimal::new(0, 0),
+        ] {
+            let wire = unified_decimal(value);
+            let back = longtrader_contract::ext::common_to_decimal(&wire)
+                .map_err(|e| format!("{value} must decode: {e}"));
+            assert_eq!(back.expect("decodes"), value, "round trip must be lossless");
+        }
+    }
+
+    #[test]
+    fn unified_decimal_writes_the_numeric_pair() {
+        let d = unified_decimal(rust_decimal::Decimal::new(125, 2));
+        assert_eq!(d.unscaled, 125);
+        assert_eq!(d.scale, 2);
+    }
+
+    #[test]
+    fn json_struct_round_trip() {
+        let v = serde_json::json!({"asset": "USDT", "amount": "10", "nested": {"k": true}});
+        let s = json_to_struct(&v).expect("to struct");
+        let back = struct_to_json(&s).expect("to json");
+        assert_eq!(back["asset"], "USDT");
+        assert_eq!(back["amount"], "10");
+        assert_eq!(back["nested"]["k"], true);
+    }
+
+    #[test]
+    fn service_constants_match_the_contract() {
+        assert_eq!(SERVICE_VENUE_OPS, "longtrader.ops.v1.VenueOpService");
+        assert_eq!(SERVICE_UNIFIED_MARKET, "longtrader.market.v1.MarketDataService");
+        assert_eq!(SERVICE_UNIFIED_TRADING, "longtrader.trading.v1.TradingService");
     }
 }

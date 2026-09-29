@@ -279,9 +279,11 @@ impl TerminalClient {
         order_type: proto::OrderType,
         quantity: &str,
         price: Option<&str>,
+        stop_price: Option<&str>,
         take_profit: Option<&str>,
         stop_loss: Option<&str>,
         client_order_id: &str,
+        reduce_only: bool,
     ) -> Result<proto::Order, TerminalClientError> {
         let req = proto::PlaceOrderRequest {
             venue: venue.to_string(),
@@ -290,9 +292,11 @@ impl TerminalClient {
             order_type: buffa::EnumValue::Known(order_type),
             quantity: quantity.to_string(),
             price: price.map(String::from),
+            stop_price: stop_price.map(String::from),
             take_profit: take_profit.map(String::from),
             stop_loss: stop_loss.map(String::from),
             client_order_id: client_order_id.to_string(),
+            reduce_only,
             ..Default::default()
         };
         let resp: proto::PlaceOrderResponse =

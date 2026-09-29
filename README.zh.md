@@ -90,11 +90,11 @@ sdks/{python,typescript,go}/  # thin wrappers over generated stubs (contract/ses
 
 | 规范目录 | Rust | Python | TypeScript | Go |
 |---|---|---|---|---|
-| `contract/` | `crates/longtrader-contract` | `sdks/python/longtrader_sdk/proto/` | `sdks/typescript/src/gen/` | `sdks/go/gen/` |
+| `contract/` | `crates/longtrader-contract` | `sdks/python/longtrader_sdk/proto/` | `sdks/typescript/src/gen/` | `sdks/go/contract/`（手写编解码器）+ 可选的 `sdks/go/gen/` |
 | `session/` | `bin/longtrader-worker/src/session/` | `longtrader_sdk/session.py` | `src/session.ts` | `session/` |
 | `ports/` | `src/ports.rs` | `longtrader_sdk/ports.py` | `src/ports.ts` | `ports/` |
 | `adapters/` | `src/adapters/{remote,mock}.rs` | `session.py` 中的 Connect-over-httpx | `session.ts` 中的 Connect-over-undici | `session/` 中的 Connect-over-http |
-| `strategies/` | `src/strategies/` | `examples/grid_strategy.py` | `examples/grid_strategy.ts` | `strategies/` |
+| `strategies/` | `src/strategies/` | `examples/grid_strategy.py` | `examples/grid_strategy.ts` | `examples/grid_strategy.go` |
 | `examples/` | `examples/` / `docs/` | `sdks/python/examples/` | `sdks/typescript/examples/` | `sdks/go/examples/` |
 
 ---
@@ -111,7 +111,7 @@ sdks/{python,typescript,go}/  # thin wrappers over generated stubs (contract/ses
 | TypeScript | [`@longcipher/longtrader-sdk`](https://www.npmjs.com/package/@longcipher/longtrader-sdk) | [![npm](https://img.shields.io/npm/v/@longcipher/longtrader-sdk.svg)](https://www.npmjs.com/package/@longcipher/longtrader-sdk) |
 | Go | [`sdks/go`](https://pkg.go.dev/github.com/longcipher/longtrader/sdks/go) | [![Go Reference](https://pkg.go.dev/badge/github.com/longcipher/longtrader/sdks/go.svg)](https://pkg.go.dev/github.com/longcipher/longtrader/sdks/go) |
 
-> Go SDK 目前为生成桩代码的脚手架；`Session` API 现仅提供于 Rust、Python 与 TypeScript。详见 [sdks/go/README.md](sdks/go/README.md)。
+> Go SDK 提供了与其他语言一致的 `Session` 生命周期、完整的交易与行情接口，以及 `TradingPort`/`MarketPort` 抽象层，并使用手写的 protobuf 编解码器（零第三方依赖）。详见 [sdks/go/README.md](sdks/go/README.md)。
 
 ---
 

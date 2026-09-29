@@ -31,10 +31,38 @@ pub struct StrategyContext {
     pub gateway: Arc<dyn TradingGateway>,
     pub market: Arc<dyn MarketDataSource>,
     pub funding: Arc<dyn FundingRateSource>,
+    pub triggers: Arc<dyn TriggerOrderGateway>,
     pub ops: Arc<dyn VenueOpInvoker>,
     pub wallet: Arc<dyn WalletGateway>,
 }
 ```
+
+All six ports are implemented by every in-tree backend (`mock`, `api` /
+`RemoteAdapter`, `terminal` / `TerminalAdapter`), so any strategy can run
+against any of them. A backend that genuinely cannot serve one — a venue with
+no funding feed, say — returns `PortError::Unsupported`, which the control
+plane surfaces to a remote strategy as the Connect code `unimplemented`. Treat
+that as permanent: it is the answer "this venue has no such endpoint", not a
+transient failure, so retrying cannot help.
+
+Note that `PortError` distinguishes `NotFound` ("this venue has no funding for
+*this* contract") from `Unsupported` ("this venue has no funding at all"). The
+difference is actionable — one is a wrong instrument, the other a wrong
+backend — so do not collapse them.
+
+**Silent-default rule.** These ports exist because a plausible-looking wrong
+value is worse than an error. Concretely, an adapter must never:
+
+- default a missing or unparsable decimal to `0`;
+- default an `optional` the venue left unset to a zero measurement (an absent
+  `mark_price` means "unreported", not "mark is zero");
+- default an unknown enum discriminant to its first variant (defaulting a
+  conditional order's side to `Buy` would silently invert a stop);
+- infer an unsigned ledger row's sign from its magnitude — take the sign from
+  `direction`, so a withdrawal cannot read as a deposit;
+- report an unmodelled capability as an empty success. Empty and
+  "unavailable" are different answers, and a strategy will act on the
+  difference.
 
 ## 3. How `build_strategy` resolves `strategy.type`
 

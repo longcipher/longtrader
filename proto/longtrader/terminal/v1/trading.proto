@@ -4,6 +4,9 @@ package longtrader.terminal.v1;
 
 import "longtrader/terminal/v1/messages.proto";
 import "longtrader/common/v1/types.proto";
+import "longtrader/account/v1/account.proto";
+// Not transitive: this file references trading.v1 enums directly.
+import "longtrader/trading/v1/trading.proto";
 
 // Trading service: account / positions / orders.
 service TradingService {
@@ -18,6 +21,13 @@ service TradingService {
   rpc ClosePosition(ClosePositionRequest) returns (ClosePositionResponse);
   rpc CloseAllPositions(CloseAllPositionsRequest) returns (CloseAllPositionsResponse);
   rpc ModifyPosition(ModifyPositionRequest) returns (ModifyPositionResponse);
+  // Venue-side conditional orders (crash-safe stop backstop).
+  rpc CreateTriggerOrder(CreateTriggerOrderRequest) returns (CreateTriggerOrderResponse);
+  rpc CancelTriggerOrder(CancelTriggerOrderRequest) returns (CancelTriggerOrderResponse);
+  rpc ListTriggerOrders(ListTriggerOrdersRequest) returns (ListTriggerOrdersResponse);
+  // Wallet ledger and internal transfers.
+  rpc GetLedgerEntries(GetLedgerEntriesRequest) returns (GetLedgerEntriesResponse);
+  rpc Transfer(TransferRequest) returns (TransferResponse);
 }
 
 message GetAccountRequest {
@@ -133,4 +143,74 @@ message ModifyPositionRequest {
 
 message ModifyPositionResponse {
   Position position = 1;
+}
+
+message CreateTriggerOrderRequest {
+  string venue = 1;
+  TriggerOrderRequest order = 2;
+}
+
+// Mirrors the venue-facing shape: decimals stay strings, as elsewhere in this
+// package, so the terminal UI can round-trip exactly what it was sent.
+message TriggerOrderRequest {
+  string client_order_id = 1;
+  string symbol = 2;
+  trading.v1.OrderSide side = 3;
+  string trigger_price = 4;             // string decimal
+  string qty = 5;                       // string decimal
+  bool reduce_only = 6;
+  trading.v1.TriggerPriceType trigger_type = 7;
+  optional string order_price = 8;      // string decimal; unset = market on trigger
+  OrderType order_type = 9;
+}
+
+message CreateTriggerOrderResponse {
+  TriggerOrder order = 1;
+}
+
+message CancelTriggerOrderRequest {
+  string venue = 1;
+  string order_id = 2;
+  string symbol = 3;
+}
+
+message CancelTriggerOrderResponse {
+  TriggerOrder order = 1;
+}
+
+message ListTriggerOrdersRequest {
+  string venue = 1;
+  repeated string symbols = 2;          // empty = every symbol
+}
+
+message ListTriggerOrdersResponse {
+  repeated TriggerOrder orders = 1;
+}
+
+message GetLedgerEntriesRequest {
+  string venue = 1;
+  string currency = 2;                  // empty = every currency
+  string type = 3;                      // empty = every type
+  common.v1.Pagination pagination = 4;
+}
+
+message GetLedgerEntriesResponse {
+  // Newest first.
+  repeated account.v1.LedgerEntry entries = 1;
+  common.v1.Page page = 2;
+}
+
+message TransferRequest {
+  string venue = 1;
+  string asset = 2;
+  string amount = 3;                    // string decimal
+  // Destination account label (e.g. "spot", "futures", or a sub-account name).
+  string dest_label = 4;
+  // Optional idempotency key; supply it whenever the caller can retry.
+  string client_transfer_id = 5;
+}
+
+message TransferResponse {
+  string transfer_id = 1;               // empty when the venue reports none
+  optional account.v1.LedgerEntry entry = 2;
 }

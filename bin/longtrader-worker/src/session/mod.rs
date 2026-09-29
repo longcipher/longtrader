@@ -61,7 +61,10 @@ pub use state::SessionState;
 use tokio::sync::{Mutex, broadcast};
 
 use crate::{
-    ports::{MarketDataSource, TradingGateway},
+    ports::{
+        FundingRateSource, MarketDataSource, TradingGateway, TriggerOrderGateway, VenueOpInvoker,
+        WalletGateway,
+    },
     proto::{common, trading, worker},
 };
 
@@ -135,6 +138,7 @@ fn nanos_from_ms_rem(ms: i64) -> i32 {
 
 /// One live session: state, lease bookkeeping, kill-switch policy, tracked
 /// orders, and the replayable event log.
+#[derive(Debug)]
 pub struct SessionHandle {
     pub id: String,
     state: AtomicU8,
@@ -145,6 +149,10 @@ pub struct SessionHandle {
     ring: Mutex<VecDeque<Arc<worker::StrategyEvent>>>,
     tracked_coids: Mutex<HashSet<String>>,
     strategy: Mutex<Option<StrategyInfo>>,
+    /// Session-scoped order submissions, counted independently of whether a
+    /// strategy was registered so attribution survives `RegisterStrategy`
+    /// ordering. Surfaced through `StrategyStatus.orders_submitted`.
+    orders_submitted: AtomicU64,
     seq: AtomicU64,
     /// Last reconciled snapshot watermark (`snapshot_sequence`) for recovery.
     snapshot_seq: AtomicU64,
@@ -177,7 +185,10 @@ impl SessionHandle {
     }
 
     pub async fn strategy_info(&self) -> Option<StrategyInfo> {
-        self.strategy.lock().await.clone()
+        let mut info = self.strategy.lock().await.clone()?;
+        // The handle-level counter is authoritative for order submissions.
+        info.orders_submitted = self.orders_submitted.load(Ordering::Acquire);
+        Some(info)
     }
 
     async fn set_strategy(&self, info: StrategyInfo) {
@@ -233,10 +244,14 @@ impl SessionHandle {
         self.tracked_coids.lock().await.clone()
     }
 
+    /// Session-scoped orders submitted through the gate, counted regardless of
+    /// whether `RegisterStrategy` ran first.
+    pub fn orders_submitted_count(&self) -> u64 {
+        self.orders_submitted.load(Ordering::Acquire)
+    }
+
     pub async fn record_order_submitted(&self) {
-        if let Some(info) = &mut *self.strategy.lock().await {
-            info.orders_submitted += 1;
-        }
+        self.orders_submitted.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -250,6 +265,11 @@ pub enum ManagerError {
     Unauthenticated,
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    /// A session-scoped call was made from a state that forbids it. Orders
+    /// submitted before the session reaches ACTIVE carry the stable machine
+    /// reason `SYNC_IN_PROGRESS` mandated by `worker.v1`.
+    #[error("SYNC_IN_PROGRESS: session {session_id} is {state:?}, not ACTIVE")]
+    SyncInProgress { session_id: String, state: Option<SessionState> },
     #[error("port error: {0}")]
     Port(#[from] crate::ports::PortError),
 }
@@ -265,6 +285,58 @@ pub struct SessionManager {
     self_weak: Mutex<Option<Weak<Self>>>,
     /// Optional L3 COD provider (venue native cancel-on-disconnect).
     pub cod_provider: Option<Arc<dyn CodProvider>>,
+    /// Optional venue capabilities (funding / triggers / wallet / ops).
+    capabilities: Capabilities,
+}
+
+/// Optional venue capabilities a backend may expose.
+///
+/// Each field is an `Option` on purpose: a backend that genuinely lacks a
+/// capability must answer `unimplemented` — a clear, non-retryable signal —
+/// rather than an empty success that a strategy would read as "none exist".
+#[derive(Clone, Default)]
+pub struct Capabilities {
+    /// Perpetual funding rates.
+    pub funding: Option<Arc<dyn FundingRateSource>>,
+    /// Venue-side conditional orders (crash-safe stop backstops).
+    pub triggers: Option<Arc<dyn TriggerOrderGateway>>,
+    /// Wallet ledger and internal transfers.
+    pub wallet: Option<Arc<dyn WalletGateway>>,
+    /// Self-describing venue-specific operations.
+    pub ops: Option<Arc<dyn VenueOpInvoker>>,
+}
+
+impl Capabilities {
+    /// Build a complete set from a single backend that implements all four.
+    #[must_use]
+    pub fn all<T>(backend: Arc<T>) -> Self
+    where
+        T: FundingRateSource
+            + TriggerOrderGateway
+            + WalletGateway
+            + VenueOpInvoker
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            funding: Some(backend.clone()),
+            triggers: Some(backend.clone()),
+            wallet: Some(backend.clone()),
+            ops: Some(backend),
+        }
+    }
+}
+
+impl std::fmt::Debug for Capabilities {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Capabilities")
+            .field("funding", &self.funding.is_some())
+            .field("triggers", &self.triggers.is_some())
+            .field("wallet", &self.wallet.is_some())
+            .field("ops", &self.ops.is_some())
+            .finish()
+    }
 }
 
 impl SessionManager {
@@ -283,7 +355,17 @@ impl SessionManager {
             watchdog_started: AtomicBool::new(false),
             self_weak: Mutex::new(None),
             cod_provider: Some(Arc::new(NullCodProvider)),
+            capabilities: Capabilities::default(),
         }
+    }
+
+    /// Attach the backend's venue capabilities. Without this the proxies
+    /// answer `unimplemented` for those RPCs, which is the honest answer for a
+    /// backend that has not declared them.
+    #[must_use]
+    pub fn with_capabilities(mut self, capabilities: Capabilities) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 
     pub fn with_cod_provider(mut self, provider: Arc<dyn CodProvider>) -> Self {
@@ -310,6 +392,12 @@ impl SessionManager {
     /// Call once after wrapping the manager in `Arc`.
     pub async fn install_self(self: &Arc<Self>) {
         *self.self_weak.lock().await = Some(Arc::downgrade(self));
+    }
+
+    /// The backend's optional venue capabilities, for the proxies to consult.
+    #[must_use]
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
     }
 
     pub fn gateway(&self) -> Arc<dyn TradingGateway> {
@@ -404,6 +492,7 @@ impl SessionManager {
             ring: Mutex::new(VecDeque::new()),
             tracked_coids: Mutex::new(HashSet::new()),
             strategy: Mutex::new(None),
+            orders_submitted: AtomicU64::new(0),
             seq: AtomicU64::new(0),
             snapshot_seq: AtomicU64::new(0),
         });
@@ -454,6 +543,89 @@ impl SessionManager {
     pub async fn snapshot_sequence(&self, session_id: &str) -> Result<u64, ManagerError> {
         let handle = self.get(session_id).await?;
         Ok(handle.snapshot_seq.load(Ordering::Acquire))
+    }
+
+    /// Gate a session-scoped order submission.
+    ///
+    /// This is the enforcement point behind `worker.proto`'s
+    /// "Orders submitted before ACTIVE are rejected with reason
+    /// SYNC_IN_PROGRESS". A session may only trade once it has reconciled, so
+    /// it cannot act on stale state after a reconnect or a restart.
+    ///
+    /// `Ok(None)` means the caller passed an empty `session_id`: an unscoped
+    /// operator action (the CLI) that is neither gated nor tracked. `Ok(Some)`
+    /// carries the handle that callers must pass to
+    /// [`Self::record_submitted_orders`].
+    pub async fn authorize_order_submission(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<Arc<SessionHandle>>, ManagerError> {
+        if session_id.is_empty() {
+            return Ok(None);
+        }
+        let handle = self.get(session_id).await?;
+        // A corrupt state byte is never treated as "active" — fail closed.
+        if handle.state() != Some(SessionState::Active) {
+            return Err(ManagerError::SyncInProgress {
+                session_id: session_id.to_string(),
+                state: handle.state(),
+            });
+        }
+        Ok(Some(handle))
+    }
+
+    /// Attribute freshly submitted orders to a session so that
+    /// `KillSwitchPolicy.SCOPE_SESSION_ORDERS` and
+    /// `StopStrategy.cancel_open_orders` cancel exactly these orders.
+    ///
+    /// Orders with an empty venue-assigned id are skipped rather than tracked
+    /// as an empty string, which would otherwise cancel an unrelated order.
+    pub async fn record_submitted_orders(&self, handle: &SessionHandle, orders: &[trading::Order]) {
+        let mut tracked = handle.tracked_coids.lock().await;
+        for order in orders {
+            if order.id.is_empty() {
+                continue;
+            }
+            tracked.insert(order.id.clone());
+        }
+        drop(tracked);
+        if !orders.is_empty() {
+            handle.orders_submitted.fetch_add(orders.len() as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// Stop a session: optionally cancel its tracked orders, then transition
+    /// to `GRACEFUL_SHUTDOWN`. Returns the state actually reached.
+    ///
+    /// Shared by the `StopStrategy` RPC and by embedders; the previous
+    /// inline copy in the service layer is replaced by this.
+    pub async fn stop_session(
+        &self,
+        session_id: &str,
+        cancel_open_orders: bool,
+    ) -> Result<Option<SessionState>, ManagerError> {
+        let handle = self.get(session_id).await?;
+        if cancel_open_orders {
+            for coid in handle.tracked_orders().await {
+                let req = trading::CancelOrderRequest {
+                    exchange_id: buffa::MessageField::some(self.default_exchange.clone()),
+                    order_id: coid.clone(),
+                    symbol: String::new(),
+                    ..Default::default()
+                };
+                if let Err(err) = self.gateway.cancel_order(req).await {
+                    tracing::warn!(coid = %coid, error = %err, "stop-strategy cancel failed");
+                }
+            }
+        }
+        let Some(prev) = handle.swap_state(SessionState::GracefulShutdown) else {
+            return Err(ManagerError::InvalidArgument(format!(
+                "session {session_id} has an invalid state"
+            )));
+        };
+        self.publish_state_change(&handle, prev, SessionState::GracefulShutdown, "stop requested")
+            .await;
+        Ok(handle.state())
     }
 
     /// Record a strategy log event into the ring/broadcast bus.
@@ -916,5 +1088,213 @@ mod tests {
         let after_first: u64 = resume.parse().expect("test setup");
         let rest = handle.replay_after(after_first).await;
         assert_eq!(rest.len(), 1);
+    }
+
+    // ---- Order-submission gate + order attribution ------------------------
+    //
+    // `worker.proto` states orders submitted before ACTIVE are rejected with
+    // reason SYNC_IN_PROGRESS, and that `KillSwitchPolicy.SCOPE_SESSION_ORDERS`
+    // cancels the session's own orders. Both only hold if the host (a) gates
+    // session-scoped submissions and (b) records the resulting order ids.
+    // `trading.v1.CreateOrderRequest.session_id` is what makes both possible.
+
+    fn limit_order_req(manager: &SessionManager, coid: &str) -> trading::CreateOrderRequest {
+        trading::CreateOrderRequest {
+            exchange_id: buffa::MessageField::some(manager.default_exchange().clone()),
+            order: buffa::MessageField::some(trading::OrderRequest {
+                client_order_id: coid.to_string(),
+                symbol: "BTC/USDT".to_string(),
+                r#type: buffa::EnumValue::Known(trading::OrderType::Limit),
+                side: buffa::EnumValue::Known(trading::OrderSide::Buy),
+                amount: buffa::MessageField::some(longtrader_contract::ext::decimal_to_common(
+                    rust_decimal_macros::dec!(1),
+                )),
+                price: buffa::MessageField::some(longtrader_contract::ext::decimal_to_common(
+                    rust_decimal_macros::dec!(99),
+                )),
+                time_in_force: buffa::EnumValue::Known(trading::TimeInForce::Gtc),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unattached_session_cannot_submit_orders() {
+        let manager = test_manager(rust_decimal_macros::dec!(100));
+        let err = manager
+            .authorize_order_submission("no-such-session")
+            .await
+            .expect_err("unknown session must be rejected");
+        assert!(matches!(err, ManagerError::NotFound(_)), "got {err:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pre_active_session_cannot_submit_orders() {
+        let manager = test_manager(rust_decimal_macros::dec!(100));
+        let (session_id, _) = manager.attach("t", None).await.expect("attach");
+
+        // ATTACHED: not yet reconciled.
+        let err = manager
+            .authorize_order_submission(&session_id)
+            .await
+            .expect_err("ATTACHED session must be gated");
+        assert!(matches!(err, ManagerError::SyncInProgress { .. }), "got {err:?}");
+
+        // SYNCING: snapshot in flight, still not ACTIVE.
+        manager.begin_reconcile(&session_id).await.expect("test setup");
+        let err = manager
+            .authorize_order_submission(&session_id)
+            .await
+            .expect_err("SYNCING session must be gated");
+        assert!(matches!(err, ManagerError::SyncInProgress { .. }), "got {err:?}");
+
+        // ACTIVE: admitted.
+        manager.complete_reconcile(&session_id, 0).await.expect("test setup");
+        assert!(
+            manager
+                .authorize_order_submission(&session_id)
+                .await
+                .expect("ACTIVE session")
+                .is_some(),
+            "an ACTIVE session must be authorized"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_session_cannot_submit_orders() {
+        let manager = test_manager(rust_decimal_macros::dec!(100));
+        let (session_id, _) = manager.attach("t", None).await.expect("attach");
+        manager.begin_reconcile(&session_id).await.expect("test setup");
+        manager.complete_reconcile(&session_id, 0).await.expect("test setup");
+        manager.stop_session(&session_id, false).await.expect("stop");
+
+        let err = manager
+            .authorize_order_submission(&session_id)
+            .await
+            .expect_err("a stopped session must be gated");
+        assert!(matches!(err, ManagerError::SyncInProgress { .. }), "got {err:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unscoped_submission_is_not_gated_or_tracked() {
+        let manager = test_manager(rust_decimal_macros::dec!(100));
+        // Empty session_id = operator/unscoped call (the CLI). It must pass the
+        // gate without a session and be recorded nowhere.
+        assert!(
+            manager.authorize_order_submission("").await.expect("unscoped").is_none(),
+            "unscoped submissions carry no session handle"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn session_submitted_orders_are_tracked_for_kill_switch() {
+        let manager = test_manager(rust_decimal_macros::dec!(100));
+        let (session_id, _) = manager.attach("t", None).await.expect("attach");
+        manager.begin_reconcile(&session_id).await.expect("test setup");
+        manager.complete_reconcile(&session_id, 0).await.expect("test setup");
+
+        let handle = manager
+            .authorize_order_submission(&session_id)
+            .await
+            .expect("ACTIVE session")
+            .expect("session handle");
+        let order = manager
+            .gateway()
+            .create_order(limit_order_req(&manager, "grid-1"))
+            .await
+            .expect("order placed");
+        manager.record_submitted_orders(&handle, std::slice::from_ref(&order)).await;
+
+        // This is the production path that used to be test-only, which is why
+        // SCOPE_SESSION_ORDERS was a no-op.
+        assert_eq!(
+            handle.tracked_orders().await,
+            HashSet::from([order.id.clone()]),
+            "the submitted order id must be recorded against the session"
+        );
+        assert_eq!(
+            handle.orders_submitted_count(),
+            1,
+            "the session must count the order even before RegisterStrategy runs"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn kill_switch_cancels_orders_submitted_through_the_gate() {
+        let manager = test_manager(rust_decimal_macros::dec!(100));
+        let (session_id, _) =
+            manager.attach("t", Some(kill_switch_policy(600))).await.expect("attach");
+        manager.begin_reconcile(&session_id).await.expect("test setup");
+        manager.complete_reconcile(&session_id, 0).await.expect("test setup");
+
+        // Submit through the real gate + attribution path — no test-side
+        // `track_order` call, unlike the pre-existing lease test.
+        let handle = manager
+            .authorize_order_submission(&session_id)
+            .await
+            .expect("ACTIVE session")
+            .expect("session handle");
+        let order = manager
+            .gateway()
+            .create_order(limit_order_req(&manager, "grid-gated"))
+            .await
+            .expect("order placed");
+        manager.record_submitted_orders(&handle, std::slice::from_ref(&order)).await;
+
+        // Lease lapses; the watchdog trips the kill-switch.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(manager.check_lease_expiry(&session_id).await.expect("test setup"));
+
+        let open = manager
+            .gateway()
+            .fetch_open_orders(trading::FetchOpenOrdersRequest {
+                exchange_id: buffa::MessageField::some(manager.default_exchange().clone()),
+                symbol: String::new(),
+                ..Default::default()
+            })
+            .await
+            .expect("test setup");
+        assert!(
+            !open.iter().any(|o| o.id == order.id),
+            "kill-switch must cancel orders submitted through the session gate"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_strategy_cancels_tracked_orders() {
+        let manager = test_manager(rust_decimal_macros::dec!(100));
+        let (session_id, _) = manager.attach("t", None).await.expect("attach");
+        manager.begin_reconcile(&session_id).await.expect("test setup");
+        manager.complete_reconcile(&session_id, 0).await.expect("test setup");
+
+        let handle = manager
+            .authorize_order_submission(&session_id)
+            .await
+            .expect("ACTIVE session")
+            .expect("session handle");
+        let order = manager
+            .gateway()
+            .create_order(limit_order_req(&manager, "grid-stop"))
+            .await
+            .expect("order placed");
+        manager.record_submitted_orders(&handle, std::slice::from_ref(&order)).await;
+
+        let final_state = manager.stop_session(&session_id, true).await.expect("stop");
+        assert_eq!(final_state, Some(SessionState::GracefulShutdown));
+
+        let open = manager
+            .gateway()
+            .fetch_open_orders(trading::FetchOpenOrdersRequest {
+                exchange_id: buffa::MessageField::some(manager.default_exchange().clone()),
+                symbol: String::new(),
+                ..Default::default()
+            })
+            .await
+            .expect("test setup");
+        assert!(
+            !open.iter().any(|o| o.id == order.id),
+            "StopStrategy(cancel_open_orders) must cancel the session's orders"
+        );
     }
 }

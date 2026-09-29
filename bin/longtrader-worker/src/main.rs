@@ -7,8 +7,11 @@ use color_eyre::{Result, eyre::bail};
 use longtrader_worker::{
     adapters::{MockAdapter, RemoteAdapter, TerminalAdapter},
     config::Config,
-    ports::{FundingRateSource, MarketDataSource, TradingGateway, VenueOpInvoker, WalletGateway},
-    session::SessionManager,
+    ports::{
+        FundingRateSource, MarketDataSource, TradingGateway, TriggerOrderGateway, VenueOpInvoker,
+        WalletGateway,
+    },
+    session::{Capabilities, SessionManager},
     strategies::{self, StrategyContext},
 };
 
@@ -61,6 +64,7 @@ async fn main() -> Result<()> {
                 mock.clone(),
                 mock.clone(),
                 mock.clone(),
+                mock.clone(),
                 &config,
             )
             .await
@@ -97,57 +101,75 @@ async fn main() -> Result<()> {
 
 /// Start the optional control plane and then run the strategy loop.
 async fn start_with(adapter: Arc<RemoteAdapter>, config: &Config) -> Result<()> {
-    validate_strategy_capabilities(&config.strategy.strategy_type, true)?;
     let gateway: Arc<dyn TradingGateway> = adapter.clone();
     let market: Arc<dyn MarketDataSource> = adapter.clone();
     let funding: Arc<dyn FundingRateSource> = adapter.clone();
+    let triggers: Arc<dyn TriggerOrderGateway> = adapter.clone();
     let ops: Arc<dyn VenueOpInvoker> = adapter.clone();
     let wallet: Arc<dyn WalletGateway> = adapter.clone();
-    start_with_ports(gateway, market, funding, ops, wallet, config).await
+    start_with_ports(gateway, market, funding, triggers, ops, wallet, config).await
 }
 
 /// Terminal variant of [`start_with`] (same control plane, terminal ports).
 async fn start_with_terminal(adapter: Arc<TerminalAdapter>, config: &Config) -> Result<()> {
-    validate_strategy_capabilities(&config.strategy.strategy_type, true)?;
     let gateway: Arc<dyn TradingGateway> = adapter.clone();
     let market: Arc<dyn MarketDataSource> = adapter.clone();
     let funding: Arc<dyn FundingRateSource> = adapter.clone();
+    let triggers: Arc<dyn TriggerOrderGateway> = adapter.clone();
     let ops: Arc<dyn VenueOpInvoker> = adapter.clone();
     let wallet: Arc<dyn WalletGateway> = adapter.clone();
-    start_with_ports(gateway, market, funding, ops, wallet, config).await
+    start_with_ports(gateway, market, funding, triggers, ops, wallet, config).await
 }
 
-/// Capability early-fail: strategies needing venue-native caps cannot run on
-/// the open `RemoteAdapter` (returns `Unsupported`); fail at startup, not in tick loop.
-fn validate_strategy_capabilities(strategy: &str, is_remote: bool) -> Result<()> {
-    if !is_remote {
-        return Ok(());
+/// Report the capabilities the selected backend will actually serve.
+///
+/// A strategy needing a capability the backend cannot serve is worth flagging
+/// at startup rather than at the first tick. Every in-tree backend implements
+/// all four ports, so this is normally informational; it stays as a guard for a
+/// future backend that does not.
+fn report_capabilities(strategy: &str, caps: &Capabilities) {
+    const NEEDS: &[(&str, &str)] = &[
+        ("xfunding_lite", "funding rates"),
+        ("premium_monitor", "funding rates"),
+        ("autoborrow", "venue ops"),
+        ("convert", "venue ops"),
+        ("deposit_transfer", "wallet"),
+        ("balance_align", "wallet"),
+    ];
+    for (name, capability) in NEEDS {
+        if *name != strategy {
+            continue;
+        }
+        let available = match *capability {
+            "funding rates" => caps.funding.is_some(),
+            "venue ops" => caps.ops.is_some(),
+            "wallet" => caps.wallet.is_some(),
+            other => {
+                tracing::error!(
+                    capability = other,
+                    "unknown capability name in report_capabilities"
+                );
+                false
+            }
+        };
+        if available {
+            tracing::info!(strategy = %strategy, capability = %capability, "capability available");
+        } else {
+            tracing::warn!(
+                strategy = %strategy,
+                capability = %capability,
+                "backend does not serve this capability; affected RPCs will answer unimplemented"
+            );
+        }
     }
-    const NEEDS_FUNDING: &[&str] = &["xfunding_lite", "premium_monitor"];
-    const NEEDS_OPS: &[&str] = &["autoborrow", "convert"];
-    const NEEDS_WALLET: &[&str] = &["deposit_transfer", "balance_align"];
-    if NEEDS_FUNDING.contains(&strategy) {
-        bail!(
-            "strategy '{strategy}' needs FundingRateSource; open backend returns Unsupported — use mock or a venue daemon"
-        );
-    }
-    if NEEDS_OPS.contains(&strategy) {
-        bail!(
-            "strategy '{strategy}' needs VenueOpInvoker; open backend returns Unsupported — use mock or a venue daemon"
-        );
-    }
-    if NEEDS_WALLET.contains(&strategy) {
-        bail!(
-            "strategy '{strategy}' needs WalletGateway; open backend returns Unsupported — use mock or a venue daemon"
-        );
-    }
-    Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_with_ports(
     gateway: Arc<dyn TradingGateway>,
     market: Arc<dyn MarketDataSource>,
     funding: Arc<dyn FundingRateSource>,
+    triggers: Arc<dyn TriggerOrderGateway>,
     ops: Arc<dyn VenueOpInvoker>,
     wallet: Arc<dyn WalletGateway>,
     config: &Config,
@@ -156,11 +178,21 @@ async fn start_with_ports(
         config: config.clone(),
         gateway: gateway.clone(),
         market: market.clone(),
-        funding,
-        ops,
-        wallet,
+        funding: funding.clone(),
+        ops: ops.clone(),
+        wallet: wallet.clone(),
     };
     let strategy = strategies::build_strategy(&ctx)?;
+
+    // Reported before the control plane branch: a capability problem should be
+    // visible at startup whether or not a remote control plane is configured.
+    let capabilities = Capabilities {
+        funding: Some(funding.clone()),
+        triggers: Some(triggers.clone()),
+        wallet: Some(wallet.clone()),
+        ops: Some(ops.clone()),
+    };
+    report_capabilities(&config.strategy.strategy_type, &capabilities);
 
     if let Some(bind) = &config.listen_endpoint {
         let token = config.api_token();
@@ -173,7 +205,8 @@ async fn start_with_ports(
             exchange_id,
             gateway,
             market,
-        );
+        )
+        .with_capabilities(capabilities);
         let manager = Arc::new(manager);
         manager.install_self().await;
         let bind = bind.clone();

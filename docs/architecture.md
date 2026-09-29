@@ -19,7 +19,7 @@ sdks/{python,typescript,go}/  # thin wrappers over generated stubs
 | **Crates** | `longtrader-contract` (generated types), `longtrader-proto`, `longtrader-cli`, `longtrader-worker`. |
 | **Worker** (`bin/longtrader-worker`) | Strategy host: ports, session control plane, adapters, envelope. |
 | **CLI** (`bin/longtrader-cli`, binary `longtrader`) | Terminal API client (health/venues/symbols/candles/book/…/buy/sell/cancel/close/stream). |
-| **SDKs** (`sdks/python`, `sdks/typescript`, `sdks/go`) | Thin, generated-stub wrappers; Python & TypeScript are complete, Go is a scaffold. |
+| **SDKs** (`sdks/python`, `sdks/typescript`, `sdks/go`) | Thin contract wrappers; all four languages implement the same session lifecycle, trading/market surfaces and ports. Go is stdlib-only (hand-written protobuf codec). |
 
 ## Hexagonal seam: ports & adapters
 
@@ -90,6 +90,24 @@ stateDiagram-v2
   - `ALL_ORDERS` — cancel every open order of the bound account(s).
   - `NONE` — log only, no cancellations.
 
+### Order attribution
+
+`SESSION_ORDERS` and `StopStrategy.cancel_open_orders` can only cancel what the
+host knows the session placed, so order submission carries the caller's session:
+
+- `trading.v1.CreateOrderRequest.session_id` / `CreateOrdersRequest.session_id`
+  name the session as issued by `worker.v1.AttachSession`.
+- **Non-empty** — the host gates the submission on the session lifecycle and
+  records the resulting order id. A submission before `ACTIVE` is rejected with
+  `failed_precondition` and the reason `SYNC_IN_PROGRESS`, so a strategy can
+  never act on stale state after a reconnect.
+- **Empty** — an unscoped operator action (the CLI). It is neither gated nor
+  tracked, which is what keeps `longtrader buy` working.
+
+The gate lives in `TradingProxy` (`session/proxy.rs`) and is enforced host-side;
+the SDKs additionally fail fast locally, so a misbehaving strategy does not pay
+a round trip to learn it is not reconciled.
+
 ## Connect envelope framing
 
 Server-streaming RPCs use `Content-Type: application/connect+proto` and a
@@ -105,11 +123,11 @@ flags 0x00 = message (proto), 0x02 = end-of-stream (JSON)
 
 | Canonical dir | Rust | Python | TypeScript | Go |
 |---|---|---|---|---|
-| `contract/` | `crates/longtrader-contract` | `sdks/python/longtrader_sdk/proto/` | `sdks/typescript/src/gen/` | `sdks/go/gen/` |
+| `contract/` | `crates/longtrader-contract` | `sdks/python/longtrader_sdk/proto/` | `sdks/typescript/src/gen/` | `sdks/go/contract/` (hand-written codec) + optional `sdks/go/gen/` |
 | `session/` | `bin/longtrader-worker/src/session/` | `longtrader_sdk/session.py` | `src/session.ts` | `session/` |
 | `ports/` | `src/ports.rs` | `longtrader_sdk/ports.py` | `src/ports.ts` | `ports/` |
 | `adapters/` | `src/adapters/{remote,mock}.rs` | Connect-over-httpx in `session.py` | Connect-over-undici in `session.ts` | Connect-over-http in `session/` |
-| `strategies/` | `src/strategies/` | `examples/grid_strategy.py` | `examples/grid_strategy.ts` | `strategies/` |
+| `strategies/` | `src/strategies/` | `examples/grid_strategy.py` | `examples/grid_strategy.ts` | `examples/grid_strategy.go` |
 | `examples/` | `examples/` / `docs/` | `sdks/python/examples/` | `sdks/typescript/examples/` | `sdks/go/examples/` |
 
 > Note: Python/TypeScript bury real code under `longtrader_sdk/` and `src/`

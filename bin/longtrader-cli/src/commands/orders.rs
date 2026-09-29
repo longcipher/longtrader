@@ -30,9 +30,14 @@ pub(crate) async fn place_order(
             order_type,
             quantity,
             price,
+            // The CLI has no trigger-price flag; market/limit only.
+            None,
             take_profit,
             stop_loss,
             &client_order_id,
+            // The CLI is an operator tool, never a strategy: its orders are
+            // explicitly allowed to open exposure.
+            false,
         )
         .await
     {

@@ -13,6 +13,7 @@ service MarketDataService {
   rpc GetBook(GetBookRequest) returns (GetBookResponse);
   rpc GetTickers(GetTickersRequest) returns (GetTickersResponse);
   rpc GetFundingRates(GetFundingRatesRequest) returns (GetFundingRatesResponse);
+  rpc GetFundingRateHistory(GetFundingRateHistoryRequest) returns (GetFundingRateHistoryResponse);
   rpc SearchSymbols(SearchSymbolsRequest) returns (SearchSymbolsResponse);
 }
 
@@ -64,6 +65,18 @@ message GetFundingRatesRequest {
 
 message GetFundingRatesResponse {
   repeated FundingRate funding_rates = 1;
+}
+
+message GetFundingRateHistoryRequest {
+  string venue = 1;
+  string symbol = 2;
+  // Maximum points to return, newest first. Bounded server-side.
+  uint32 limit = 3;
+}
+
+message GetFundingRateHistoryResponse {
+  // Newest first.
+  repeated FundingRatePoint points = 1;
 }
 
 message SearchSymbolsRequest {

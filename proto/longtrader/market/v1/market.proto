@@ -175,6 +175,53 @@ message ListSymbolsResponse {
   repeated SymbolInfo symbols = 1;
 }
 
+// ---- Perpetual funding rates ----
+
+// Current funding rate for one perpetual contract.
+message FundingRate {
+  string symbol = 1;
+  // Current rate, as a signed fraction of notional (0.0001 = 0.01%).
+  common.v1.Decimal rate = 2;
+  // When the next funding settles, Unix milliseconds.
+  int64 next_funding_time_ms = 3;
+  // Absent when the venue does not report a mark price.
+  optional common.v1.Decimal mark_price = 4;
+  // Hours between settlements; 0 when unknown.
+  uint32 funding_interval_hours = 5;
+  // Absent when the venue does not report open interest.
+  optional common.v1.Decimal open_interest = 6;
+  // Absent when the venue does not report 24h volume.
+  optional common.v1.Decimal volume_24h = 7;
+}
+
+// One historical funding settlement.
+message FundingRatePoint {
+  common.v1.Decimal rate = 1;
+  // Settlement time, Unix milliseconds.
+  int64 funding_time_ms = 2;
+}
+
+message FetchFundingRateRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  string symbol = 2;
+}
+
+message FetchFundingRateResponse {
+  // Absent when the venue has no funding data for the symbol.
+  optional FundingRate funding_rate = 1;
+}
+
+message FetchFundingRateHistoryRequest {
+  common.v1.ExchangeId exchange_id = 1;
+  string symbol = 2;
+  // Maximum points to return, newest first. Bounded server-side.
+  uint32 limit = 3;
+}
+
+message FetchFundingRateHistoryResponse {
+  repeated FundingRatePoint points = 1;
+}
+
 // ---- Unified market data service ----
 //
 // Served by the worker as a thin proxy over its backend adapter, and (after
@@ -185,6 +232,9 @@ service MarketDataService {
   rpc FetchOrderBook(FetchOrderBookRequest) returns (FetchOrderBookResponse);
   rpc GetCandles(GetCandlesRequest) returns (GetCandlesResponse);
   rpc ListSymbols(ListSymbolsRequest) returns (ListSymbolsResponse);
+  // Perpetual funding: current rate and settlement history.
+  rpc FetchFundingRate(FetchFundingRateRequest) returns (FetchFundingRateResponse);
+  rpc FetchFundingRateHistory(FetchFundingRateHistoryRequest) returns (FetchFundingRateHistoryResponse);
   // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc StreamMarketData(StreamMarketDataRequest) returns (stream MarketDataEvent);
 }

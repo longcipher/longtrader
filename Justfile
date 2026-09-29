@@ -85,8 +85,8 @@ publish-all: publish-rs publish-py publish-ts
 check-cn:
   rg --line-number --column "\p{Han}"
 
-# Full CI check
-ci: lint test build
+# Full CI check: lint and test everything, then every SDK.
+ci: lint test build sdk-lint sdk-test
 
 # ============================================================
 # Maintenance & Tools
@@ -121,9 +121,15 @@ proto-sync:
 proto-lint:
   cd proto && buf lint
 
-# Detect wire-breaking contract changes against the main branch
+# Detect wire-breaking contract changes against the main branch.
+#
+# The `--against` URL is resolved relative to the recipe's working directory,
+# which is `proto/` after the `cd`. A bare `.git#...` therefore points at
+# `proto/.git`, which does not exist, and the gate fails with "does not appear
+# to be a git repository" instead of reporting a real break. Use `../.git` and
+# keep `subdir=proto` so the comparison still runs against the `proto/` subtree.
 proto-breaking:
-  cd proto && buf breaking --against '.git#branch=main,subdir=proto'
+  cd proto && buf breaking --against '../.git#branch=main,subdir=proto'
 
 # Generate SDK stubs locally (Python -> sdks/python, TypeScript ->
 # sdks/typescript) without network buf plugins; unavailable toolchains are
@@ -131,6 +137,26 @@ proto-breaking:
 sdk-generate:
   bash scripts/gen-proto.sh
 
-# Placeholder: SDK test suite (no-op until the Tier-2 wrappers gain tests)
-sdk-test:
-  @echo "sdk-test: no-op placeholder; SDK tests arrive with Tier-2 hardening"
+# Python SDK contract-conformance tests (offline; no server required)
+sdk-test-py:
+  cd sdks/python && python3 -m pytest tests -q
+
+# TypeScript SDK tests via the Node built-in runner (offline)
+sdk-test-ts:
+  cd sdks/typescript && npm test
+
+# Type-check the TypeScript SDK and vet the Go SDK without emitting
+sdk-lint: sdk-lint-go
+  cd sdks/typescript && npx tsc --noEmit -p tsconfig.json
+
+# Go SDK lint: gofmt cleanliness plus `go vet` (stdlib only, no codegen)
+sdk-lint-go:
+  cd sdks/go && sh -c 'unformatted=$(gofmt -l .); [ -z "$unformatted" ] || { echo "not gofmt-ed:"; echo "$unformatted"; exit 1; }'
+  cd sdks/go && go vet ./...
+
+# All SDK tests
+sdk-test: sdk-test-py sdk-test-ts sdk-test-go
+
+# Go SDK tests (offline; the suite drives httptest servers only)
+sdk-test-go:
+  cd sdks/go && go test ./...

@@ -11,7 +11,9 @@ import {
   create,
   fromBinary,
   toBinary,
+  type DescEnum,
   type DescMessage,
+  type Message,
   type MessageShape,
 } from "@bufbuild/protobuf";
 import { fetch } from "undici";
@@ -20,17 +22,239 @@ import {
   AttachSessionResponseSchema,
   KeepAliveRequestSchema,
   KeepAliveResponseSchema,
+  LogEventSchema,
   ReconcileStateRequestSchema,
   ReconcileStateResponseSchema,
+  ReportLogResponseSchema,
+  RegisterStrategyRequestSchema,
+  RegisterStrategyResponseSchema,
   SetKillSwitchPolicyRequestSchema,
   SetKillSwitchPolicyResponseSchema,
+  StopStrategyRequestSchema,
+  StopStrategyResponseSchema,
+  StrategyStatusRequestSchema,
+  StrategyStatusResponseSchema,
+  StreamStrategyEventsRequestSchema,
+  StrategyEventSchema,
+  SessionState as ProtoSessionState,
+  LogLevel as ProtoLogLevel,
   type KillSwitchPolicy,
+  type StrategyEvent,
 } from "./gen/longtrader/worker/v1/worker_pb.js";
+import {
+  CreateOrderRequestSchema,
+  CreateOrderResponseSchema,
+  CreateOrdersRequestSchema,
+  CreateOrdersResponseSchema,
+  CancelOrderRequestSchema,
+  CancelOrderResponseSchema,
+  CancelAllOrdersRequestSchema,
+  CancelAllOrdersResponseSchema,
+  FetchOpenOrdersRequestSchema,
+  FetchOpenOrdersResponseSchema,
+  GetAccountRequestSchema,
+  GetAccountResponseSchema,
+  GetPositionsRequestSchema,
+  GetPositionsResponseSchema,
+  GetOrderHistoryRequestSchema,
+  GetOrderHistoryResponseSchema,
+  GetClosedPositionsRequestSchema,
+  GetClosedPositionsResponseSchema,
+  ClosePositionRequestSchema,
+  ClosePositionResponseSchema,
+  CloseAllPositionsRequestSchema,
+  CloseAllPositionsResponseSchema,
+  ModifyPositionRequestSchema,
+  ModifyPositionResponseSchema,
+  OrderRequestSchema,
+  OrderSide,
+  OrderType,
+  TimeInForce,
+  type Order,
+} from "./gen/longtrader/trading/v1/trading_pb.js";
+import {
+  FetchTickerRequestSchema,
+  FetchTickerResponseSchema,
+  FetchOrderBookRequestSchema,
+  FetchOrderBookResponseSchema,
+  GetCandlesRequestSchema,
+  GetCandlesResponseSchema,
+  ListSymbolsRequestSchema,
+  ListSymbolsResponseSchema,
+  StreamMarketDataRequestSchema,
+  StreamSubscriptionSchema,
+  StreamChannel,
+  MarketDataEventSchema,
+  type MarketDataEvent,
+} from "./gen/longtrader/market/v1/market_pb.js";
+import {
+  DecimalSchema,
+  ExchangeIdSchema,
+  PaginationSchema,
+} from "./gen/longtrader/common/v1/types_pb.js";
 
 export const WORKER_SERVICE = "longtrader.worker.v1.WorkerSessionService";
+export const TRADING_SERVICE = "longtrader.trading.v1.TradingService";
+export const MARKET_SERVICE = "longtrader.market.v1.MarketDataService";
 
-/** Server-enforced lifecycle states (proto/longtrader/worker/v1/worker.proto). */
-export type SessionState = "DISCONNECTED" | "ATTACHED" | "SYNCING" | "ACTIVE";
+/**
+ * Server-enforced lifecycle states (proto/longtrader/worker/v1/worker.proto).
+ * `KILL_SWITCH_TRIPPED` and `GRACEFUL_SHUTDOWN` are terminal: a strategy that
+ * sees either must not trade again on this session.
+ */
+export type SessionState =
+  | "DISCONNECTED"
+  | "ATTACHED"
+  | "SYNCING"
+  | "ACTIVE"
+  | "KILL_SWITCH_TRIPPED"
+  | "GRACEFUL_SHUTDOWN";
+
+/** States from which no further transition is possible. */
+export const TERMINAL_STATES: ReadonlySet<SessionState> = new Set([
+  "KILL_SWITCH_TRIPPED",
+  "GRACEFUL_SHUTDOWN",
+]);
+
+/**
+ * Stable reason the host returns when a session-scoped order is submitted
+ * before the session reaches ACTIVE (see
+ * `SessionManager::authorize_order_submission`).
+ */
+export const SYNC_IN_PROGRESS = "SYNC_IN_PROGRESS";
+
+/**
+ * Connect streaming frame flags: 0x00 = message, 0x02 = end-of-stream (JSON).
+ * See docs/bare-protocol-guide.md and `bin/longtrader-worker/src/envelope.rs`.
+ */
+const FLAG_END_OF_STREAM = 0x02;
+
+/** Wrap a protobuf payload in the 5-byte Connect envelope. */
+function envelope(payload: Uint8Array): Uint8Array {
+  const out = new Uint8Array(5 + payload.length);
+  out[0] = 0x00; // message frame
+  new DataView(out.buffer).setUint32(1, payload.length, false); // big-endian
+  out.set(payload, 5);
+  return out;
+}
+
+/**
+ * Decode a Connect protobuf stream into messages, reporting sequence gaps.
+ *
+ * Yields `null` where the sequence jumped, which means the host's ring buffer
+ * overflowed and the caller must re-run `reconcileState()` rather than assume
+ * continuity.
+ */
+async function* iterEvents<S extends DescMessage>(
+  body: ReadableStream<Uint8Array> | null,
+  schema: S,
+  gapAware: boolean,
+): AsyncGenerator<MessageShape<S> | null> {
+  if (body === null) return;
+  const reader = body.getReader();
+  let buf = new Uint8Array(0);
+  let prev = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (value) {
+      const merged = new Uint8Array(buf.length + value.length);
+      merged.set(buf);
+      merged.set(value, buf.length);
+      buf = merged;
+    }
+    for (;;) {
+      if (buf.length < 5) break;
+      const flags = buf[0] ?? 0;
+      const length = new DataView(
+        buf.buffer,
+        buf.byteOffset,
+        buf.byteLength,
+      ).getUint32(1, false);
+      if (buf.length < 5 + length) break;
+      const payload = buf.slice(5, 5 + length);
+      buf = buf.slice(5 + length);
+      if ((flags & FLAG_END_OF_STREAM) !== 0) {
+        await reader.cancel();
+        return;
+      }
+      const msg = fromBinary(schema, payload);
+      if (gapAware) {
+        const header = (msg as { header?: { sequence?: bigint } }).header;
+        const seq = Number(header?.sequence ?? 0n);
+        if (seq > 0) {
+          if (prev > 0 && seq !== prev + 1) yield null;
+          prev = seq;
+        }
+      }
+      yield msg;
+    }
+    if (done) return;
+  }
+}
+
+/** Coerce a decimal-ish value into the contract's `{unscaled, scale, rawStr}`. */
+function toDecimal(
+  value: bigint | number | string,
+): MessageShape<typeof DecimalSchema> {
+  const text = typeof value === "string" ? value : value.toString();
+  if (!/^-?\d+(\.\d+)?$/.test(text)) {
+    throw new Error(`cannot interpret ${String(value)} as a decimal`);
+  }
+  const negative = text.startsWith("-");
+  const [intPart, fracPart = ""] = (negative ? text.slice(1) : text).split(".");
+  const unscaled = BigInt(`${intPart}${fracPart}`) * (negative ? -1n : 1n);
+  return create(DecimalSchema, {
+    unscaled,
+    scale: fracPart.length,
+    rawStr: text,
+  });
+}
+
+/** Build the contract `ExchangeId`; empty leaves the host default unset. */
+function exchangeId(
+  value: string,
+): MessageShape<typeof ExchangeIdSchema> | undefined {
+  return value ? create(ExchangeIdSchema, { id: value }) : undefined;
+}
+
+/** Build a `Pagination`; returns undefined when unconstrained. */
+function pagination(
+  limit = 0,
+  since = 0,
+  cursor = "",
+): MessageShape<typeof PaginationSchema> | undefined {
+  if (!limit && !since && !cursor) return undefined;
+  return create(PaginationSchema, {
+    limit: BigInt(limit),
+    since: BigInt(since),
+    cursor,
+  });
+}
+
+/** Resolve `"LIMIT"` / `"ORDER_TYPE_LIMIT"` / `"limit"` against a proto enum. */
+function enumValue<T extends Record<string, string | number>>(
+  values: T,
+  name: string,
+  kind: string,
+): T[keyof T] {
+  const key = name
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+  const match = Object.entries(values).find(
+    ([k]) =>
+      k.toUpperCase() === key ||
+      k.toUpperCase() === `${kind.toUpperCase()}_${key}`,
+  );
+  if (match === undefined) {
+    throw new Error(
+      `unknown ${kind} ${name}; expected one of ${Object.keys(values)
+        .filter((k) => k !== "UNSPECIFIED")
+        .join(", ")}`,
+    );
+  }
+  return match[1] as T[keyof T];
+}
 
 /** A Connect error reply: non-200 unary response with a JSON body. */
 export class ConnectError extends Error {
@@ -44,6 +268,19 @@ export class ConnectError extends Error {
   }
 }
 
+/** Options for {@link Session.createOrder} and friends. */
+export interface OrderSpec {
+  symbol: string;
+  amount: bigint | number | string;
+  price?: bigint | number | string;
+  side?: "BUY" | "SELL";
+  orderType?: "LIMIT" | "MARKET" | "STOP" | "STOP_LIMIT";
+  timeInForce?: "GTC" | "IOC" | "FOK" | "POST_ONLY";
+  clientOrderId?: string;
+  postOnly?: boolean;
+  reduceOnly?: boolean;
+}
+
 export class Session {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -53,32 +290,52 @@ export class Session {
   private _state: SessionState = "DISCONNECTED";
   sessionId = "";
   heartbeatIntervalMs = 0;
+  /**
+   * Watermark of the last `reconcileState`, used to discard replayed deltas
+   * the snapshot already covers.
+   */
+  snapshotSequence = 0n;
+  /** Capabilities the host advertised at attach. */
+  capabilities: string[] = [];
 
   private constructor(baseUrl: string, fetchImpl: typeof fetch) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.fetchImpl = fetchImpl;
   }
 
-  /** Validate the terminal API token and negotiate lease parameters. */
+  /**
+   * Validate the terminal API token and negotiate lease parameters.
+   *
+   * `sessionId` resumes a previous session after a network drop: the host
+   * reuses it (refreshing the lease) rather than issuing a new one, which is
+   * what keeps the kill-switch's tracked-order set intact across a reconnect.
+   */
   static async attach(
     baseUrl: string,
     token: string,
     policy?: KillSwitchPolicy,
+    sessionId = "",
   ): Promise<Session> {
     const req = create(AttachSessionRequestSchema, {
       token,
       clientName: "longtrader-sdk-typescript",
       clientVersion: "0.2.0",
+      sessionId,
       ...(policy ? { policy } : {}),
     });
     const session = new Session(baseUrl, fetch);
     const resp = await session.unary(
+      WORKER_SERVICE,
       "AttachSession",
       AttachSessionResponseSchema,
       toBinary(AttachSessionRequestSchema, req),
     );
     session.sessionId = resp.sessionId;
-    session.heartbeatIntervalMs = resp.heartbeatIntervalMs;
+    // A resumed session keeps its negotiated lease rather than resetting to 0,
+    // which would stall the heartbeat and watchdog.
+    session.heartbeatIntervalMs =
+      resp.heartbeatIntervalMs || session.heartbeatIntervalMs;
+    session.capabilities = [...resp.capabilities];
     session.lastKeepAliveOk = Date.now();
     session._state = "ATTACHED";
     return session;
@@ -89,6 +346,11 @@ export class Session {
     return this._state;
   }
 
+  /** True once the session has reconciled and may trade. */
+  get canTrade(): boolean {
+    return this._state === "ACTIVE";
+  }
+
   /** Feed the lease watchdog; call at the negotiated interval. */
   async keepAlive(): Promise<MessageShape<typeof KeepAliveResponseSchema>> {
     const req = create(KeepAliveRequestSchema, {
@@ -96,6 +358,7 @@ export class Session {
       clientTimeNs: BigInt(Date.now()) * 1_000_000n,
     });
     const resp = await this.unary(
+      WORKER_SERVICE,
       "KeepAlive",
       KeepAliveResponseSchema,
       toBinary(KeepAliveRequestSchema, req),
@@ -106,8 +369,9 @@ export class Session {
 
   /**
    * Fetch the authoritative atomic snapshot (balances/positions/open orders)
-   * stamped with snapshot_sequence. A successful reconcile is the local gate
-   * out of syncing; pre-ACTIVE orders are rejected SYNC_IN_PROGRESS.
+   * stamped with `snapshotSequence`. The host drives ATTACHED -> SYNCING
+   * inside this call, so the local state is set first: a concurrent reader
+   * then sees SYNCING and refuses to trade rather than racing the snapshot.
    */
   async reconcileState(): Promise<
     MessageShape<typeof ReconcileStateResponseSchema>
@@ -115,12 +379,15 @@ export class Session {
     const req = create(ReconcileStateRequestSchema, {
       sessionId: this.sessionId,
     });
+    this._state = "SYNCING";
     const resp = await this.unary(
+      WORKER_SERVICE,
       "ReconcileState",
       ReconcileStateResponseSchema,
       toBinary(ReconcileStateRequestSchema, req),
     );
     this._state = "ACTIVE";
+    this.snapshotSequence = resp.snapshotSequence;
     return resp;
   }
 
@@ -131,11 +398,142 @@ export class Session {
       policy,
     });
     await this.unary(
+      WORKER_SERVICE,
       "SetKillSwitchPolicy",
       SetKillSwitchPolicyResponseSchema,
       toBinary(SetKillSwitchPolicyRequestSchema, req),
     );
   }
+
+  // -- strategy lifecycle -------------------------------------------------
+
+  /** Register this session's strategy; returns the assigned strategy id. */
+  async registerStrategy(
+    name: string,
+    params: Record<string, string> = {},
+  ): Promise<string> {
+    const req = create(RegisterStrategyRequestSchema, {
+      sessionId: this.sessionId,
+      name,
+      params,
+    });
+    const resp = await this.unary(
+      WORKER_SERVICE,
+      "RegisterStrategy",
+      RegisterStrategyResponseSchema,
+      toBinary(RegisterStrategyRequestSchema, req),
+    );
+    return resp.strategyId;
+  }
+
+  /** Current lifecycle state, strategy id, and submission counters. */
+  async strategyStatus(): Promise<
+    MessageShape<typeof StrategyStatusResponseSchema>
+  > {
+    const req = create(StrategyStatusRequestSchema, {
+      sessionId: this.sessionId,
+    });
+    const resp = await this.unary(
+      WORKER_SERVICE,
+      "StrategyStatus",
+      StrategyStatusResponseSchema,
+      toBinary(StrategyStatusRequestSchema, req),
+    );
+    this.syncStateFromHost(resp.state);
+    return resp;
+  }
+
+  /** Stop the strategy, optionally cancelling this session's open orders. */
+  async stopStrategy(
+    cancelOpenOrders = true,
+  ): Promise<MessageShape<typeof StopStrategyResponseSchema>> {
+    const req = create(StopStrategyRequestSchema, {
+      sessionId: this.sessionId,
+      cancelOpenOrders,
+    });
+    const resp = await this.unary(
+      WORKER_SERVICE,
+      "StopStrategy",
+      StopStrategyResponseSchema,
+      toBinary(StopStrategyRequestSchema, req),
+    );
+    this.syncStateFromHost(resp.finalState);
+    return resp;
+  }
+
+  /**
+   * Send one log event; resolves to the number of events the host accepted.
+   *
+   * Client-streaming: the request is a 5-byte-framed protobuf message and the
+   * reply is one data frame followed by an end-of-stream JSON frame.
+   */
+  async reportLog(
+    level: "DEBUG" | "INFO" | "WARN" | "ERROR",
+    message: string,
+    fields: Record<string, string> = {},
+  ): Promise<bigint> {
+    const now = new Date();
+    const req = create(LogEventSchema, {
+      sessionId: this.sessionId,
+      level: enumValue(
+        ProtoLogLevel as unknown as Record<string, number>,
+        level,
+        "LogLevel",
+      ),
+      message,
+      timestamp: {
+        seconds: BigInt(Math.floor(now.getTime() / 1000)),
+        nanos: (now.getTime() % 1000) * 1_000_000,
+      },
+      fields,
+    });
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/${WORKER_SERVICE}/ReportLog`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/connect+proto",
+          "connect-protocol-version": "1",
+        },
+        body: envelope(toBinary(LogEventSchema, req)),
+      },
+    );
+    if (res.status !== 200) throw await toConnectError(res);
+    const frame = firstMessagePayload(new Uint8Array(await res.arrayBuffer()));
+    return fromBinary(ReportLogResponseSchema, frame).accepted;
+  }
+
+  /**
+   * Yield `StrategyEvent` messages, resuming after `resumeToken`.
+   *
+   * A yielded `null` marks a sequence gap: the host's ring overflowed and the
+   * caller must re-run `reconcileState()` instead of assuming continuity.
+   */
+  async *streamEvents(resumeToken = ""): AsyncGenerator<StrategyEvent | null> {
+    const req = create(StreamStrategyEventsRequestSchema, {
+      sessionId: this.sessionId,
+      resumeToken,
+    });
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/${WORKER_SERVICE}/StreamStrategyEvents`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/connect+proto",
+          "connect-protocol-version": "1",
+        },
+        body: envelope(toBinary(StreamStrategyEventsRequestSchema, req)),
+      },
+    );
+    if (res.status !== 200) throw await toConnectError(res);
+    yield* iterEvents<typeof StrategyEventSchema>(
+      res.body,
+      StrategyEventSchema,
+      true,
+    );
+  }
+
+  // -- heartbeat ----------------------------------------------------------
 
   /** Spawn an interval timer sending KeepAlive at the negotiated interval. */
   startHeartbeat(): void {
@@ -145,6 +543,9 @@ export class Session {
       // Transient failures are fine; the next tick retries.
       void this.keepAlive().catch(() => {});
     }, ms);
+    // Never hold the process open on the SDK's account: a leaked session in a
+    // long-running host must not block graceful shutdown.
+    this.heartbeatTimer.unref?.();
   }
 
   /** Cancel the background heartbeat / watchdog timers. */
@@ -165,9 +566,12 @@ export class Session {
   }
 
   /**
-   * Strategy-side lease timeout simulation: spawn 定时任务，每 heartbeat_interval 检查 lease 是否超时，超时则触发 cancel.
-   * Mirrors Rust `spawn_strategy_lease_guard` (session/daemon/exchange 三级看门狗中的 L_session).
-   * Wakes every `heartbeatIntervalMs` and checks elapsed since last KeepAlive; on `leaseTimeout` (default 3x heartbeat) it stops.
+   * Strategy-side lease guard: a timer that checks every `heartbeatInterval`
+   * whether the lease has lapsed. On timeout it stops this strategy trading
+   * and asks the host to cancel the session's orders.
+   *
+   * The host's own watchdog is the authority for the cancellation; this tier
+   * exists so the process stops trading even if the host is unreachable.
    */
   spawnLeaseWatchdog(leaseTimeoutMs?: number): ReturnType<typeof setInterval> {
     const leaseMs =
@@ -177,23 +581,311 @@ export class Session {
       clearInterval(this.watchdogTimer);
     }
     this.watchdogTimer = setInterval(() => {
-      const elapsed = Date.now() - this.lastKeepAliveOk;
-      if (elapsed > leaseMs) {
-        // Keep parity with Python: close transport and stop both timers.
-        this.close();
-      }
+      if (Date.now() - this.lastKeepAliveOk <= leaseMs) return;
+      this._state = "KILL_SWITCH_TRIPPED";
+      void this.stopStrategy(true).catch(() => {});
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = undefined;
     }, intervalMs);
+    this.watchdogTimer.unref?.();
     return this.watchdogTimer;
   }
 
+  // -- trading ------------------------------------------------------------
+
+  private requireActive(): void {
+    if (this._state !== "ACTIVE") {
+      throw new ConnectError(
+        412,
+        "failed_precondition",
+        `${SYNC_IN_PROGRESS}: local session is ${this._state}, not ACTIVE; ` +
+          "call reconcileState() first",
+      );
+    }
+  }
+
+  /**
+   * Place one order, attributed to this session.
+   *
+   * The `sessionId` is what lets the host reject a pre-ACTIVE submission
+   * (`SYNC_IN_PROGRESS`) and record the order so the kill-switch can cancel it.
+   */
+  async createOrder(spec: OrderSpec): Promise<Order> {
+    this.requireActive();
+    const req = create(CreateOrderRequestSchema, {
+      order: buildOrderRequest(spec),
+      sessionId: this.sessionId,
+    });
+    const resp = await this.unary(
+      TRADING_SERVICE,
+      "CreateOrder",
+      CreateOrderResponseSchema,
+      toBinary(CreateOrderRequestSchema, req),
+    );
+    if (resp.order === undefined)
+      throw new Error("CreateOrder returned no order");
+    return resp.order;
+  }
+
+  /** Place a batch, attributed to this session (all-or-nothing gate). */
+  async createOrders(specs: OrderSpec[]): Promise<Order[]> {
+    this.requireActive();
+    const req = create(CreateOrdersRequestSchema, {
+      orders: specs.map(buildOrderRequest),
+      sessionId: this.sessionId,
+    });
+    const resp = await this.unary(
+      TRADING_SERVICE,
+      "CreateOrders",
+      CreateOrdersResponseSchema,
+      toBinary(CreateOrdersRequestSchema, req),
+    );
+    return [...resp.orders];
+  }
+
+  /** Cancel one order by venue order id. */
+  async cancelOrder(orderId: string, symbol = ""): Promise<Order> {
+    const req = create(CancelOrderRequestSchema, { orderId, symbol });
+    const resp = await this.unary(
+      TRADING_SERVICE,
+      "CancelOrder",
+      CancelOrderResponseSchema,
+      toBinary(CancelOrderRequestSchema, req),
+    );
+    if (resp.order === undefined)
+      throw new Error("CancelOrder returned no order");
+    return resp.order;
+  }
+
+  /** Cancel every open order; an empty `symbol` spans all symbols. */
+  async cancelAllOrders(symbol = ""): Promise<Order[]> {
+    const req = create(CancelAllOrdersRequestSchema, { symbol });
+    const resp = await this.unary(
+      TRADING_SERVICE,
+      "CancelAllOrders",
+      CancelAllOrdersResponseSchema,
+      toBinary(CancelAllOrdersRequestSchema, req),
+    );
+    return [...resp.orders];
+  }
+
+  /** Open orders; omit `symbol` for every symbol. */
+  async fetchOpenOrders(symbol = "", limit = 0): Promise<Order[]> {
+    const req = create(FetchOpenOrdersRequestSchema, {
+      symbol,
+      pagination: pagination(limit),
+    });
+    const resp = await this.unary(
+      TRADING_SERVICE,
+      "FetchOpenOrders",
+      FetchOpenOrdersResponseSchema,
+      toBinary(FetchOpenOrdersRequestSchema, req),
+    );
+    return [...resp.orders];
+  }
+
+  async getAccount() {
+    return this.unary(
+      TRADING_SERVICE,
+      "GetAccount",
+      GetAccountResponseSchema,
+      toBinary(GetAccountRequestSchema, create(GetAccountRequestSchema, {})),
+    );
+  }
+
+  /** Open positions; omit `symbols` for every symbol. */
+  async getPositions(symbols: string[] = []) {
+    const req = create(GetPositionsRequestSchema, { symbols });
+    return this.unary(
+      TRADING_SERVICE,
+      "GetPositions",
+      GetPositionsResponseSchema,
+      toBinary(GetPositionsRequestSchema, req),
+    );
+  }
+
+  async getOrderHistory(limit = 100, since = 0) {
+    const req = create(GetOrderHistoryRequestSchema, {
+      pagination: pagination(limit, since),
+    });
+    return this.unary(
+      TRADING_SERVICE,
+      "GetOrderHistory",
+      GetOrderHistoryResponseSchema,
+      toBinary(GetOrderHistoryRequestSchema, req),
+    );
+  }
+
+  async getClosedPositions(limit = 100) {
+    const req = create(GetClosedPositionsRequestSchema, {
+      pagination: pagination(limit),
+    });
+    return this.unary(
+      TRADING_SERVICE,
+      "GetClosedPositions",
+      GetClosedPositionsResponseSchema,
+      toBinary(GetClosedPositionsRequestSchema, req),
+    );
+  }
+
+  async closePosition(positionId: string) {
+    const req = create(ClosePositionRequestSchema, { positionId });
+    return this.unary(
+      TRADING_SERVICE,
+      "ClosePosition",
+      ClosePositionResponseSchema,
+      toBinary(ClosePositionRequestSchema, req),
+    );
+  }
+
+  async closeAllPositions() {
+    return this.unary(
+      TRADING_SERVICE,
+      "CloseAllPositions",
+      CloseAllPositionsResponseSchema,
+      toBinary(
+        CloseAllPositionsRequestSchema,
+        create(CloseAllPositionsRequestSchema, {}),
+      ),
+    );
+  }
+
+  /**
+   * Attach or replace a position's bracket orders. Omitting one bracket leaves
+   * it unchanged, so a caller can move just the stop without clearing the
+   * target.
+   */
+  async modifyPosition(
+    positionId: string,
+    opts: {
+      takeProfit?: bigint | number | string;
+      stopLoss?: bigint | number | string;
+    },
+  ) {
+    const req = create(ModifyPositionRequestSchema, {
+      positionId,
+      ...(opts.takeProfit !== undefined
+        ? { takeProfit: toDecimal(opts.takeProfit) }
+        : {}),
+      ...(opts.stopLoss !== undefined
+        ? { stopLoss: toDecimal(opts.stopLoss) }
+        : {}),
+    });
+    return this.unary(
+      TRADING_SERVICE,
+      "ModifyPosition",
+      ModifyPositionResponseSchema,
+      toBinary(ModifyPositionRequestSchema, req),
+    );
+  }
+
+  // -- market data --------------------------------------------------------
+
+  async fetchTicker(symbol: string) {
+    const req = create(FetchTickerRequestSchema, { symbol });
+    const resp = await this.unary(
+      MARKET_SERVICE,
+      "FetchTicker",
+      FetchTickerResponseSchema,
+      toBinary(FetchTickerRequestSchema, req),
+    );
+    if (resp.ticker === undefined)
+      throw new Error("FetchTicker returned no ticker");
+    return resp.ticker;
+  }
+
+  async fetchOrderBook(symbol: string, depth = 10) {
+    const req = create(FetchOrderBookRequestSchema, {
+      symbol,
+      pagination: pagination(depth),
+    });
+    const resp = await this.unary(
+      MARKET_SERVICE,
+      "FetchOrderBook",
+      FetchOrderBookResponseSchema,
+      toBinary(FetchOrderBookRequestSchema, req),
+    );
+    if (resp.orderbook === undefined)
+      throw new Error("FetchOrderBook returned no book");
+    return resp.orderbook;
+  }
+
+  /** OHLCV candles. `timeframe` is the contract's string form (M1, H4, ...). */
+  async getCandles(symbol: string, timeframe = "M1", limit = 100) {
+    const req = create(GetCandlesRequestSchema, {
+      symbol,
+      timeframe: timeframe.trim().toUpperCase(),
+      pagination: pagination(limit),
+    });
+    return this.unary(
+      MARKET_SERVICE,
+      "GetCandles",
+      GetCandlesResponseSchema,
+      toBinary(GetCandlesRequestSchema, req),
+    );
+  }
+
+  async listSymbols() {
+    return this.unary(
+      MARKET_SERVICE,
+      "ListSymbols",
+      ListSymbolsResponseSchema,
+      toBinary(ListSymbolsRequestSchema, create(ListSymbolsRequestSchema, {})),
+    );
+  }
+
+  /**
+   * Open a server-streaming market data subscription.
+   *
+   * `channel` is TICKER / ORDERBOOK / TRADES / OHLCV.
+   */
+  async *streamMarketData(
+    symbols: string[],
+    channel: "TICKER" | "ORDERBOOK" | "TRADES" | "OHLCV" = "TICKER",
+  ): AsyncGenerator<MarketDataEvent> {
+    const req = create(StreamMarketDataRequestSchema, {
+      subscriptions: symbols.map((symbol) =>
+        create(StreamSubscriptionSchema, {
+          symbol,
+          channel: enumValue(
+            StreamChannel as unknown as Record<string, number>,
+            channel,
+            "StreamChannel",
+          ),
+        }),
+      ),
+    });
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/${MARKET_SERVICE}/StreamMarketData`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/connect+proto",
+          "connect-protocol-version": "1",
+        },
+        body: envelope(toBinary(StreamMarketDataRequestSchema, req)),
+      },
+    );
+    if (res.status !== 200) throw await toConnectError(res);
+    for await (const ev of iterEvents<typeof MarketDataEventSchema>(
+      res.body,
+      MarketDataEventSchema,
+      false,
+    )) {
+      if (ev !== null) yield ev;
+    }
+  }
+
+  // -- transport ----------------------------------------------------------
+
   /** One Connect unary call: POST application/proto, decode proto reply. */
   private async unary<S extends DescMessage>(
+    service: string,
     method: string,
     respSchema: S,
     reqBytes: Uint8Array,
   ): Promise<MessageShape<S>> {
-    const url = `${this.baseUrl}/${WORKER_SERVICE}/${method}`;
-    const res = await this.fetchImpl(url, {
+    const res = await this.fetchImpl(`${this.baseUrl}/${service}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/proto" },
       body: reqBytes,
@@ -201,6 +893,66 @@ export class Session {
     if (res.status !== 200) throw await toConnectError(res);
     return fromBinary(respSchema, new Uint8Array(await res.arrayBuffer()));
   }
+
+  /** Mirror a host-reported state into the local view. */
+  private syncStateFromHost(state: ProtoSessionState): void {
+    const name = ProtoSessionState[state];
+    if (name === undefined) return;
+    this._state = name.replace("SESSION_STATE_", "") as SessionState;
+  }
+}
+
+/** Build a contract `OrderRequest` from the ergonomic {@link OrderSpec}. */
+function buildOrderRequest(
+  spec: OrderSpec,
+): MessageShape<typeof OrderRequestSchema> {
+  return create(OrderRequestSchema, {
+    clientOrderId: spec.clientOrderId ?? "",
+    symbol: spec.symbol,
+    type: enumValue(
+      OrderType as unknown as Record<string, number>,
+      spec.orderType ?? "LIMIT",
+      "OrderType",
+    ),
+    side: enumValue(
+      OrderSide as unknown as Record<string, number>,
+      spec.side ?? "BUY",
+      "OrderSide",
+    ),
+    amount: toDecimal(spec.amount),
+    ...(spec.price !== undefined ? { price: toDecimal(spec.price) } : {}),
+    timeInForce: enumValue(
+      TimeInForce as unknown as Record<string, number>,
+      spec.timeInForce ?? "GTC",
+      "TimeInForce",
+    ),
+    postOnly: spec.postOnly ?? false,
+    reduceOnly: spec.reduceOnly ?? false,
+  });
+}
+
+/**
+ * Return the first non-end-of-stream frame payload in `buf`.
+ *
+ * A streaming RPC that carries a single response message replies with one data
+ * frame followed by an end-of-stream frame whose payload is JSON; decoding the
+ * whole body as protobuf fails, so the data frame is located first.
+ */
+function firstMessagePayload(buf: Uint8Array): Uint8Array {
+  let pos = 0;
+  while (pos + 5 <= buf.length) {
+    const flags = buf[pos] ?? 0;
+    const length = new DataView(
+      buf.buffer,
+      buf.byteOffset,
+      buf.byteLength,
+    ).getUint32(pos + 1, false);
+    const end = pos + 5 + length;
+    if (end > buf.length) break;
+    if ((flags & FLAG_END_OF_STREAM) === 0) return buf.slice(pos + 5, end);
+    pos = end;
+  }
+  throw new Error("no message frame in connect response");
 }
 
 async function toConnectError(res: Response): Promise<ConnectError> {

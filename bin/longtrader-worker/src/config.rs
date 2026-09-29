@@ -37,32 +37,113 @@ pub struct StrategyConfig {
     pub params: StrategyParams,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// The on-file shape of [`StrategyParams`], before the well-known keys are
+/// merged back into the catch-all table.
+#[derive(Deserialize)]
+struct StrategyParamsWire {
+    #[serde(default)]
+    exchange_id: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    symbol: Option<String>,
+    #[serde(default)]
+    lower_price: Option<Decimal>,
+    #[serde(default)]
+    upper_price: Option<Decimal>,
+    #[serde(default)]
+    num_levels: Option<u32>,
+    #[serde(default)]
+    qty_per_level: Option<Decimal>,
+    #[serde(flatten)]
+    extra: toml::Table,
+}
+
+impl<'de> Deserialize<'de> for StrategyParams {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let wire = StrategyParamsWire::deserialize(de)?;
+        let mut params = Self {
+            exchange_id: wire.exchange_id,
+            label: wire.label,
+            symbol: wire.symbol,
+            lower_price: wire.lower_price,
+            upper_price: wire.upper_price,
+            num_levels: wire.num_levels,
+            qty_per_level: wire.qty_per_level,
+            extra: wire.extra,
+        };
+        params.merge_known_keys();
+        Ok(params)
+    }
+}
+
+/// Render a decimal as a TOML string.
+///
+/// A string (not a float) is deliberate: a config that round-trips through
+/// `f64` would lose precision on a price, and every strategy parses these back
+/// as `Decimal`.
+fn decimal_value(v: Decimal) -> toml::Value {
+    toml::Value::String(v.normalize().to_string())
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct StrategyParams {
-    #[serde(default)]
     pub exchange_id: Option<String>,
-    #[serde(default)]
     pub label: Option<String>,
-    #[serde(default)]
     pub symbol: Option<String>,
-    #[serde(default)]
     pub lower_price: Option<Decimal>,
-    #[serde(default)]
     pub upper_price: Option<Decimal>,
-    #[serde(default)]
     pub num_levels: Option<u32>,
-    #[serde(default)]
     pub qty_per_level: Option<Decimal>,
     /// Catch-all for strategy-specific parameters (strategy-specific keys). Each
-    /// strategy deserializes its own config struct from this table.
-    #[serde(flatten)]
+    /// strategy deserializes its own config struct from this table. Also
+    /// carries the well-known keys above, merged in by [`Deserialize`] — see
+    /// [`StrategyParams::table`].
     pub extra: toml::Table,
 }
 
 impl StrategyParams {
-    /// Strategy-specific parameter table for strategy-specific parameters.
+    /// The full parameter table a strategy deserializes its config from.
+    ///
+    /// This is the *merged* view: the well-known keys serde consumed
+    /// (`symbol`, `exchange_id`, `label`, the grid bounds) are written back
+    /// into `extra` by [`Deserialize`], so a strategy's own config struct sees
+    /// everything the file declared. Returning the catch-all alone silently
+    /// dropped every well-known key, so the documented
+    /// `[strategy.params] symbol = "..."` never reached a strategy and any
+    /// strategy requiring a symbol failed at startup with "missing field".
     pub const fn table(&self) -> &toml::Table {
         &self.extra
+    }
+
+    /// Merge the well-known keys back into the catch-all table.
+    fn merge_known_keys(&mut self) {
+        // An explicit `extra` entry wins: it is the more specific source, and
+        // serde cannot have produced a collision here from a real document.
+        let put = |table: &mut toml::Table, key: &str, value: toml::Value| {
+            table.entry(key).or_insert(value);
+        };
+        if let Some(v) = self.exchange_id.clone() {
+            put(&mut self.extra, "exchange_id", toml::Value::String(v));
+        }
+        if let Some(v) = self.label.clone() {
+            put(&mut self.extra, "label", toml::Value::String(v));
+        }
+        if let Some(v) = self.symbol.clone() {
+            put(&mut self.extra, "symbol", toml::Value::String(v));
+        }
+        if let Some(v) = self.lower_price {
+            put(&mut self.extra, "lower_price", decimal_value(v));
+        }
+        if let Some(v) = self.upper_price {
+            put(&mut self.extra, "upper_price", decimal_value(v));
+        }
+        if let Some(v) = self.num_levels {
+            put(&mut self.extra, "num_levels", toml::Value::Integer(i64::from(v)));
+        }
+        if let Some(v) = self.qty_per_level {
+            put(&mut self.extra, "qty_per_level", decimal_value(v));
+        }
     }
 
     /// Venue identifier string, defaulting to `"mock"`.
@@ -116,5 +197,89 @@ impl Config {
         let config: Self = toml::from_str(&contents)
             .wrap_err_with(|| format!("failed to parse config file: {}", path.display()))?;
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal_macros::dec;
+
+    use super::*;
+
+    /// Parse a config the way the README documents it.
+    fn parse(params_toml: &str) -> StrategyParams {
+        let doc = format!(
+            "daemon_endpoint = \"http://127.0.0.1:8810\"\n[strategy]\ntype = \"simple_grid\"\n[strategy.params]\n{params_toml}\n"
+        );
+        let config: Config = toml::from_str(&doc).expect("config parses");
+        config.strategy.params
+    }
+
+    /// The well-known keys serde consumed must be written back into the table a
+    /// strategy deserializes from. Before this merge, `table()` returned only
+    /// the catch-all, so the documented `[strategy.params] symbol = "..."` never
+    /// reached a strategy and every symbol-requiring strategy failed at
+    /// startup with "missing field `symbol`".
+    #[test]
+    fn well_known_keys_reach_the_strategy_table() {
+        let params = parse(
+            "symbol = \"BTCUSDT\"\nexchange_id = \"binance\"\nnum_levels = 7\nlower_price = \"90000\"\nqty_per_level = \"0.001\"\n",
+        );
+        let table = params.table();
+        assert_eq!(table.get("symbol").and_then(toml::Value::as_str), Some("BTCUSDT"));
+        assert_eq!(table.get("exchange_id").and_then(toml::Value::as_str), Some("binance"));
+        assert_eq!(table.get("num_levels").and_then(toml::Value::as_integer), Some(7));
+        // Decimals round-trip as strings, so a price never loses precision by
+        // passing through `f64`.
+        assert_eq!(table.get("lower_price").and_then(toml::Value::as_str), Some("90000"));
+        assert_eq!(table.get("qty_per_level").and_then(toml::Value::as_str), Some("0.001"));
+    }
+
+    #[test]
+    fn strategy_specific_keys_survive_the_merge() {
+        let params = parse("symbol = \"BTCUSDT\"\nfunding_rate_threshold = \"0.0005\"\n");
+        assert_eq!(
+            params.table().get("funding_rate_threshold").and_then(toml::Value::as_str),
+            Some("0.0005")
+        );
+    }
+
+    /// The whole point of the merge: a strategy's own config struct must
+    /// deserialize from the table the file produced.
+    #[test]
+    fn a_strategy_config_deserializes_from_the_merged_table() {
+        #[derive(serde::Deserialize)]
+        struct GridConfig {
+            symbol: String,
+            num_levels: u32,
+            qty_per_level: Decimal,
+        }
+        let params = parse(
+            "symbol = \"BTCUSDT\"\nexchange_id = \"mock\"\nnum_levels = 5\nqty_per_level = \"0.001\"\n",
+        );
+        let cfg: GridConfig = toml::Value::Table(params.table().clone())
+            .try_into()
+            .expect("the documented config must deserialize");
+        assert_eq!(cfg.symbol, "BTCUSDT");
+        assert_eq!(cfg.num_levels, 5);
+        assert_eq!(cfg.qty_per_level, dec!(0.001));
+    }
+
+    /// An absent well-known key must stay absent rather than materialise as a
+    /// zero: a strategy that treats `num_levels = 0` as "use the default" would
+    /// otherwise silently get a different code path from "not specified".
+    #[test]
+    fn absent_well_known_keys_stay_absent() {
+        let params = parse("symbol = \"BTCUSDT\"\n");
+        assert!(!params.table().contains_key("num_levels"));
+        assert!(!params.table().contains_key("lower_price"));
+        assert!(!params.table().contains_key("label"));
+    }
+
+    /// The accessors keep working off the typed fields, and still default.
+    #[test]
+    fn venue_accessor_defaults_to_mock() {
+        assert_eq!(parse("symbol = \"X\"\n").venue(), "mock");
+        assert_eq!(parse("symbol = \"X\"\nexchange_id = \"htx\"\n").venue(), "htx");
     }
 }

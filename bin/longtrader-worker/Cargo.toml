@@ -49,6 +49,9 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 ulid.workspace = true
 
 [dev-dependencies]
+# `client` powers the end-to-end router tests in `session::server`, which drive
+# the real Connect wire path through the generated clients.
+connectrpc = { workspace = true, features = ["axum", "client"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

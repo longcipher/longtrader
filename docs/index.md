@@ -30,5 +30,7 @@ hand-edited wrappers over generated stubs.
 | TypeScript | [`@longcipher/longtrader-sdk`](https://www.npmjs.com/package/@longcipher/longtrader-sdk) | [![npm](https://img.shields.io/npm/v/@longcipher/longtrader-sdk.svg)](https://www.npmjs.com/package/@longcipher/longtrader-sdk) |
 | Go | [`sdks/go`](https://pkg.go.dev/github.com/longcipher/longtrader/sdks/go) | [![Go Reference](https://pkg.go.dev/badge/github.com/longcipher/longtrader/sdks/go.svg)](https://pkg.go.dev/github.com/longcipher/longtrader/sdks/go) |
 
-> The Go SDK is a generated-stub scaffold; the `Session` API is available in
-> Rust, Python, and TypeScript today. See [sdks/go/README.md](../sdks/go/README.md).
+> The Go SDK implements the same `Session` lifecycle, the full trading and
+> market surfaces, and the `TradingPort`/`MarketPort` seam, with a
+> dependency-free hand-written protobuf codec. See
+> [sdks/go/README.md](../sdks/go/README.md).

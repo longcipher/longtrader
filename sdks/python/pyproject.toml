@@ -36,5 +36,11 @@ Repository = "https://github.com/longcipher/longtrader"
 Documentation = "https://github.com/longcipher/longtrader#readme"
 Issues = "https://github.com/longcipher/longtrader/issues"
 
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["longtrader_sdk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

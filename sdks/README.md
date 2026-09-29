@@ -9,25 +9,26 @@ semantics live in the contract (`proto/`, buf-managed).
 The published SDKs do **not** all mirror one strict 6-directory tree at the SDK
 root. Python and TypeScript bury their real code under a package directory
 (`longtrader_sdk/` and `src/`), with thin **placeholder redirect directories** at
-the SDK root. The Go SDK is a generated-stub **scaffold** (its `Session` API is
-not yet implemented). The canonical *concepts* map 1:1; the *directory names*
-differ by language.
+the SDK root. The Go SDK keeps its code at the root (`contract/`, `session/`,
+`ports/`, `examples/`) because it is a single-module, stdlib-only library with
+no code generation step. The canonical *concepts* map 1:1; the *directory
+names* differ by language.
 
 | Canonical concept | Rust | Python | TypeScript | Go |
 |---|---|---|---|---|
-| `contract/` (generated, never hand-edited) | `crates/longtrader-contract` | `longtrader_sdk/proto/` | `src/gen/` | `gen/` |
+| `contract/` (generated, never hand-edited) | `crates/longtrader-contract` | `longtrader_sdk/proto/` | `src/gen/` | `contract/` (hand-written codec) + optional `gen/` |
 | `session/` | `bin/longtrader-worker/src/session/` | `longtrader_sdk/session.py` | `src/session.ts` | `session/` |
 | `ports/` | `src/ports.rs` | `longtrader_sdk/ports.py` | `src/ports.ts` | `ports/` |
 | `adapters/` | `src/adapters/{remote,mock}.rs` | Connect-over-httpx in `session.py` | Connect-over-undici in `session.ts` | Connect-over-http in `session/` |
-| `strategies/` | `src/strategies/` | `examples/grid_strategy.py` | `examples/grid_strategy.ts` | `strategies/` (planned) |
+| `strategies/` | `src/strategies/` | `examples/grid_strategy.py` | `examples/grid_strategy.ts` | `examples/grid_strategy.go` |
 | `examples/` | `examples/` / `docs/` | `sdks/python/examples/` | `sdks/typescript/examples/` | `sdks/go/examples/` |
 
 > **Layout reality check.** If you `ls` a Python/TypeScript SDK root you may see
 > near-empty placeholder dirs (e.g. `contract/`, `session/`, `ports/`) that exist
 > only to mirror the canonical map. The *real* code lives in `longtrader_sdk/`
 > (Python) or `src/` (TypeScript). Don't edit the placeholder dirs — edit the
-> package directory. The Go SDK currently has only generated `gen/` plus a
-> `session/` scaffold stub.
+> package directory. The Go SDK puts its real code in the root directories
+> listed above; its `gen/` is optional `buf` output that nothing imports.
 
 ## Concept parity
 
@@ -47,6 +48,14 @@ Each language maps the same three behaviors — `DropOldest` preserves newest,
 *encoding* is **not** identical: Python/TypeScript use UPPER-CASE string values,
 Go uses the `OverflowPolicy` constants/ints. Wire values are the generated proto
 enum; the SDK wrapper exposes the idiomatic per-language form above.
+
+## Dependency policy
+
+Python and TypeScript consume the `buf`-generated stubs. The Go SDK is
+**stdlib-only**: `contract/` is a hand-written protobuf codec for the same wire
+format, so `go.mod` has no `require` directives and the module builds, vets and
+tests in a fresh checkout with no codegen step. `gen/` remains available as
+optional `buf generate` output and is imported by nothing.
 
 ## Layout verification (worker)
 

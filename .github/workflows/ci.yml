@@ -35,13 +35,21 @@ jobs:
         with:
           tool: just,cargo-shear,cargo-sort,typos-cli,rumdl,cargo-workspace-inheritance-check
 
+      # `just ci` also vets and tests the Go SDK.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
       - run: just ci
 
   # ---------------------------------------------------------------------------
-  # Go: gofmt + go vet + go build
+  # Go: gofmt + go vet + go build + go test
+  #
+  # The SDK is stdlib-only and encodes protobuf by hand, so this job needs no
+  # `buf generate` step: the tests must stay green in a fresh checkout.
   # ---------------------------------------------------------------------------
   go:
-    name: Go (fmt + vet + build)
+    name: Go (fmt + vet + build + test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -65,11 +73,17 @@ jobs:
       - name: go build
         run: cd sdks/go && go build ./...
 
+      - name: go test
+        run: cd sdks/go && go test ./...
+
+      - name: go test -race
+        run: cd sdks/go && go test -race ./...
+
   # ---------------------------------------------------------------------------
-  # Python: ruff format + ruff lint
+  # Python: ruff format + ruff lint + contract-conformance tests
   # ---------------------------------------------------------------------------
   python:
-    name: Python (fmt + lint)
+    name: Python (fmt + lint + test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -87,11 +101,24 @@ jobs:
       - name: ruff lint
         run: ruff check --select E,F sdks/python
 
+      # The tests import the generated stubs, so generation must precede them.
+      - uses: bufbuild/buf-setup-action@v1
+
+      - name: Install test dependencies
+        run: |
+          pip install pytest protobuf httpx grpcio-tools
+
+      - name: Generate Connect stubs
+        run: just sdk-generate
+
+      - name: SDK tests
+        run: just sdk-test-py
+
   # ---------------------------------------------------------------------------
-  # TypeScript: prettier format + tsc --noEmit (after stub generation)
+  # TypeScript: prettier + tsc + Node test runner (after stub generation)
   # ---------------------------------------------------------------------------
   typescript:
-    name: TypeScript (fmt + lint)
+    name: TypeScript (fmt + lint + test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -113,7 +140,19 @@ jobs:
         run: just sdk-generate
 
       - name: prettier format check
-        run: cd sdks/typescript && npx prettier --check "src/**/*.ts" "examples/**/*.ts"
+        run: cd sdks/typescript && npx prettier --check "src/**/*.ts" "examples/**/*.ts" "tests/**/*.ts"
 
       - name: tsc --noEmit
         run: cd sdks/typescript && npx tsc --noEmit -p tsconfig.json
+
+      - name: SDK tests
+        run: just sdk-test-ts
+
+      # Guards the packaging surface: the build config must keep examples and
+      # tests out of the published tarball.
+      - name: Verify build output excludes examples and tests
+        run: |
+          cd sdks/typescript
+          npm run build
+          test ! -d dist/examples
+          test ! -d dist/tests
