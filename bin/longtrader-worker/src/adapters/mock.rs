@@ -380,6 +380,45 @@ impl MarketDataSource for MockAdapter {
         Ok(market::ListSymbolsResponse { symbols: vec![info], ..Default::default() })
     }
 
+    async fn search_symbols(
+        &self,
+        req: market::SearchSymbolsRequest,
+    ) -> Result<market::SearchSymbolsResponse, PortError> {
+        let listed = self.list_symbols(market::ListSymbolsRequest::default()).await?;
+        let needle = req.query.to_lowercase();
+        let symbols: Vec<market::SymbolInfo> = listed
+            .symbols
+            .into_iter()
+            .filter(|s| {
+                needle.is_empty() ||
+                    s.name.to_lowercase().contains(&needle) ||
+                    s.display_name.to_lowercase().contains(&needle)
+            })
+            .collect();
+        Ok(market::SearchSymbolsResponse { symbols, ..Default::default() })
+    }
+
+    async fn list_tickers(
+        &self,
+        req: market::ListTickersRequest,
+    ) -> Result<market::ListTickersResponse, PortError> {
+        let listed = self.list_symbols(market::ListSymbolsRequest::default()).await?;
+        let mut tickers = Vec::new();
+        for info in &listed.symbols {
+            if !req.symbols.is_empty() && !req.symbols.contains(&info.name) {
+                continue;
+            }
+            tickers.push(
+                self.fetch_ticker(market::FetchTickerRequest {
+                    symbol: info.name.clone(),
+                    ..Default::default()
+                })
+                .await?,
+            );
+        }
+        Ok(market::ListTickersResponse { tickers, ..Default::default() })
+    }
+
     async fn get_candles(
         &self,
         req: market::GetCandlesRequest,
@@ -734,6 +773,24 @@ impl FundingRateSource for MockAdapter {
                 time_ms: grid - i64::from(i) * MOCK_FUNDING_INTERVAL_MS,
             })
             .collect())
+    }
+
+    async fn list_funding_rates(
+        &self,
+        exchange_id: &common::ExchangeId,
+        symbols: &[String],
+    ) -> Result<Vec<FundingRateSnapshot>, PortError> {
+        let mut out = Vec::new();
+        for symbol in symbols {
+            match self.fetch_funding_rate(exchange_id, symbol).await {
+                Ok(snapshot) => out.push(snapshot),
+                // An unlisted symbol is simply absent from the batch, matching
+                // the "empty = everything the venue reports" contract.
+                Err(PortError::NotFound(_)) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(out)
     }
 }
 

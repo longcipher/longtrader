@@ -2,13 +2,19 @@ syntax = "proto3";
 
 package longtrader.terminal.v1;
 
-import "longtrader/terminal/v1/messages.proto";
+import "longtrader/stream/v1/stream.proto";
 
 // Runtime state and subscriptions.
+//
+// `StreamUpdates` deliberately reuses `stream.v1`: it is the same envelope the
+// worker's `StreamService` emits, so there is exactly one streaming contract
+// and clients branch on `TopicClass` rather than on which service they called.
 service RuntimeService {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc ListVenues(ListVenuesRequest) returns (ListVenuesResponse);
-  rpc StreamUpdates(StreamUpdatesRequest) returns (stream UpdateEnvelope);
+  // `stream` is the streaming keyword, so the type must be fully qualified.
+  rpc StreamUpdates(.longtrader.stream.v1.StreamUpdatesRequest)
+      returns (stream .longtrader.stream.v1.UpdateEnvelope);
 }
 
 message HealthRequest {}
@@ -29,10 +35,4 @@ message ListVenuesRequest {}
 
 message ListVenuesResponse {
   repeated VenueStatus venues = 1;
-}
-
-message StreamUpdatesRequest {
-  repeated string venues = 1;          // empty = all
-  repeated string symbols = 2;         // empty = all
-  repeated TopicClass topics = 3;      // empty = all
 }

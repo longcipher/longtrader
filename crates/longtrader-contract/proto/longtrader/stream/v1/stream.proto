@@ -3,17 +3,22 @@ syntax = "proto3";
 package longtrader.stream.v1;
 
 import "longtrader/common/v1/types.proto";
+import "longtrader/market/v1/market.proto";
 import "longtrader/trading/v1/trading.proto";
 import "google/protobuf/timestamp.proto";
 
 // Unified real-time streaming contract.
 //
 // One server-streaming RPC fans every update class (market data, private
-// trading, account) to a consumer as tagged `UpdateEnvelope` messages.
+// trading, account, runtime) to a consumer as tagged `UpdateEnvelope` messages.
 // Values use `common.v1.Decimal` (dual representation); entity lifecycle
 // times use `google.protobuf.Timestamp` and high-frequency event times use
 // `int64 *_ms` (Unix milliseconds). Reconnect/replay is negotiated through
 // the envelope's `resume_token`.
+//
+// This is the single streaming contract for the whole product: the terminal
+// runtime stream and the worker stream are the same envelope, differing only
+// in which `TopicClass` buckets the caller subscribes to.
 
 // Side as seen from the taker's perspective (public trades, liquidations,
 // own-order projections). `UNKNOWN` degrades consumers to two-column totals.
@@ -24,24 +29,22 @@ enum TradeSide {
   TRADE_SIDE_UNKNOWN = 3;
 }
 
-enum OrderType {
-  ORDER_TYPE_UNSPECIFIED = 0;
-  ORDER_TYPE_MARKET = 1;
-  ORDER_TYPE_LIMIT = 2;
-  ORDER_TYPE_STOP = 3;
-}
-
-enum OrderSide {
-  ORDER_SIDE_UNSPECIFIED = 0;
-  ORDER_SIDE_BUY = 1;
-  ORDER_SIDE_SELL = 2;
-}
-
-enum OrderStatus {
-  ORDER_STATUS_UNSPECIFIED = 0;
-  ORDER_STATUS_PENDING = 1;
-  ORDER_STATUS_FILLED = 2;
-  ORDER_STATUS_CANCELED = 3;
+// Classification buckets for stream subscriptions, used for server-side
+// bucketed broadcast (a slow client only stalls its own subscribed buckets).
+enum TopicClass {
+  TOPIC_CLASS_UNSPECIFIED = 0;
+  // tick / ticker.
+  TOPIC_CLASS_MARKET_LITE = 1;
+  // book / trade.
+  TOPIC_CLASS_MARKET_HEAVY = 2;
+  // position / order / execution / account.
+  TOPIC_CLASS_TRADING = 3;
+  // runtime_status.
+  TOPIC_CLASS_RUNTIME = 4;
+  // funding_rate / basis (low frequency).
+  TOPIC_CLASS_FUNDING = 5;
+  // liquidation / open_interest (liquidation peak).
+  TOPIC_CLASS_DERIVATIVES = 6;
 }
 
 // Best bid/ask + last trade snapshot for one symbol.
@@ -154,24 +157,60 @@ message ClosedPosition {
 }
 
 // Order state projection.
+//
+// The projection reuses `trading.v1` enums (single authority): its lifecycle
+// is the venue's order lifecycle, so a private `OrderStatus` would only invite
+// the same-name/different-number confusion the contract style guide bans.
 message Order {
   string id = 1;
   string client_order_id = 2;
   string symbol = 3;
-  OrderType type = 4;
-  OrderSide side = 5;
-  OrderStatus status = 6;
+  trading.v1.OrderType type = 4;
+  trading.v1.OrderSide side = 5;
+  trading.v1.OrderStatus status = 6;
   common.v1.Decimal amount = 7;
   common.v1.Decimal price = 8;
   common.v1.Decimal filled = 9;
   common.v1.Decimal avg_price = 10;
   google.protobuf.Timestamp created_at = 11;
   google.protobuf.Timestamp updated_at = 12;
+  // Bracket prices armed on the order. Present for the same reason they are on
+  // `trading.v1.Order`: a UI that shows an order's bracket must be able to read
+  // it from the projection, not only from a follow-up unary fetch.
+  optional common.v1.Decimal take_profit = 13;
+  optional common.v1.Decimal stop_loss = 14;
+}
+
+// Execution report: one fill event surfaced to the UI.
+message ExecutionReport {
+  string order_id = 1;
+  string symbol = 2;
+  trading.v1.OrderSide side = 3;
+  trading.v1.OrderStatus status = 4;
+  common.v1.Decimal filled_quantity = 5;
+  common.v1.Decimal price = 6;
+  int64 timestamp_ms = 7;
+}
+
+// Runtime health of one venue connection, streamed to the UI.
+message RuntimeStatus {
+  common.v1.ExchangeId exchange_id = 1;
+  bool connected = 2;
+  uint64 reconnect_count = 3;
+  uint64 lagged_count = 4;
+  // Latency metrics in milliseconds; a statistic, not an amount.
+  double place_order_p99_ms = 5;
+  double msg_per_sec = 6;
+  int64 uptime_secs = 7;
 }
 
 // One streamed update. Exactly one `payload` variant is populated per
 // message; `resume_token` carries the replay cursor for reconnects.
 message UpdateEnvelope {
+  // Monotonic, gap-free per subscription; a gap requires a resync.
+  uint64 seq = 21;
+  // Bucket this envelope belongs to (server-side bucketed broadcast).
+  TopicClass topic_class = 22;
   oneof payload {
     Tick tick = 1;
     BookSnapshot book = 2;
@@ -183,6 +222,11 @@ message UpdateEnvelope {
     ClosedPosition position_closed = 8;
     Order order = 9;
     Account account = 10;
+    // Snapshot market data, borrowed from `market.v1` rather than duplicated.
+    market.v1.Ticker ticker = 11;
+    market.v1.FundingRate funding_rate = 12;
+    ExecutionReport execution = 13;
+    RuntimeStatus runtime_status = 14;
   }
   // Opaque token from a previous stream's last event; empty starts fresh.
   string resume_token = 20;
@@ -193,6 +237,8 @@ message StreamUpdatesRequest {
   common.v1.ExchangeId exchange_id = 1;
   // Symbol filter; empty subscribes to every symbol the venue streams.
   repeated string symbols = 2;
+  // Bucket filter; empty subscribes to every bucket.
+  repeated TopicClass topics = 3;
 }
 
 service StreamService {

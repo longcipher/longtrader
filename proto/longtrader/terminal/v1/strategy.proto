@@ -2,8 +2,8 @@ syntax = "proto3";
 
 package longtrader.terminal.v1;
 
-import "longtrader/terminal/v1/messages.proto";
-import "longtrader/terminal/v1/trading.proto";
+import "longtrader/stream/v1/stream.proto";
+import "longtrader/trading/v1/trading.proto";
 
 // Strategy lifecycle and actions (worker automation).
 service StrategyService {
@@ -57,12 +57,19 @@ message GetStrategyStatusRequest {
   string strategy_id = 1;
 }
 
+// ---- Strategy actions ----
+//
+// Actions reuse the `trading.v1` request shapes rather than redefining a flat
+// terminal variant: an action is exactly a venue-scoped trading request bound
+// to a strategy, so a second request type would only duplicate the order
+// vocabulary (and drift from it).
+
 message SubmitActionRequest {
   string strategy_id = 1;
   oneof action {
-    PlaceOrderRequest place_order = 10;
-    CancelOrderRequest cancel_order = 11;
-    CancelAllRequest cancel_all = 12;
+    trading.v1.CreateOrderRequest place_order = 10;
+    trading.v1.CancelOrderRequest cancel_order = 11;
+    trading.v1.CancelAllOrdersRequest cancel_all = 12;
     SetKillSwitch set_kill_switch = 13;
   }
 }
@@ -75,6 +82,21 @@ message ActionReceipt {
   string strategy_id = 1;
   string receipt_id = 2;
   string message = 3;
+}
+
+// Strategy events projected to the terminal UI. Payload entities come from
+// `stream.v1` so the UI has one shape per entity regardless of which stream
+// it arrived on.
+message StrategyEvent {
+  string strategy_id = 1;
+  string status = 2;          // RUNNING / PAUSED / STOPPED / ERROR
+  oneof payload {
+    stream.v1.ExecutionReport execution = 10;
+    stream.v1.Account account = 11;
+    stream.v1.Position position = 12;
+    stream.v1.Order order = 13;
+  }
+  string message = 20;
 }
 
 message StreamStrategyEventsRequest {

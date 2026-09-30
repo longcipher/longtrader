@@ -965,16 +965,21 @@ class Session:
     def get_candles(
         self,
         symbol: str,
-        timeframe: str = "M1",
+        timeframe: int | None = None,
         limit: int = 100,
         exchange_id: str = "",
     ) -> Any:
-        """OHLCV candles. ``timeframe`` is the contract's string form (M1, H4, ...)."""
+        """OHLCV candles; ``timeframe`` is the contract enum value.
+
+        Pass ``market_pb2.TIMEFRAME_M1`` / ``TIMEFRAME_H4`` / ... (or ``None``
+        for the one-minute default). It is no longer a free-form string, so a
+        typo cannot silently select a different period.
+        """
         pb = _market_pb()
         req = pb.GetCandlesRequest(
             exchange_id=_exchange_id(exchange_id),
             symbol=symbol,
-            timeframe=timeframe.strip().upper(),
+            timeframe=pb.TIMEFRAME_M1 if timeframe is None else timeframe,
             pagination=_pagination(limit=limit),
         )
         return self._unary(

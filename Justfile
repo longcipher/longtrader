@@ -14,7 +14,7 @@ fix:
   RUSTC_WRAPPER= cargo +nightly clippy --fix --all --allow-dirty
 
 # Run all lints
-lint:
+lint: proto-lint
   typos
   rumdl check .
   cargo sort -w -g -c
@@ -87,11 +87,12 @@ check-cn:
 
 # Rust gate, mirroring the `rust` CI job: lint, test and build the workspace.
 #
-# The SDK gates live in their own recipes because each needs a different
-# toolchain (Go, Python+grpcio-tools, Node) plus generated stubs. Keep them
-# out of `ci` so the Rust job does not have to provision Node, Python and buf
-# just to re-run checks that the `go`, `python` and `typescript` jobs already
-# run with the right toolchain.
+# `lint` folds in `proto-lint`, so this needs `buf` on PATH (the `rust` CI job
+# installs it). The SDK gates live in their own recipes because each needs a
+# different toolchain (Go, Python+grpcio-tools, Node) plus generated stubs.
+# Keep them out of `ci` so the Rust job does not have to provision Node and
+# Python just to re-run checks that the `go`, `python` and `typescript` jobs
+# already run with the right toolchain.
 ci: lint test build
 
 # Full local gate: the Rust checks plus every SDK. Needs the Go, Python and
@@ -131,15 +132,20 @@ proto-sync:
 proto-lint:
   cd proto && buf lint
 
-# Detect wire-breaking contract changes against the main branch.
+# Detect wire-breaking contract changes against a git ref.
+#
+# `ref` defaults to the local `main`. CI passes the PR base as
+# `refs/remotes/origin/<base>`; a release job can pass a published tag
+# (e.g. `refs/tags/v0.2.0`) to gate the release. A bare `just proto-breaking`
+# is the local pre-push check.
 #
 # The `--against` URL is resolved relative to the recipe's working directory,
 # which is `proto/` after the `cd`. A bare `.git#...` therefore points at
 # `proto/.git`, which does not exist, and the gate fails with "does not appear
 # to be a git repository" instead of reporting a real break. Use `../.git` and
 # keep `subdir=proto` so the comparison still runs against the `proto/` subtree.
-proto-breaking:
-  cd proto && buf breaking --against '../.git#branch=main,subdir=proto'
+proto-breaking ref='refs/heads/main':
+  cd proto && buf breaking --against "../.git#ref={{ref}},subdir=proto"
 
 # Generate SDK stubs locally (Python -> sdks/python, TypeScript ->
 # sdks/typescript) without network buf plugins; unavailable toolchains are

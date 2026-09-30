@@ -157,7 +157,7 @@ A non-200 unary response carries a Connect error JSON body:
   "details": [
     {
       "@type": "type.googleapis.com/longtrader.common.v1.ErrorDetail",
-      "reason": "INSUFFICIENT_BALANCE",
+      "reason": "ERROR_REASON_INSUFFICIENT_BALANCE",
       "domain": "longtrader.worker",
       "retryable": false,
       "kill_switch_recommended": false,
@@ -173,11 +173,11 @@ A non-200 unary response carries a Connect error JSON body:
 
 | field | type | meaning |
 |---|---|---|
-| `reason` | string | stable machine code, e.g. `INSUFFICIENT_BALANCE` |
+| `reason` | `common.v1.ErrorReason` | stable machine-readable reason — the only failure field to branch on |
 | `domain` | string | producing component, e.g. `longtrader.worker` |
 | `retryable` | bool | whether a retry is safe |
 | `retry_after` | Duration | backoff hint when `retryable` |
-| `kill_switch_recommended` | bool | true for `AUTH_EXPIRED` / `SESSION_REVOKED` — cancel open orders before exit |
+| `kill_switch_recommended` | bool | true for `ERROR_REASON_AUTH_EXPIRED` / `ERROR_REASON_SESSION_REVOKED` — cancel open orders before exit |
 | `native_exchange_code` | string | verbatim venue error code/text for triage |
 | `correlation_id` | string | echoes `client_order_id` / request id / trace id |
 

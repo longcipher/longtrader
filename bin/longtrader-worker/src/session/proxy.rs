@@ -628,6 +628,26 @@ impl market::MarketDataService for MarketDataProxy {
         Response::ok(PreEncoded::from_message(&resp))
     }
 
+    async fn search_symbols(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, market::SearchSymbolsRequest>,
+    ) -> connectrpc::ServiceResult<PreEncoded<market::SearchSymbolsResponse>> {
+        let req = request.to_owned_message();
+        let resp = self.market.search_symbols(req).await.map_err(map_port)?;
+        Response::ok(PreEncoded::from_message(&resp))
+    }
+
+    async fn list_tickers(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, market::ListTickersRequest>,
+    ) -> connectrpc::ServiceResult<PreEncoded<market::ListTickersResponse>> {
+        let req = request.to_owned_message();
+        let resp = self.market.list_tickers(req).await.map_err(map_port)?;
+        Response::ok(PreEncoded::from_message(&resp))
+    }
+
     async fn fetch_ticker(
         &self,
         _ctx: RequestContext,
@@ -709,6 +729,23 @@ impl market::MarketDataService for MarketDataProxy {
             funding.fetch_funding_rate(&exchange, &req.symbol).await.map_err(map_port)?;
         let resp = market::FetchFundingRateResponse {
             funding_rate: buffa::MessageField::some(funding_snapshot_to_unified(&snapshot)),
+            ..Default::default()
+        };
+        Response::ok(PreEncoded::from_message(&resp))
+    }
+
+    async fn list_funding_rates(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, market::ListFundingRatesRequest>,
+    ) -> connectrpc::ServiceResult<PreEncoded<market::ListFundingRatesResponse>> {
+        let funding = self.funding.as_ref().ok_or_else(|| not_implemented("funding rates"))?;
+        let req = request.to_owned_message();
+        let exchange = resolved_exchange(&req.exchange_id, &self.default_exchange);
+        let snapshots =
+            funding.list_funding_rates(&exchange, &req.symbols).await.map_err(map_port)?;
+        let resp = market::ListFundingRatesResponse {
+            funding_rates: snapshots.iter().map(funding_snapshot_to_unified).collect(),
             ..Default::default()
         };
         Response::ok(PreEncoded::from_message(&resp))

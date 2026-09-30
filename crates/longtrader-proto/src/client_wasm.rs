@@ -1,9 +1,10 @@
 //! WASM-compatible Connect-RPC client backed by `gloo-net` (browser).
 //!
 //! Mirrors the native [`client`](crate::client) API surface so browser
-//! frontends talk the same `longtrader.terminal.v1` protocol with identical
-//! method names. Streaming (`RuntimeService::StreamUpdates`) uses `web-sys`
-//! fetch + `ReadableStream` so chunked Connect framing works in the browser.
+//! frontends talk the same canonical `longtrader.{market,trading}.v1` services
+//! plus the terminal-only runtime/strategy surfaces, with identical method
+//! names. Streaming (`RuntimeService::StreamUpdates`) uses `web-sys` fetch +
+//! `ReadableStream` so chunked Connect framing works in the browser.
 
 #![allow(clippy::pedantic)]
 
@@ -18,7 +19,10 @@ use crate::{
         SERVICE_MARKET, SERVICE_RUNTIME, SERVICE_STRATEGY, SERVICE_TRADING, service_url,
         trim_base_url,
     },
-    proto::longtrader::{common::v1 as common, terminal::v1 as proto},
+    proto::longtrader::{
+        common::v1 as common, market::v1 as umarket, stream::v1 as stream, terminal::v1 as proto,
+        trading::v1 as utrading,
+    },
 };
 
 /// Build a `common.v1.Pagination` from a simple `limit`.
@@ -42,7 +46,8 @@ pub enum TerminalClientError {
     MissingField(String),
 }
 
-/// Connect-RPC client for the trading terminal services (browser/WASM).
+/// Connect-RPC client for the trading terminal and canonical contract services
+/// (browser/WASM).
 #[derive(Clone, Debug)]
 pub struct TerminalClient {
     base_url: String,
@@ -98,227 +103,204 @@ impl TerminalClient {
             .map_err(|e| TerminalClientError::Decode(format!("decode {method}: {e}")))
     }
 
-    // ---- MarketDataService ----
+    // ---- MarketDataService (canonical) ----
 
-    /// List available symbols.
-    pub async fn get_symbols(
+    /// Every symbol the exchange lists.
+    pub async fn list_symbols(
         &self,
-        venue: &str,
-    ) -> Result<Vec<proto::Symbol>, TerminalClientError> {
-        let req = proto::GetSymbolsRequest { venue: venue.to_string(), ..Default::default() };
-        let resp: proto::GetSymbolsResponse = self.unary(SERVICE_MARKET, "GetSymbols", req).await?;
+        exchange_id: &common::ExchangeId,
+    ) -> Result<Vec<umarket::SymbolInfo>, TerminalClientError> {
+        let req = umarket::ListSymbolsRequest {
+            exchange_id: exchange_id.clone().into(),
+            ..Default::default()
+        };
+        let resp: umarket::ListSymbolsResponse =
+            self.unary(SERVICE_MARKET, "ListSymbols", req).await?;
+        Ok(resp.symbols)
+    }
+
+    /// Case-insensitive substring search over symbol names.
+    pub async fn search_symbols(
+        &self,
+        exchange_id: &common::ExchangeId,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<umarket::SymbolInfo>, TerminalClientError> {
+        let req = umarket::SearchSymbolsRequest {
+            exchange_id: exchange_id.clone().into(),
+            query: query.to_string(),
+            pagination: buffa::MessageField::some(pagination(limit)),
+            ..Default::default()
+        };
+        let resp: umarket::SearchSymbolsResponse =
+            self.unary(SERVICE_MARKET, "SearchSymbols", req).await?;
         Ok(resp.symbols)
     }
 
     /// Fetch OHLCV candles.
     pub async fn get_candles(
         &self,
-        venue: &str,
+        exchange_id: &common::ExchangeId,
         symbol: &str,
-        timeframe: proto::Timeframe,
+        timeframe: umarket::Timeframe,
         limit: u32,
-    ) -> Result<Vec<proto::Candle>, TerminalClientError> {
-        self.get_candles_window(venue, symbol, timeframe, None, None, limit).await
+    ) -> Result<Vec<umarket::Candle>, TerminalClientError> {
+        self.get_candles_window(exchange_id, symbol, timeframe, None, None, limit).await
     }
 
-    /// Fetch OHLCV candles with optional time window.
+    /// Fetch OHLCV candles within an inclusive time window (Unix milliseconds).
+    ///
+    /// Either bound may be absent, which leaves that end open.
     pub async fn get_candles_window(
         &self,
-        venue: &str,
+        exchange_id: &common::ExchangeId,
         symbol: &str,
-        timeframe: proto::Timeframe,
+        timeframe: umarket::Timeframe,
         start_ms: Option<i64>,
         end_ms: Option<i64>,
         limit: u32,
-    ) -> Result<Vec<proto::Candle>, TerminalClientError> {
-        let req = proto::GetCandlesRequest {
-            venue: venue.to_string(),
-            symbol: symbol.to_string(),
-            timeframe: buffa::EnumValue::Known(timeframe),
+    ) -> Result<Vec<umarket::Candle>, TerminalClientError> {
+        let req = umarket::GetCandlesRequest {
             start_ms,
             end_ms,
+            exchange_id: exchange_id.clone().into(),
+            symbol: symbol.to_string(),
+            timeframe: buffa::EnumValue::Known(timeframe),
             pagination: buffa::MessageField::some(pagination(limit)),
             ..Default::default()
         };
-        let resp: proto::GetCandlesResponse = self.unary(SERVICE_MARKET, "GetCandles", req).await?;
+        let resp: umarket::GetCandlesResponse =
+            self.unary(SERVICE_MARKET, "GetCandles", req).await?;
         Ok(resp.candles)
     }
 
     /// Fetch the current order book snapshot.
-    pub async fn get_book(
+    pub async fn fetch_order_book(
         &self,
-        venue: &str,
+        exchange_id: &common::ExchangeId,
         symbol: &str,
-        depth: u32,
-    ) -> Result<proto::Book, TerminalClientError> {
-        let req = proto::GetBookRequest {
-            venue: venue.to_string(),
+        limit: u32,
+    ) -> Result<umarket::OrderBook, TerminalClientError> {
+        let req = umarket::FetchOrderBookRequest {
+            exchange_id: exchange_id.clone().into(),
             symbol: symbol.to_string(),
-            depth,
+            pagination: buffa::MessageField::some(pagination(limit)),
             ..Default::default()
         };
-        let resp: proto::GetBookResponse = self.unary(SERVICE_MARKET, "GetBook", req).await?;
-        resp.book
+        let resp: umarket::FetchOrderBookResponse =
+            self.unary(SERVICE_MARKET, "FetchOrderBook", req).await?;
+        resp.orderbook
             .as_option()
             .cloned()
-            .ok_or_else(|| TerminalClientError::MissingField("book".to_string()))
+            .ok_or_else(|| TerminalClientError::MissingField("orderbook".to_string()))
     }
 
-    /// Fetch tickers (empty `symbols` = all).
-    pub async fn get_tickers(
+    /// Single-symbol ticker snapshot.
+    pub async fn fetch_ticker(
         &self,
-        venue: &str,
+        exchange_id: &common::ExchangeId,
+        symbol: &str,
+    ) -> Result<umarket::Ticker, TerminalClientError> {
+        let req = umarket::FetchTickerRequest {
+            exchange_id: exchange_id.clone().into(),
+            symbol: symbol.to_string(),
+            ..Default::default()
+        };
+        let resp: umarket::FetchTickerResponse =
+            self.unary(SERVICE_MARKET, "FetchTicker", req).await?;
+        resp.ticker
+            .as_option()
+            .cloned()
+            .ok_or_else(|| TerminalClientError::MissingField("ticker".to_string()))
+    }
+
+    /// Batch ticker snapshots (empty `symbols` = all).
+    pub async fn list_tickers(
+        &self,
+        exchange_id: &common::ExchangeId,
         symbols: &[String],
-    ) -> Result<Vec<proto::Ticker>, TerminalClientError> {
-        let req = proto::GetTickersRequest {
-            venue: venue.to_string(),
+    ) -> Result<Vec<umarket::Ticker>, TerminalClientError> {
+        let req = umarket::ListTickersRequest {
+            exchange_id: exchange_id.clone().into(),
             symbols: symbols.to_vec(),
             ..Default::default()
         };
-        let resp: proto::GetTickersResponse = self.unary(SERVICE_MARKET, "GetTickers", req).await?;
+        let resp: umarket::ListTickersResponse =
+            self.unary(SERVICE_MARKET, "ListTickers", req).await?;
         Ok(resp.tickers)
     }
 
-    /// Search symbols by query.
-    pub async fn search_symbols(
+    /// Current funding rate for one perpetual contract.
+    pub async fn fetch_funding_rate(
         &self,
-        venue: &str,
-        query: &str,
-        limit: u32,
-    ) -> Result<Vec<proto::Symbol>, TerminalClientError> {
-        let req = proto::SearchSymbolsRequest {
-            venue: venue.to_string(),
-            query: query.to_string(),
-            pagination: buffa::MessageField::some(pagination(limit)),
-            ..Default::default()
-        };
-        let resp: proto::SearchSymbolsResponse =
-            self.unary(SERVICE_MARKET, "SearchSymbols", req).await?;
-        Ok(resp.symbols)
-    }
-
-    // ---- TradingService ----
-
-    /// Fetch account snapshot.
-    pub async fn get_account(&self, venue: &str) -> Result<proto::Account, TerminalClientError> {
-        let req = proto::GetAccountRequest { venue: venue.to_string(), ..Default::default() };
-        let resp: proto::GetAccountResponse =
-            self.unary(SERVICE_TRADING, "GetAccount", req).await?;
-        resp.account
-            .as_option()
-            .cloned()
-            .ok_or_else(|| TerminalClientError::MissingField("account".to_string()))
-    }
-
-    /// Fetch open positions.
-    pub async fn get_positions(
-        &self,
-        venue: &str,
-    ) -> Result<Vec<proto::Position>, TerminalClientError> {
-        let req = proto::GetPositionsRequest { venue: venue.to_string(), ..Default::default() };
-        let resp: proto::GetPositionsResponse =
-            self.unary(SERVICE_TRADING, "GetPositions", req).await?;
-        Ok(resp.positions)
-    }
-
-    /// Fetch open orders.
-    pub async fn get_open_orders(
-        &self,
-        venue: &str,
-        symbol: Option<&str>,
-    ) -> Result<Vec<proto::Order>, TerminalClientError> {
-        let req = proto::GetOpenOrdersRequest {
-            venue: venue.to_string(),
-            symbol: symbol.map(String::from),
-            ..Default::default()
-        };
-        let resp: proto::GetOpenOrdersResponse =
-            self.unary(SERVICE_TRADING, "GetOpenOrders", req).await?;
-        Ok(resp.orders)
-    }
-
-    /// Fetch order history.
-    pub async fn get_order_history(
-        &self,
-        venue: &str,
-        limit: u32,
-    ) -> Result<Vec<proto::Order>, TerminalClientError> {
-        let req = proto::GetOrderHistoryRequest {
-            venue: venue.to_string(),
-            pagination: buffa::MessageField::some(pagination(limit)),
-            ..Default::default()
-        };
-        let resp: proto::GetOrderHistoryResponse =
-            self.unary(SERVICE_TRADING, "GetOrderHistory", req).await?;
-        Ok(resp.orders)
-    }
-
-    /// Fetch closed positions.
-    pub async fn get_closed_positions(
-        &self,
-        venue: &str,
-        limit: u32,
-    ) -> Result<Vec<proto::ClosedPosition>, TerminalClientError> {
-        let req = proto::GetClosedPositionsRequest {
-            venue: venue.to_string(),
-            pagination: buffa::MessageField::some(pagination(limit)),
-            ..Default::default()
-        };
-        let resp: proto::GetClosedPositionsResponse =
-            self.unary(SERVICE_TRADING, "GetClosedPositions", req).await?;
-        Ok(resp.positions)
-    }
-
-    /// Place an order.
-    #[expect(clippy::too_many_arguments)]
-    pub async fn place_order(
-        &self,
-        venue: &str,
+        exchange_id: &common::ExchangeId,
         symbol: &str,
-        side: proto::Side,
-        order_type: proto::OrderType,
-        quantity: &str,
-        price: Option<&str>,
-        stop_price: Option<&str>,
-        take_profit: Option<&str>,
-        stop_loss: Option<&str>,
-        client_order_id: &str,
-        reduce_only: bool,
-    ) -> Result<proto::Order, TerminalClientError> {
-        let req = proto::PlaceOrderRequest {
-            venue: venue.to_string(),
+    ) -> Result<Option<umarket::FundingRate>, TerminalClientError> {
+        let req = umarket::FetchFundingRateRequest {
+            exchange_id: exchange_id.clone().into(),
             symbol: symbol.to_string(),
-            side: buffa::EnumValue::Known(side),
-            order_type: buffa::EnumValue::Known(order_type),
-            quantity: quantity.to_string(),
-            price: price.map(String::from),
-            stop_price: stop_price.map(String::from),
-            take_profit: take_profit.map(String::from),
-            stop_loss: stop_loss.map(String::from),
-            client_order_id: client_order_id.to_string(),
-            reduce_only,
             ..Default::default()
         };
-        let resp: proto::PlaceOrderResponse =
-            self.unary(SERVICE_TRADING, "PlaceOrder", req).await?;
+        let resp: umarket::FetchFundingRateResponse =
+            self.unary(SERVICE_MARKET, "FetchFundingRate", req).await?;
+        Ok(resp.funding_rate.as_option().cloned())
+    }
+
+    /// Batch funding rates (empty `symbols` = all).
+    pub async fn list_funding_rates(
+        &self,
+        exchange_id: &common::ExchangeId,
+        symbols: &[String],
+    ) -> Result<Vec<umarket::FundingRate>, TerminalClientError> {
+        let req = umarket::ListFundingRatesRequest {
+            exchange_id: exchange_id.clone().into(),
+            symbols: symbols.to_vec(),
+            ..Default::default()
+        };
+        let resp: umarket::ListFundingRatesResponse =
+            self.unary(SERVICE_MARKET, "ListFundingRates", req).await?;
+        Ok(resp.funding_rates)
+    }
+
+    /// Recent funding settlements, newest first.
+    pub async fn fetch_funding_rate_history(
+        &self,
+        exchange_id: &common::ExchangeId,
+        symbol: &str,
+        limit: u32,
+    ) -> Result<Vec<umarket::FundingRatePoint>, TerminalClientError> {
+        let req = umarket::FetchFundingRateHistoryRequest {
+            exchange_id: exchange_id.clone().into(),
+            symbol: symbol.to_string(),
+            limit,
+            ..Default::default()
+        };
+        let resp: umarket::FetchFundingRateHistoryResponse =
+            self.unary(SERVICE_MARKET, "FetchFundingRateHistory", req).await?;
+        Ok(resp.points)
+    }
+
+    // ---- TradingService (canonical) ----
+
+    /// Submit one order.
+    pub async fn create_order(
+        &self,
+        req: utrading::CreateOrderRequest,
+    ) -> Result<utrading::Order, TerminalClientError> {
+        let resp: utrading::CreateOrderResponse =
+            self.unary(SERVICE_TRADING, "CreateOrder", req).await?;
         resp.order
             .as_option()
             .cloned()
             .ok_or_else(|| TerminalClientError::MissingField("order".to_string()))
     }
 
-    /// Cancel an open order.
+    /// Cancel an open order. Returns the updated order.
     pub async fn cancel_order(
         &self,
-        venue: &str,
-        order_id: &str,
-    ) -> Result<proto::Order, TerminalClientError> {
-        let req = proto::CancelOrderRequest {
-            venue: venue.to_string(),
-            order_id: order_id.to_string(),
-            ..Default::default()
-        };
-        let resp: proto::CancelOrderResponse =
+        req: utrading::CancelOrderRequest,
+    ) -> Result<utrading::Order, TerminalClientError> {
+        let resp: utrading::CancelOrderResponse =
             self.unary(SERVICE_TRADING, "CancelOrder", req).await?;
         resp.order
             .as_option()
@@ -326,20 +308,111 @@ impl TerminalClient {
             .ok_or_else(|| TerminalClientError::MissingField("order".to_string()))
     }
 
+    /// Cancel every open order on a venue (optionally one symbol).
+    pub async fn cancel_all_orders(
+        &self,
+        req: utrading::CancelAllOrdersRequest,
+    ) -> Result<Vec<utrading::Order>, TerminalClientError> {
+        let resp: utrading::CancelAllOrdersResponse =
+            self.unary(SERVICE_TRADING, "CancelAllOrders", req).await?;
+        Ok(resp.orders)
+    }
+
+    /// Fetch open orders, optionally filtered to one symbol.
+    pub async fn fetch_open_orders(
+        &self,
+        exchange_id: &common::ExchangeId,
+        symbol: &str,
+        limit: u32,
+    ) -> Result<Vec<utrading::Order>, TerminalClientError> {
+        let req = utrading::FetchOpenOrdersRequest {
+            exchange_id: exchange_id.clone().into(),
+            symbol: symbol.to_string(),
+            pagination: buffa::MessageField::some(pagination(limit)),
+            ..Default::default()
+        };
+        let resp: utrading::FetchOpenOrdersResponse =
+            self.unary(SERVICE_TRADING, "FetchOpenOrders", req).await?;
+        Ok(resp.orders)
+    }
+
+    /// Fetch the account snapshot.
+    pub async fn get_account(
+        &self,
+        exchange_id: &common::ExchangeId,
+    ) -> Result<utrading::Account, TerminalClientError> {
+        let req = utrading::GetAccountRequest {
+            exchange_id: exchange_id.clone().into(),
+            ..Default::default()
+        };
+        let resp: utrading::GetAccountResponse =
+            self.unary(SERVICE_TRADING, "GetAccount", req).await?;
+        resp.account
+            .as_option()
+            .cloned()
+            .ok_or_else(|| TerminalClientError::MissingField("account".to_string()))
+    }
+
+    /// Fetch open positions (empty `symbols` = all).
+    pub async fn get_positions(
+        &self,
+        exchange_id: &common::ExchangeId,
+        symbols: &[String],
+    ) -> Result<Vec<utrading::Position>, TerminalClientError> {
+        let req = utrading::GetPositionsRequest {
+            exchange_id: exchange_id.clone().into(),
+            symbols: symbols.to_vec(),
+            ..Default::default()
+        };
+        let resp: utrading::GetPositionsResponse =
+            self.unary(SERVICE_TRADING, "GetPositions", req).await?;
+        Ok(resp.positions)
+    }
+
+    /// Fetch order history.
+    pub async fn get_order_history(
+        &self,
+        exchange_id: &common::ExchangeId,
+        limit: u32,
+    ) -> Result<Vec<utrading::Order>, TerminalClientError> {
+        let req = utrading::GetOrderHistoryRequest {
+            exchange_id: exchange_id.clone().into(),
+            pagination: buffa::MessageField::some(pagination(limit)),
+            ..Default::default()
+        };
+        let resp: utrading::GetOrderHistoryResponse =
+            self.unary(SERVICE_TRADING, "GetOrderHistory", req).await?;
+        Ok(resp.orders)
+    }
+
+    /// Fetch recently closed positions.
+    pub async fn get_closed_positions(
+        &self,
+        exchange_id: &common::ExchangeId,
+        limit: u32,
+    ) -> Result<Vec<utrading::ClosedPosition>, TerminalClientError> {
+        let req = utrading::GetClosedPositionsRequest {
+            exchange_id: exchange_id.clone().into(),
+            pagination: buffa::MessageField::some(pagination(limit)),
+            ..Default::default()
+        };
+        let resp: utrading::GetClosedPositionsResponse =
+            self.unary(SERVICE_TRADING, "GetClosedPositions", req).await?;
+        Ok(resp.positions)
+    }
+
     /// Close a position (full close, market).
     pub async fn close_position(
         &self,
-        venue: &str,
+        exchange_id: &common::ExchangeId,
         position_id: &str,
-    ) -> Result<proto::Position, TerminalClientError> {
-        let req = proto::ClosePositionRequest {
-            venue: venue.to_string(),
+    ) -> Result<utrading::Position, TerminalClientError> {
+        let req = utrading::ClosePositionRequest {
+            exchange_id: exchange_id.clone().into(),
             position_id: position_id.to_string(),
-            close_bps: 10_000,
-            price_choice: Some(proto::close_position_request::PriceChoice::Market(true)),
             ..Default::default()
         };
-        let resp: proto::ClosePositionResponse =
+        let resp: utrading::ClosePositionResponse =
             self.unary(SERVICE_TRADING, "ClosePosition", req).await?;
         resp.position
             .as_option()
@@ -347,26 +420,16 @@ impl TerminalClient {
             .ok_or_else(|| TerminalClientError::MissingField("position".to_string()))
     }
 
-    /// Cancel all open orders (optionally one symbol).
-    pub async fn cancel_all(
+    /// Close every open position on a venue.
+    pub async fn close_all_positions(
         &self,
-        venue: &str,
-        symbol: Option<&str>,
-    ) -> Result<Vec<proto::Order>, TerminalClientError> {
-        let req = proto::CancelAllRequest {
-            venue: venue.to_string(),
-            symbol: symbol.map(String::from),
+        exchange_id: &common::ExchangeId,
+    ) -> Result<(), TerminalClientError> {
+        let req = utrading::CloseAllPositionsRequest {
+            exchange_id: exchange_id.clone().into(),
             ..Default::default()
         };
-        let resp: proto::CancelAllResponse = self.unary(SERVICE_TRADING, "CancelAll", req).await?;
-        Ok(resp.orders)
-    }
-
-    /// Close all positions.
-    pub async fn close_all_positions(&self, venue: &str) -> Result<(), TerminalClientError> {
-        let req =
-            proto::CloseAllPositionsRequest { venue: venue.to_string(), ..Default::default() };
-        let _resp: proto::CloseAllPositionsResponse =
+        let _resp: utrading::CloseAllPositionsResponse =
             self.unary(SERVICE_TRADING, "CloseAllPositions", req).await?;
         Ok(())
     }
@@ -376,19 +439,23 @@ impl TerminalClient {
     /// `None` leaves the corresponding bracket unchanged.
     pub async fn modify_position(
         &self,
-        venue: &str,
+        exchange_id: &common::ExchangeId,
         position_id: &str,
-        take_profit: Option<&str>,
-        stop_loss: Option<&str>,
-    ) -> Result<proto::Position, TerminalClientError> {
-        let req = proto::ModifyPositionRequest {
-            venue: venue.to_string(),
+        take_profit: Option<rust_decimal::Decimal>,
+        stop_loss: Option<rust_decimal::Decimal>,
+    ) -> Result<utrading::Position, TerminalClientError> {
+        let req = utrading::ModifyPositionRequest {
+            exchange_id: exchange_id.clone().into(),
             position_id: position_id.to_string(),
-            take_profit: take_profit.map(String::from),
-            stop_loss: stop_loss.map(String::from),
+            take_profit: take_profit
+                .map(|v| longtrader_contract::ext::decimal_to_common(v).into())
+                .unwrap_or_default(),
+            stop_loss: stop_loss
+                .map(|v| longtrader_contract::ext::decimal_to_common(v).into())
+                .unwrap_or_default(),
             ..Default::default()
         };
-        let resp: proto::ModifyPositionResponse =
+        let resp: utrading::ModifyPositionResponse =
             self.unary(SERVICE_TRADING, "ModifyPosition", req).await?;
         resp.position
             .as_option()
@@ -396,7 +463,7 @@ impl TerminalClient {
             .ok_or_else(|| TerminalClientError::MissingField("position".to_string()))
     }
 
-    // ---- StrategyService ----
+    // ---- StrategyService (terminal) ----
 
     /// List strategies.
     pub async fn list_strategies(&self) -> Result<Vec<proto::StrategyStatus>, TerminalClientError> {
@@ -481,7 +548,21 @@ impl TerminalClient {
         Ok(resp)
     }
 
-    // ---- RuntimeService ----
+    /// Submit a strategy-scoped action.
+    pub async fn submit_action(
+        &self,
+        strategy_id: &str,
+        action: proto::submit_action_request::Action,
+    ) -> Result<proto::ActionReceipt, TerminalClientError> {
+        let req = proto::SubmitActionRequest {
+            strategy_id: strategy_id.to_string(),
+            action: Some(action),
+            ..Default::default()
+        };
+        self.unary(SERVICE_STRATEGY, "SubmitAction", req).await
+    }
+
+    // ---- RuntimeService (terminal) ----
 
     /// Health check.
     pub async fn health(&self) -> Result<proto::HealthResponse, TerminalClientError> {
@@ -499,23 +580,24 @@ impl TerminalClient {
 
     /// Open the streaming updates channel.
     ///
-    /// Returns a stream of `UpdateEnvelope` messages decoded from the Connect
-    /// streaming framing (1-byte flag + 4-byte BE length + protobuf payload).
+    /// Returns a stream of canonical `stream.v1.UpdateEnvelope` messages
+    /// decoded from the Connect streaming framing (1-byte flag + 4-byte BE
+    /// length + protobuf payload).
     pub async fn stream_updates(
         &self,
-        venues: &[String],
+        exchange_id: &common::ExchangeId,
         symbols: &[String],
-        topics: &[proto::TopicClass],
+        topics: &[stream::TopicClass],
     ) -> Result<
-        Pin<Box<dyn Stream<Item = Result<proto::UpdateEnvelope, TerminalClientError>>>>,
+        Pin<Box<dyn Stream<Item = Result<stream::UpdateEnvelope, TerminalClientError>>>>,
         TerminalClientError,
     > {
         use wasm_bindgen::JsCast;
         use wasm_bindgen_futures::JsFuture;
 
         let url = self.url(SERVICE_RUNTIME, "StreamUpdates");
-        let req_msg = proto::StreamUpdatesRequest {
-            venues: venues.to_vec(),
+        let req_msg = stream::StreamUpdatesRequest {
+            exchange_id: exchange_id.clone().into(),
             symbols: symbols.to_vec(),
             topics: topics.iter().map(|t| buffa::EnumValue::Known(*t)).collect(),
             ..Default::default()
@@ -577,7 +659,7 @@ impl TerminalClient {
                         if buf.len() >= total {
                             let payload: Vec<u8> = buf[5..total].to_vec();
                             buf.drain(..total);
-                            match proto::UpdateEnvelope::decode_from_slice(&payload) {
+                            match stream::UpdateEnvelope::decode_from_slice(&payload) {
                                 Ok(env) => return Some((Ok(env), (reader, buf))),
                                 Err(e) => {
                                     return Some((

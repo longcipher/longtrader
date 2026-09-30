@@ -168,6 +168,13 @@ message OrderRequest {
   bool post_only = 9;
   bool reduce_only = 10;
   map<string, string> params = 11;
+  // Bracket prices attached at submission. Mirrors `Order.take_profit` /
+  // `Order.stop_loss`, which already existed as terminal extensions; without
+  // them here a caller could place an order but not arm its bracket, and the
+  // terminal's flat place-order surface would have to be kept alive just for
+  // these two fields.
+  optional common.v1.Decimal take_profit = 12;
+  optional common.v1.Decimal stop_loss = 13;
 }
 
 message Order {

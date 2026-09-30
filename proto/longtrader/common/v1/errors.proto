@@ -4,18 +4,54 @@ package longtrader.common.v1;
 
 import "google/protobuf/duration.proto";
 
+// Stable machine-readable reason for a failed RPC.
+//
+// Division of labour with the Connect/gRPC status code: the code carries the
+// *category* (`failed_precondition`, `unauthenticated`, `not_found`, ...) and
+// this enum carries the *why* that the category cannot express. Values that
+// merely restate a status code are deliberately absent — a `not_found` code
+// already means "no such resource", so there is no `NOT_FOUND` reason.
+//
+// This is a closed vocabulary. Venue- or backend-specific detail must NOT be
+// added here: put it in `ErrorDetail.native_exchange_code` so the vocabulary
+// stays stable, reviewable, and free of per-venue churn.
+enum ErrorReason {
+  ERROR_REASON_UNSPECIFIED = 0;
+  // The session has not reached ACTIVE, so a session-scoped call is rejected.
+  // (`failed_precondition`.) The only correct response is to finish
+  // `ReconcileState` on that session and retry; retrying as-is can never
+  // succeed, which is why this is not `unavailable`.
+  ERROR_REASON_SYNC_IN_PROGRESS = 1;
+  // The bound account cannot fund the request. (`failed_precondition`.)
+  ERROR_REASON_INSUFFICIENT_BALANCE = 2;
+  // Credentials expired; re-authenticate before retrying. (`unauthenticated`.)
+  ERROR_REASON_AUTH_EXPIRED = 3;
+  // The session was revoked server-side; do not retry it.
+  // (`unauthenticated`.)
+  ERROR_REASON_SESSION_REVOKED = 4;
+  // The lease expired while ACTIVE and the configured kill-switch policy
+  // fired. (`failed_precondition`.)
+  ERROR_REASON_KILL_SWITCH_TRIPPED = 5;
+  // The venue itself rejected an otherwise well-formed request; the verbatim
+  // venue code is in `native_exchange_code`. (`failed_precondition` when the
+  // request was semantically valid, `invalid_argument` when it was not.)
+  ERROR_REASON_VENUE_REJECTED = 6;
+}
+
 // Structured error detail carried alongside standard Connect/gRPC status
 // codes via the error-details mechanism. Futu-style uniform result envelope,
 // expressed idiomatically for Connect.
 message ErrorDetail {
-  // Stable machine-readable reason, e.g. "INSUFFICIENT_BALANCE".
-  string reason = 1;
+  // Stable machine-readable reason. This is the only failure field clients may
+  // branch on: the human-readable Connect error message is for logs and is
+  // never part of the contract.
+  ErrorReason reason = 1;
   // Producing component, e.g. "longtrader.worker".
   string domain = 2;
   bool retryable = 3;
   google.protobuf.Duration retry_after = 4;
-  // Set for reasons like AUTH_EXPIRED / SESSION_REVOKED where the client
-  // should cancel its open orders before exiting.
+  // Set for ERROR_REASON_AUTH_EXPIRED / ERROR_REASON_SESSION_REVOKED, where
+  // the client should cancel its open orders before exiting.
   bool kill_switch_recommended = 5;
   // Verbatim venue error code/text preserved for triage.
   string native_exchange_code = 6;

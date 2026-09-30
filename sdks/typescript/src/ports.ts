@@ -6,6 +6,7 @@
  * on these, never on the transport. `Session` is the concrete implementation,
  * so `new TradingSessionPort(session)` gives a strategy a swappable backend.
  */
+import { Timeframe } from "./gen/longtrader/market/v1/market_pb.js";
 import type {
   MarketDataEvent,
   StreamSubscription,
@@ -82,10 +83,10 @@ export abstract class MarketPort {
   abstract fetchTicker(symbol: string): Promise<Ticker>;
   /** Unary order book snapshot. */
   abstract fetchOrderBook(symbol: string, depth?: number): Promise<unknown>;
-  /** OHLCV candles; `timeframe` is the contract's string form (M1, H4, ...). */
+  /** OHLCV candles; `timeframe` is the contract enum (`Timeframe.M1`, ...). */
   abstract getCandles(
     symbol: string,
-    timeframe?: string,
+    timeframe?: Timeframe,
     limit?: number,
   ): Promise<unknown>;
   /** Tradeable symbols on the bound venue. */
@@ -150,7 +151,7 @@ export class SessionMarketPort extends MarketPort {
 
   override getCandles(
     symbol: string,
-    timeframe = "M1",
+    timeframe = Timeframe.M1,
     limit = 100,
   ): Promise<unknown> {
     return this.session.getCandles(symbol, timeframe, limit);

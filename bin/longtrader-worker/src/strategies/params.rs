@@ -102,6 +102,33 @@ pub fn params_from_table<T: serde::de::DeserializeOwned>(table: &toml::Table) ->
         .map_err(|err| color_eyre::eyre::eyre!("invalid strategy params: {err}"))
 }
 
+/// Map a configuration timeframe string onto the contract enum.
+///
+/// Both the short config spellings (`"5m"`) and the enum-suffixed ones
+/// (`"M5"`) are accepted, case- and space-insensitively. An unknown value is
+/// an error, never a silent `M1`: a strategy that asked for a period the venue
+/// does not serve would otherwise trade on the wrong bars.
+pub(crate) fn timeframe_from_str(tf: &str) -> Result<market::Timeframe, PortError> {
+    let normalized = tf.trim().to_ascii_uppercase();
+    Ok(match normalized.as_str() {
+        "" | "1M" | "M1" => market::Timeframe::M1,
+        "5M" | "M5" => market::Timeframe::M5,
+        "15M" | "M15" => market::Timeframe::M15,
+        "30M" | "M30" => market::Timeframe::M30,
+        "1H" | "H1" => market::Timeframe::H1,
+        "4H" | "H4" => market::Timeframe::H4,
+        "1D" | "D1" => market::Timeframe::D1,
+        "1W" | "W1" => market::Timeframe::W1,
+        "1S" | "S1" => market::Timeframe::S1,
+        "100S" | "S100" => market::Timeframe::S100,
+        other => {
+            return Err(PortError::InvalidArgument(format!(
+                "unsupported timeframe {other:?} (supported: S1/S100/M1/M5/M15/M30/H1/H4/D1/W1)"
+            )));
+        }
+    })
+}
+
 /// Fetches the most recent candles for a symbol.
 pub(crate) async fn fetch_candles(
     market: &dyn MarketDataSource,
@@ -114,7 +141,7 @@ pub(crate) async fn fetch_candles(
         .get_candles(market::GetCandlesRequest {
             exchange_id: buffa::MessageField::some(exchange_id.clone()),
             symbol: symbol.to_string(),
-            timeframe: timeframe.to_string(),
+            timeframe: buffa::EnumValue::Known(timeframe_from_str(timeframe)?),
             pagination: crate::proto::common::Pagination {
                 limit: u64::from(limit),
                 ..Default::default()

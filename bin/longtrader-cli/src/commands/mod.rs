@@ -11,9 +11,20 @@ pub(crate) mod venues;
 
 use clap::Subcommand;
 use color_eyre::Result;
-use longtrader_proto::client::TerminalClient;
+use longtrader_proto::{
+    client::TerminalClient,
+    proto::longtrader::{common::v1 as common, trading::v1 as utrading},
+};
 
 use crate::output::Renderer;
+
+/// Build the canonical exchange selector from the CLI's `--venue` flag.
+///
+/// An empty id means "the backend's single active venue", which is what the
+/// empty-string venue meant before the contract convergence.
+pub(crate) fn exchange_id(venue: &str) -> common::ExchangeId {
+    common::ExchangeId { id: venue.to_string(), ..Default::default() }
+}
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Commands {
@@ -113,38 +124,40 @@ pub(crate) async fn dispatch(
     output: &Renderer,
     cmd: Commands,
 ) -> Result<()> {
+    let exchange = exchange_id(venue);
     match cmd {
         Commands::Health => health::run(client, output).await?,
         Commands::Venues => venues::run(client, output).await?,
         Commands::Symbols { venue } => symbols::run(client, &venue, output).await?,
         Commands::Candles { symbol, timeframe, limit } => {
-            candles::run(client, venue, &symbol, &timeframe, limit, output).await?;
+            candles::run(client, &exchange, &symbol, &timeframe, limit, output).await?;
         }
         Commands::Book { symbol, depth } => {
-            book::run(client, venue, &symbol, depth, output).await?;
+            book::run(client, &exchange, &symbol, depth, output).await?;
         }
         Commands::Search { query, limit } => {
-            search::run(client, venue, &query, limit, output).await?;
+            search::run(client, &exchange, &query, limit, output).await?;
         }
         Commands::Account => {
-            let account = client.get_account(venue).await?;
+            let account = client.get_account(&exchange).await?;
             output.render_account(&account);
         }
-        Commands::Positions => positions::run(client, venue, output).await?,
+        Commands::Positions => positions::run(client, &exchange, output).await?,
         Commands::Orders { symbol } => {
-            let orders = client.get_open_orders(venue, symbol.as_deref()).await?;
+            let orders =
+                client.fetch_open_orders(&exchange, symbol.as_deref().unwrap_or(""), 100).await?;
             output.render_orders(&orders);
         }
         Commands::History { limit } => {
-            let orders = client.get_order_history(venue, limit).await?;
+            let orders = client.get_order_history(&exchange, limit).await?;
             output.render_orders(&orders);
         }
         Commands::Buy { symbol, quantity, price, take_profit, stop_loss } => {
             orders::place_order(
                 client,
-                venue,
+                &exchange,
                 &symbol,
-                longtrader_proto::proto::longtrader::terminal::v1::Side::Buy,
+                utrading::OrderSide::Buy,
                 &quantity,
                 price.as_deref(),
                 take_profit.as_deref(),
@@ -156,9 +169,9 @@ pub(crate) async fn dispatch(
         Commands::Sell { symbol, quantity, price, take_profit, stop_loss } => {
             orders::place_order(
                 client,
-                venue,
+                &exchange,
                 &symbol,
-                longtrader_proto::proto::longtrader::terminal::v1::Side::Sell,
+                utrading::OrderSide::Sell,
                 &quantity,
                 price.as_deref(),
                 take_profit.as_deref(),
@@ -168,17 +181,23 @@ pub(crate) async fn dispatch(
             .await?;
         }
         Commands::Cancel { order_id } => {
-            let order = client.cancel_order(venue, &order_id).await?;
+            let req = utrading::CancelOrderRequest {
+                exchange_id: exchange.clone().into(),
+                order_id: order_id.clone(),
+                ..Default::default()
+            };
+            let order = client.cancel_order(req).await?;
             output.render_orders(&[order]);
         }
         Commands::Close { position_id } => {
-            let pos = client.close_position(venue, &position_id).await?;
+            let pos = client.close_position(&exchange, &position_id).await?;
             output.render_msg(&format!(
                 "Position {} closed (unrealized pnl={})",
-                pos.id, pos.unrealized_pnl
+                pos.id,
+                crate::output::fmt_dec(&pos.unrealized_pnl)
             ));
         }
-        Commands::Stream { topics } => stream::run(client, venue, &topics, output).await?,
+        Commands::Stream { topics } => stream::run(client, &exchange, &topics, output).await?,
         Commands::Strategies => strategies::list(client, output).await?,
         Commands::StrategyStart { strategy_id, name } => {
             strategies::start(client, &strategy_id, name.as_deref(), output).await?;

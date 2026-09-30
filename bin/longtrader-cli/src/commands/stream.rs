@@ -1,28 +1,35 @@
 use color_eyre::Result;
 use futures_util::StreamExt;
-use longtrader_proto::{client::TerminalClient, proto::longtrader::terminal::v1::TopicClass};
+use longtrader_proto::{
+    client::TerminalClient,
+    proto::longtrader::{common::v1 as common, stream::v1 as stream},
+};
 
 use crate::output::Renderer;
 
 pub(crate) async fn run(
     client: &TerminalClient,
-    venue: &str,
+    exchange: &common::ExchangeId,
     topics: &[String],
     output: &Renderer,
 ) -> Result<()> {
-    let topic_classes: Vec<TopicClass> = if topics.is_empty() {
-        vec![TopicClass::MarketLite, TopicClass::MarketHeavy, TopicClass::Trading]
+    let topic_classes: Vec<stream::TopicClass> = if topics.is_empty() {
+        vec![
+            stream::TopicClass::MarketLite,
+            stream::TopicClass::MarketHeavy,
+            stream::TopicClass::Trading,
+        ]
     } else {
         let mut classes = Vec::new();
         let mut unknown = Vec::new();
         for t in topics {
             match t.to_uppercase().as_str() {
-                "MARKET_LITE" => classes.push(TopicClass::MarketLite),
-                "MARKET_HEAVY" => classes.push(TopicClass::MarketHeavy),
-                "TRADING" => classes.push(TopicClass::Trading),
-                "RUNTIME" => classes.push(TopicClass::Runtime),
-                "FUNDING" => classes.push(TopicClass::Funding),
-                "DERIVATIVES" => classes.push(TopicClass::Derivatives),
+                "MARKET_LITE" => classes.push(stream::TopicClass::MarketLite),
+                "MARKET_HEAVY" => classes.push(stream::TopicClass::MarketHeavy),
+                "TRADING" => classes.push(stream::TopicClass::Trading),
+                "RUNTIME" => classes.push(stream::TopicClass::Runtime),
+                "FUNDING" => classes.push(stream::TopicClass::Funding),
+                "DERIVATIVES" => classes.push(stream::TopicClass::Derivatives),
                 other => unknown.push(other.to_string()),
             }
         }
@@ -35,8 +42,7 @@ pub(crate) async fn run(
         classes
     };
 
-    let venues = if venue.is_empty() { vec![] } else { vec![venue.to_string()] };
-    let mut stream = client.stream_updates(&venues, &[], &topic_classes).await?;
+    let mut stream = client.stream_updates(exchange, &[], &topic_classes).await?;
     output.render_msg("Streaming updates (Ctrl+C to stop)...");
     loop {
         tokio::select! {
@@ -67,31 +73,39 @@ pub(crate) async fn run(
     Ok(())
 }
 
-fn topic_name(topic: buffa::EnumValue<TopicClass>) -> &'static str {
+fn topic_name(topic: buffa::EnumValue<stream::TopicClass>) -> &'static str {
     match topic {
-        buffa::EnumValue::Known(TopicClass::MarketLite) => "MARKET_LITE",
-        buffa::EnumValue::Known(TopicClass::MarketHeavy) => "MARKET_HEAVY",
-        buffa::EnumValue::Known(TopicClass::Trading) => "TRADING",
-        buffa::EnumValue::Known(TopicClass::Runtime) => "RUNTIME",
-        buffa::EnumValue::Known(TopicClass::Funding) => "FUNDING",
-        buffa::EnumValue::Known(TopicClass::Derivatives) => "DERIVATIVES",
+        buffa::EnumValue::Known(stream::TopicClass::MarketLite) => "MARKET_LITE",
+        buffa::EnumValue::Known(stream::TopicClass::MarketHeavy) => "MARKET_HEAVY",
+        buffa::EnumValue::Known(stream::TopicClass::Trading) => "TRADING",
+        buffa::EnumValue::Known(stream::TopicClass::Runtime) => "RUNTIME",
+        buffa::EnumValue::Known(stream::TopicClass::Funding) => "FUNDING",
+        buffa::EnumValue::Known(stream::TopicClass::Derivatives) => "DERIVATIVES",
         _ => "UNKNOWN",
     }
 }
 
-fn describe_payload(
-    payload: &longtrader_proto::proto::longtrader::terminal::v1::update_envelope::Payload,
-) -> String {
-    use longtrader_proto::proto::longtrader::terminal::v1::update_envelope::Payload;
+fn describe_payload(payload: &stream::update_envelope::Payload) -> String {
+    use stream::update_envelope::Payload;
+
+    use crate::output::fmt_dec;
     match payload {
-        Payload::Tick(t) => format!("Tick {} @ {}", t.symbol, t.price),
+        Payload::Tick(t) => format!("Tick {} @ {}", t.symbol, fmt_dec(&t.last)),
         Payload::Book(b) => {
             format!("Book {} ({} bids, {} asks)", b.symbol, b.bids.len(), b.asks.len())
         }
-        Payload::Trade(t) => format!("Trade {} {} @ {}", t.symbol, t.amount, t.price),
+        Payload::Trade(t) => {
+            format!("Trade {} {} @ {}", t.symbol, fmt_dec(&t.amount), fmt_dec(&t.price))
+        }
         Payload::Order(o) => format!("Order {} {}", o.id, o.symbol),
         Payload::Position(p) => format!("Position {} {}", p.id, p.symbol),
-        Payload::Account(a) => format!("Account balance={}", a.balance),
+        Payload::Account(a) => format!("Account balance={}", fmt_dec(&a.balance)),
+        Payload::Ticker(t) => format!("Ticker {} last={}", t.symbol, fmt_dec(&t.last)),
+        Payload::FundingRate(f) => {
+            format!("FundingRate {} rate={}", f.symbol, fmt_dec(&f.rate))
+        }
+        Payload::Execution(e) => format!("Execution {} {}", e.order_id, e.symbol),
+        Payload::RuntimeStatus(r) => format!("RuntimeStatus connected={}", r.connected),
         _ => "other".to_string(),
     }
 }

@@ -10,8 +10,9 @@ the build before merge.
 - enums live once, in the package that owns the concept:
   - `trading.v1` owns `OrderSide`, `OrderType`, `OrderStatus`, `TimeInForce`,
     `PositionSide`, `CloseReason`.
-  - `market.v1` owns `TradeSide` (taker-perspective public-trade side) and
-    `StreamChannel`.
+  - `market.v1` owns `TradeSide` (taker-perspective public-trade side),
+    `StreamChannel` and `Timeframe` (candle aggregation interval).
+  - `stream.v1` owns `TopicClass` (server-side broadcast bucket).
 - **Do not** define parallel enums for the same concept in another package
   (e.g. a second `PositionSide` or a `LegSide` that repeats `OrderSide`). Reuse the
   existing enum via its fully-qualified name.
@@ -39,7 +40,7 @@ Every list / history RPC takes `common.v1.Pagination` and echoes
 
 ```proto
 message GetOrderHistoryRequest {
-  string venue = 1;
+  common.v1.ExchangeId exchange_id = 1;  // never a bare `string venue`
   common.v1.Pagination pagination = 2;   // cursor-based, not bare `uint32 limit`
 }
 message GetOrderHistoryResponse {
@@ -57,12 +58,10 @@ message GetOrderHistoryResponse {
   on the last page; `total` is best-effort and may be `0` when the backend does
   not compute a count.
 
-**Bare `uint32 limit` is legacy** and is being retired. `GetOrderHistoryRequest`
-and `GetClosedPositionsRequest` (terminal.v1) were migrated to `Pagination` in the
-v1 breaking release (see §6). The unified `trading.v1` `GetOrderHistoryRequest` /
-`GetClosedPositionsRequest` and the market.v1 / strategy_cfg `limit` fields remain
-on `uint32 limit` because they are forwarded to the out-of-repo backend and are
-scheduled for a later phase.
+**Bare `uint32 limit` is legacy** and has been retired from the contract: every
+list/history request, across `market.v1`, `trading.v1` and the terminal
+strategy-config surface, now takes `common.v1.Pagination` and echoes
+`common.v1.Page` (see §6).
 
 ## 4. Money & quantity
 
@@ -75,8 +74,17 @@ binary floats cannot represent decimal currency exactly.
 Every RPC surfaces failures through the Connect error trail; structured detail is
 `longtrader.common.v1.ErrorDetail` (`reason`, `domain`, `retryable`,
 `retry_after`, `kill_switch_recommended`, `native_exchange_code`,
-`correlation_id`). See `docs/bare-protocol-guide.md` §7. Do not invent per-RPC
-error messages that bypass `ErrorDetail`.
+`correlation_id`). See `docs/bare-protocol-guide.md` §7.
+
+`reason` is `common.v1.ErrorReason`, and it is the **only** failure field a
+client may branch on — the human-readable Connect error message is for logs and
+is never part of the contract. Division of labour with the status code: the code
+carries the category (`failed_precondition`, `unauthenticated`, …) and the enum
+carries the *why* that the category cannot express, so a value that would merely
+restate a code (e.g. "not found") is deliberately absent. The vocabulary is
+closed: venue- or backend-specific detail belongs in `native_exchange_code`,
+never as a new reason. Do not invent per-RPC error messages that bypass
+`ErrorDetail`.
 
 ## 6. Breaking-change migration (staged)
 
@@ -93,7 +101,7 @@ requires coordinated regeneration of all SDKs (`crates/longtrader-contract`,
 | `CloseReason` duplication + `stream.v1` value reorder | 3 defs; `stream.v1` renumbered `1=TAKE_PROFIT` | single authority `trading.v1.CloseReason` | **DONE** — also fixed a silent cross-package corruption bug (`stream.v1` `1` was `TAKE_PROFIT`, not `MANUAL`) |
 | `trading.v1.GetOrderHistoryRequest.limit` / `GetClosedPositionsRequest.limit` | `uint32 limit` | `common.v1.Pagination pagination` + `Page` echoed | **DONE** (v1 breaking release) |
 | remaining `uint32`/`int64 limit` (market.v1 `GetCandles`/`FetchOrderBook`; strategy_cfg `ListNotifications`/`ListEpisodes`; terminal.v1 `GetCandles`/`SearchSymbols`) | `limit` | `common.v1.Pagination pagination` + `Page` echoed | **DONE** (v1 breaking release) |
-| `OrderStatus` (`trading` `OPEN`/`CLOSED` vs `stream`/`terminal` `PENDING`/`FILLED`) | different lifecycle models per surface | keep distinct | NONE — the surfaces model different lifecycles; documented, not a defect |
+| `OrderStatus` duplication | defined in `trading`/`stream`/`terminal`; `stream`/`terminal` spelled `1` as `PENDING`, `trading` as `OPEN` | single authority `trading.v1.OrderStatus` | **DONE** (v1 breaking release) — `stream.v1`/`terminal.v1` now reuse it, so a projection order reads `OPEN`/`FILLED`/`CANCELED`/`REJECTED` with the venue's own numbering |
 | entity lifecycle timestamps (`Order`/`Position`/`ClosedPosition`/`HedgeUnit`/`Episode`/`NotificationRecord`/`EpisodeFill`/`SessionInfo`/`Opportunity` `*_at_ms`) | `int64` ms | `google.protobuf.Timestamp` | **DONE** — promoted; `Candle`/`stream` `timestamp_ms` and `heartbeat_interval_ms` kept as integers (event-time / duration, per §2) |
 | `TradeSide` vs `OrderSide` | taker vs owner perspective | keep distinct | NONE — perspectives differ; documented |
 
@@ -115,9 +123,24 @@ intended surface, and SDKs regenerated):
   `google.protobuf.Timestamp`. `Candle.timestamp_ms` / stream `timestamp_ms`
   (event-time, high-frequency) and `heartbeat_interval_ms` (a duration) are
   intentionally kept as integer milliseconds per §2.
+- Terminal convergence: `terminal.v1` no longer redefines the contract.
+  `messages.proto`, `market.proto` and `trading.proto` were deleted; the
+  terminal market/trading calls now land on `market.v1.MarketDataService` /
+  `trading.v1.TradingService` (with `ListTickers`, `ListFundingRates` and
+  `SearchSymbols` added for the batch/search surface the terminal used to own),
+  `Timeframe` was promoted to `market.v1`, and `stream.v1.UpdateEnvelope` —
+  extended with `seq`, `TopicClass` and the ticker/funding/execution/runtime
+  payloads — is the single streaming contract (the terminal runtime stream
+  returns it). Terminal-only domains (`hedge`, `opportunity`, `strategy`,
+  `strategy_cfg`, runtime health/venue listing) remain, now expressed in
+  `common.v1.Decimal` and `common.v1.ExchangeId` instead of `double` and
+  `string venue`.
+- `trading.v1.OrderRequest` gained `take_profit`/`stop_loss` (additive), so the
+  terminal's flat place-order type could be deleted without losing bracket
+  submission.
 
-No further phased wire-breaking items remain in this contract; `OrderStatus`
-and `TradeSide`/`OrderSide` are kept distinct by design (§1), not defects.
+No further phased wire-breaking items remain in this contract; `TradeSide` and
+`OrderSide` are kept distinct by design (§1), not defects.
 
 ## 7. Lint policy (intentional exceptions)
 

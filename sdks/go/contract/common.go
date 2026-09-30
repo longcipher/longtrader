@@ -1,25 +1,5 @@
 package contract
 
-// Symbol is a unified instrument symbol such as "BTC/USDT".
-type Symbol struct {
-	// Value is the symbol text.
-	Value string
-}
-
-// MarshalTo implements Message.
-func (m *Symbol) MarshalTo(e *Encoder) { e.String(1, m.Value) }
-
-// Unmarshal implements Message.
-func (m *Symbol) Unmarshal(data []byte) error {
-	*m = Symbol{}
-	return Scan(data, func(f Field) error {
-		if f.Number == 1 {
-			m.Value = f.AsString()
-		}
-		return nil
-	})
-}
-
 // ExchangeId identifies one registered exchange instance on a backend.
 type ExchangeId struct {
 	// ID is the registered instance id.

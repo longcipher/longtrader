@@ -5,7 +5,7 @@ use std::sync::Arc;
 use clap::Parser;
 use color_eyre::{Result, eyre::bail};
 use longtrader_worker::{
-    adapters::{MockAdapter, RemoteAdapter, TerminalAdapter},
+    adapters::{MockAdapter, RemoteAdapter},
     config::Config,
     ports::{
         FundingRateSource, MarketDataSource, TradingGateway, TriggerOrderGateway, VenueOpInvoker,
@@ -69,21 +69,15 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        "terminal" => {
-            // Terminal backends serve `longtrader.terminal.v1` (venue-string
-            // surface: tradingcharts-server, longtrader-api terminal router).
-            let endpoint =
-                config.api_endpoint.clone().unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
-            let adapter = Arc::new(TerminalAdapter::new(&endpoint, &config.api_token()));
-            tracing::info!(endpoint = %endpoint, backend = "terminal", "connected to terminal API");
-            start_with_terminal(adapter, &config).await
-        }
-        "api" => {
-            // Unified backends serve `longtrader.{trading,market}.v1` natively.
+        // The terminal backend (tradingcharts-server, longtrader-api) serves the
+        // same canonical `longtrader.{market,trading}.v1` services as the
+        // unified backend, so both share one adapter and differ only in
+        // endpoint + credentials.
+        "terminal" | "api" => {
             let endpoint =
                 config.api_endpoint.clone().unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
             let adapter = Arc::new(RemoteAdapter::new(&endpoint, &config.api_token()));
-            tracing::info!(endpoint = %endpoint, backend = "api", "connected to unified API");
+            tracing::info!(endpoint = %endpoint, backend = %backend, "connected to backend");
             start_with(adapter, &config).await
         }
         // Historically documented but never implemented; map to the unified
@@ -101,17 +95,6 @@ async fn main() -> Result<()> {
 
 /// Start the optional control plane and then run the strategy loop.
 async fn start_with(adapter: Arc<RemoteAdapter>, config: &Config) -> Result<()> {
-    let gateway: Arc<dyn TradingGateway> = adapter.clone();
-    let market: Arc<dyn MarketDataSource> = adapter.clone();
-    let funding: Arc<dyn FundingRateSource> = adapter.clone();
-    let triggers: Arc<dyn TriggerOrderGateway> = adapter.clone();
-    let ops: Arc<dyn VenueOpInvoker> = adapter.clone();
-    let wallet: Arc<dyn WalletGateway> = adapter.clone();
-    start_with_ports(gateway, market, funding, triggers, ops, wallet, config).await
-}
-
-/// Terminal variant of [`start_with`] (same control plane, terminal ports).
-async fn start_with_terminal(adapter: Arc<TerminalAdapter>, config: &Config) -> Result<()> {
     let gateway: Arc<dyn TradingGateway> = adapter.clone();
     let market: Arc<dyn MarketDataSource> = adapter.clone();
     let funding: Arc<dyn FundingRateSource> = adapter.clone();

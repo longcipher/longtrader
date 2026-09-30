@@ -29,7 +29,7 @@ use connectrpc::{
 use futures_util::StreamExt;
 
 use super::{ManagerError, SessionManager, SessionState};
-use crate::proto::worker;
+use crate::proto::{common, worker};
 
 fn now_ts() -> buffa_types::google::protobuf::Timestamp {
     let dur = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
@@ -48,6 +48,26 @@ fn now_ns() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
 }
 
+/// Build the structured `longtrader.common.v1.ErrorDetail` carrying a stable
+/// reason. Split out from [`error_detail`] so a test can assert the reason
+/// without base64-decoding the wire payload.
+fn error_detail_message(reason: common::ErrorReason) -> common::ErrorDetail {
+    common::ErrorDetail {
+        reason: buffa::EnumValue::Known(reason),
+        domain: "longtrader.worker".to_string(),
+        ..Default::default()
+    }
+}
+
+/// Attach a stable [`common::ErrorReason`] so clients branch on the typed
+/// reason instead of matching the human-readable message text.
+fn error_detail(reason: common::ErrorReason) -> connectrpc::ErrorDetail {
+    connectrpc::ErrorDetail::from_message(
+        "longtrader.common.v1.ErrorDetail",
+        &error_detail_message(reason),
+    )
+}
+
 impl From<ManagerError> for ConnectError {
     fn from(err: ManagerError) -> Self {
         match err {
@@ -55,11 +75,37 @@ impl From<ManagerError> for ConnectError {
             ManagerError::Unauthenticated => Self::unauthenticated("authentication failed"),
             ManagerError::InvalidArgument(msg) => Self::invalid_argument(msg),
             // `failed_precondition` (not `unavailable`): retrying without first
-            // reconciling can never succeed, and the message carries the stable
-            // `SYNC_IN_PROGRESS` token that clients branch on.
-            ManagerError::SyncInProgress { .. } => Self::failed_precondition(err.to_string()),
+            // reconciling can never succeed. The stable reason rides in a
+            // structured `ErrorDetail`; the message text is for logs only.
+            ManagerError::SyncInProgress { .. } => Self::failed_precondition(err.to_string())
+                .with_detail(error_detail(common::ErrorReason::SyncInProgress)),
             ManagerError::Port(e) => Self::internal(e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod error_detail_tests {
+    use super::*;
+
+    /// The reason must be the typed enum value, not a string token that a
+    /// future message rewording could silently break.
+    #[test]
+    fn sync_in_progress_carries_the_typed_reason() {
+        let detail = error_detail_message(common::ErrorReason::SyncInProgress);
+        assert!(matches!(
+            detail.reason,
+            buffa::EnumValue::Known(common::ErrorReason::SyncInProgress)
+        ));
+        assert_eq!(detail.domain, "longtrader.worker");
+    }
+
+    /// The Connect detail must name the contract message the client decodes.
+    #[test]
+    fn detail_names_the_contract_message() {
+        let detail = error_detail(common::ErrorReason::SyncInProgress);
+        assert_eq!(detail.type_url, "longtrader.common.v1.ErrorDetail");
+        assert!(detail.value.is_some());
     }
 }
 

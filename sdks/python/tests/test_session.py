@@ -37,8 +37,9 @@ def test_generated_stubs_import():
         "longtrader.common.v1.types_pb2",
         "longtrader.market.v1.market_pb2",
         "longtrader.trading.v1.trading_pb2",
+        "longtrader.stream.v1.stream_pb2",
         "longtrader.worker.v1.worker_pb2",
-        "longtrader.terminal.v1.trading_pb2",
+        "longtrader.terminal.v1.strategy_pb2",
         "longtrader.terminal.v1.runtime_pb2",
     ):
         __import__(name)

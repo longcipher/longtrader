@@ -19,5 +19,14 @@ breaking:
   # PACKAGE_VERSION_SUFFIX are LINT-only rules and are intentionally NOT listed
   # here — none of them is a valid `breaking` rule, and including any made
   # `buf breaking` abort before reporting real wire breaks.
+  #
+  # WIRE_JSON alone does NOT catch structural deletions: MESSAGE_NO_DELETE,
+  # ENUM_NO_DELETE, SERVICE_NO_DELETE, RPC_NO_DELETE, ONEOF_NO_DELETE and
+  # FIELD_NO_DELETE are FILE-category rules only (verified with
+  # `buf config ls-breaking-rules`), so `buf breaking` used to stay green while
+  # whole messages were being deleted. Add FILE so the gate actually enforces
+  # interface stability; WIRE_JSON still contributes the wire/JSON
+  # compatibility rules and the reserved-range rules that FILE does not carry.
   use:
     - WIRE_JSON
+    - FILE

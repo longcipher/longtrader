@@ -31,18 +31,56 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: bufbuild/buf-setup-action@v1
+
       - uses: taiki-e/install-action@v2
         with:
           tool: just,cargo-shear,cargo-sort,typos-cli,rumdl,cargo-workspace-inheritance-check
 
-      # `just ci` is the Rust gate only (lint + test + build). The Go, Python
-      # and TypeScript SDKs are checked by their own jobs below, each with the
-      # toolchain and generated stubs that SDK actually needs.
+      # `just ci` is the Rust gate plus the contract lint (`just lint` folds
+      # in `buf lint`). The Go, Python and TypeScript SDKs are checked by their
+      # own jobs below, each with the toolchain and generated stubs that SDK
+      # actually needs.
       - uses: actions/setup-go@v5
         with:
           go-version: stable
 
       - run: just ci
+
+  # ---------------------------------------------------------------------------
+  # Proto: buf lint + buf breaking against the PR base.
+  #
+  # Mirrors `just proto-lint` / `just proto-breaking`. `fetch-depth: 0` so the
+  # base ref exists locally for `buf breaking --against`; on push to `main` the
+  # comparison is main-vs-main (trivially clean) — the gate exists for PRs.
+  # ---------------------------------------------------------------------------
+  proto:
+    name: Proto (lint + breaking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: bufbuild/buf-setup-action@v1
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: buf lint
+        run: just proto-lint
+
+      # A deliberate breaking release is opted in per PR with the
+      # `contract-breaking` label: the break inventory is still printed to the
+      # log, but the step does not fail, so the PR stays mergeable while
+      # remaining fully reviewable. Without the label, any break fails.
+      - name: buf breaking
+        continue-on-error: ${{ contains(github.event.pull_request.labels.*.name, 'contract-breaking') }}
+        run: |
+          base="${{ github.base_ref }}"
+          [ -n "$base" ] || base=main
+          just proto-breaking "refs/remotes/origin/$base"
 
   # ---------------------------------------------------------------------------
   # Go: gofmt + go vet + go build + go test

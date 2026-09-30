@@ -81,6 +81,7 @@ import {
   GetCandlesResponseSchema,
   ListSymbolsRequestSchema,
   ListSymbolsResponseSchema,
+  Timeframe,
   StreamMarketDataRequestSchema,
   StreamSubscriptionSchema,
   StreamChannel,
@@ -810,11 +811,19 @@ export class Session {
     return resp.orderbook;
   }
 
-  /** OHLCV candles. `timeframe` is the contract's string form (M1, H4, ...). */
-  async getCandles(symbol: string, timeframe = "M1", limit = 100) {
+  /**
+   * OHLCV candles. `timeframe` is the contract enum (`Timeframe.M1`,
+   * `Timeframe.H4`, ...); it is no longer a string, so a typo is a type error
+   * instead of a silently empty result from the backend.
+   */
+  async getCandles(
+    symbol: string,
+    timeframe: Timeframe = Timeframe.M1,
+    limit = 100,
+  ) {
     const req = create(GetCandlesRequestSchema, {
       symbol,
-      timeframe: timeframe.trim().toUpperCase(),
+      timeframe,
       pagination: pagination(limit),
     });
     return this.unary(

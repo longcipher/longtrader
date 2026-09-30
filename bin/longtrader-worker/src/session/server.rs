@@ -269,8 +269,8 @@ mod tests {
             .expect_err("pre-ACTIVE submission must be rejected");
         assert_eq!(err.code, connectrpc::ErrorCode::FailedPrecondition, "got {err:?}");
         assert!(
-            err.message.as_deref().unwrap_or_default().contains("SYNC_IN_PROGRESS"),
-            "the stable reason token must survive to the wire: {err:?}"
+            err.details.iter().any(|d| d.type_url == "longtrader.common.v1.ErrorDetail"),
+            "the structured ErrorDetail must survive to the wire: {err:?}"
         );
     }
 
@@ -1008,8 +1008,8 @@ mod tests {
             .expect_err("a pre-ACTIVE session must not place a conditional order");
         assert_eq!(err.code, connectrpc::ErrorCode::FailedPrecondition, "{err:?}");
         assert!(
-            err.message.as_deref().unwrap_or_default().contains("SYNC_IN_PROGRESS"),
-            "the stable reason token must survive to the wire: {err:?}"
+            err.details.iter().any(|d| d.type_url == "longtrader.common.v1.ErrorDetail"),
+            "the structured ErrorDetail must survive to the wire: {err:?}"
         );
 
         let err = trading_client

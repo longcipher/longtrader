@@ -44,9 +44,15 @@ pub mod transport;
 
 /// Canonical service name constants (Connect path `/{service}/{method}`).
 pub mod service_name {
-    pub const MARKET_DATA: &str = "longtrader.terminal.v1.MarketDataService";
-    pub const TRADING: &str = "longtrader.terminal.v1.TradingService";
+    /// Canonical market data service; the terminal surface never redefined it.
+    pub const MARKET_DATA: &str = "longtrader.market.v1.MarketDataService";
+    /// Canonical trading service.
+    pub const TRADING: &str = "longtrader.trading.v1.TradingService";
+    /// Canonical streaming service (same envelope as `RuntimeService::StreamUpdates`).
+    pub const STREAM: &str = "longtrader.stream.v1.StreamService";
+    /// Terminal-only runtime surface: health, venue listing, update stream.
     pub const RUNTIME: &str = "longtrader.terminal.v1.RuntimeService";
+    /// Terminal-only strategy surface: lifecycle, actions, strategy events.
     pub const STRATEGY: &str = "longtrader.terminal.v1.StrategyService";
 }
 

@@ -215,6 +215,18 @@ pub trait MarketDataSource: Send + Sync {
         req: market::ListSymbolsRequest,
     ) -> Result<market::ListSymbolsResponse, PortError>;
 
+    /// Case-insensitive substring search over symbol names.
+    async fn search_symbols(
+        &self,
+        req: market::SearchSymbolsRequest,
+    ) -> Result<market::SearchSymbolsResponse, PortError>;
+
+    /// Batch ticker snapshots (empty `symbols` = every symbol).
+    async fn list_tickers(
+        &self,
+        req: market::ListTickersRequest,
+    ) -> Result<market::ListTickersResponse, PortError>;
+
     /// Subscribe with backpressure protection; the returned receiver yields
     /// events already filtered through `policy`.
     async fn subscribe_market_data(
@@ -261,6 +273,15 @@ pub trait FundingRateSource: Send + Sync {
         symbol: &str,
         limit: u32,
     ) -> Result<Vec<FundingRatePoint>, PortError>;
+
+    /// Batch funding snapshots (empty `symbols` = every symbol the venue
+    /// reports funding for). One call, one venue: a batch spanning venues would
+    /// make a cross-venue basis comparison unattributable.
+    async fn list_funding_rates(
+        &self,
+        exchange_id: &common::ExchangeId,
+        symbols: &[String],
+    ) -> Result<Vec<FundingRateSnapshot>, PortError>;
 }
 
 /// A venue-side conditional (trigger) order request.

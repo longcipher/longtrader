@@ -3,8 +3,12 @@ syntax = "proto3";
 package longtrader.terminal.v1;
 
 import "google/protobuf/timestamp.proto";
+import "longtrader/common/v1/types.proto";
 
 // Nullable parameter values (proto3 repeated has no null, use explicit container to express).
+//
+// A parameter is a knob (percent / multiple / duration), not an amount, so it
+// stays `double`; only money / price / quantity / PnL fields use `Decimal`.
 message ParamValue {
   optional double value = 1;
 }
@@ -17,8 +21,8 @@ message ParamValue {
 
 // One leg of a hedge unit.
 message HedgeLeg {
-  // Exchange id (venue).
-  string venue = 1;
+  // Exchange (venue) the leg trades on.
+  common.v1.ExchangeId exchange_id = 1;
   // Exchange native symbol.
   string symbol = 2;
   // Leg direction: LONG / SHORT.
@@ -35,14 +39,17 @@ message Adjustment {
   // Audit text: expression substituted with current actual values.
   string expression = 4;
   // Target notional (quote amount).
-  double target_notional = 5;
+  common.v1.Decimal target_notional = 5;
   // Target quantity (multi leg units, signed).
-  double target_quantity = 6;
+  common.v1.Decimal target_quantity = 6;
   // Pre-rebalance notional (optional).
-  optional double from_notional = 7;
+  optional common.v1.Decimal from_notional = 7;
 }
 
 // Arbitrage snapshot: real-time spread/funding rate readings for one leg pair, for "arbitrage display area" rendering.
+//
+// Basis / spread / deviation / risk fields are normalized ratios, not amounts,
+// so they stay `double`; only the notional and PnL fields are decimal money.
 message ArbitrageSnapshot {
   // Cross-exchange basis (spot vs perp price difference, mean-normalized ratio).
   double basis = 1;
@@ -57,17 +64,17 @@ message ArbitrageSnapshot {
   // Close threshold line (strategy custom, spread crosses below to close).
   double close_line = 6;
   // Current total two-leg notional (quote amount).
-  double current_notional = 7;
+  common.v1.Decimal current_notional = 7;
   // Strategy target notional (quote amount).
-  double target_notional = 8;
+  common.v1.Decimal target_notional = 8;
   // Net P&L (spread P&L + funding rate net income - fees, quote).
-  double net_pnl = 9;
+  common.v1.Decimal net_pnl = 9;
   // Realized P&L (quote).
-  double realized_pnl = 10;
+  common.v1.Decimal realized_pnl = 10;
   // Cumulative funding rate net income (quote).
-  double funding_accrued = 11;
+  common.v1.Decimal funding_accrued = 11;
   // Cumulative fees (quote).
-  double fees_paid = 12;
+  common.v1.Decimal fees_paid = 12;
   // Multi leg quantity deviation ((actual-target)/target).
   double long_deviation = 13;
   // Empty leg quantity deviation.
@@ -96,13 +103,13 @@ message HedgeUnit {
   // Status: RUNNING / REDUCE_ONLY / DISABLED / CLOSED.
   string status = 8;
   // Target notional (quote amount).
-  double target_notional = 9;
+  common.v1.Decimal target_notional = 9;
   // Target quantity (multi leg units, signed).
-  double target_quantity = 10;
+  common.v1.Decimal target_quantity = 10;
   // Multi leg actual position quantity.
-  double long_quantity = 11;
+  common.v1.Decimal long_quantity = 11;
   // Empty leg actual position quantity (converted to multi leg units, negative when signed).
-  double short_quantity = 12;
+  common.v1.Decimal short_quantity = 12;
   // Recent rebalance records (sorted by time descending, max 50 kept).
   repeated Adjustment adjustments = 13;
   // Latest arbitrage snapshot (optional).

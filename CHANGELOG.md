@@ -12,6 +12,37 @@ version (0.x.0).
 
 ## [Unreleased]
 
+- **Contract (breaking): the terminal surface converged onto the canonical
+  services.** `terminal.v1` had grown a near-complete second copy of the
+  contract, with its own string-decimal payloads, its own `Side`/`OrderType`/
+  `OrderStatus`, its own `Timeframe` and its own streaming envelope. It is now
+  a thin terminal-only domain:
+  - deleted `terminal.v1.messages`, `terminal.v1.market`, `terminal.v1.trading`
+    (`TradingService` was a strict subset of `trading.v1.TradingService` and
+    `MarketDataService` of `market.v1.MarketDataService`);
+  - `ListTickers`, `ListFundingRates` and `SearchSymbols` added to
+    `market.v1.MarketDataService` for the batch/search calls the terminal used
+    to own, and `market.v1.FundingRate` gained an optional `exchange_id` so a
+    cross-venue batch stays attributable;
+  - `Timeframe` promoted to `market.v1` (single authority) and
+    `GetCandlesRequest.timeframe` changed from `string` to that enum;
+  - `stream.v1.UpdateEnvelope` is the one streaming envelope: it gained `seq`,
+    `TopicClass` and the ticker / funding / execution / runtime payloads, and
+    `terminal.v1.RuntimeService.StreamUpdates` now returns it;
+  - `stream.v1` stopped defining its own `OrderType`/`OrderSide`/`OrderStatus`
+    and reuses `trading.v1`'s, ending the same-name/`PENDING=1`-vs-`OPEN=1`
+    ambiguity the style guide had only documented;
+  - terminal-only domains (`hedge`, `opportunity`, `strategy`, `strategy_cfg`,
+    runtime health / venue listing) survive unchanged in shape but carry
+    `common.v1.Decimal` and `common.v1.ExchangeId` instead of `double` and
+    `string venue`.
+  `trading.v1.OrderRequest` gained `take_profit`/`stop_loss` (additive) so
+  bracket submission survives the removal of the terminal's flat place-order
+  type. In-repo, the terminal↔unified translation layer in the worker is gone:
+  `TerminalAdapter` collapsed into `RemoteAdapter`, and `backend = "terminal"`
+  now differs from `"api"` only in endpoint and credentials. The out-of-repo
+  terminal backends must be released in lockstep.
+
 - **Every venue capability is now implemented on the open backends.** The four
   extended ports — `FundingRateSource`, `TriggerOrderGateway`,
   `VenueOpInvoker`, `WalletGateway` — returned `Unsupported` on both

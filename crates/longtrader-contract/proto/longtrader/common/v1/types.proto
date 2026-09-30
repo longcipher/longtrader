@@ -20,11 +20,6 @@ message Decimal {
   string raw_str = 3;
 }
 
-// Unified instrument symbol, e.g. "BTC/USDT".
-message Symbol {
-  string value = 1;
-}
-
 // Identifies one registered exchange instance on a backend.
 message ExchangeId {
   string id = 1;

@@ -1,8 +1,10 @@
 //! Backend adapters implementing the strategy-facing ports.
 //!
 //! Each adapter owns one backend transport and maps it onto the unified
-//! contract. After contract convergence the daemon and terminal adapters
-//! differ only in endpoint + credentials (design doc §6.1).
+//! contract. The terminal and daemon backends converged onto the same
+//! `longtrader.{market,trading}.v1` services, so one [`RemoteAdapter`] now
+//! serves both — the earlier terminal-only translation layer is gone and the
+//! `backend` value only picks endpoint + credentials (design doc §6.1).
 //!
 //! Backpressure isolation (design doc §6.5): adapters do NOT share channels
 //! across sessions. Every `subscribe_market_data` call returns an independent
@@ -17,13 +19,11 @@
 
 pub mod mock;
 pub mod remote;
-pub mod terminal;
 
 use std::sync::{Arc, atomic::AtomicU64};
 
 pub use mock::MockAdapter;
 pub use remote::RemoteAdapter;
-pub use terminal::TerminalAdapter;
 
 use crate::{
     overflow,

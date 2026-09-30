@@ -331,6 +331,24 @@ impl MarketDataSource for RemoteAdapter {
         Ok(resp)
     }
 
+    async fn search_symbols(
+        &self,
+        req: market::SearchSymbolsRequest,
+    ) -> Result<market::SearchSymbolsResponse, PortError> {
+        let resp: market::SearchSymbolsResponse =
+            self.unary(SERVICE_MARKET, "SearchSymbols", req).await?;
+        Ok(resp)
+    }
+
+    async fn list_tickers(
+        &self,
+        req: market::ListTickersRequest,
+    ) -> Result<market::ListTickersResponse, PortError> {
+        let resp: market::ListTickersResponse =
+            self.unary(SERVICE_MARKET, "ListTickers", req).await?;
+        Ok(resp)
+    }
+
     async fn subscribe_market_data(
         &self,
         req: market::StreamMarketDataRequest,
@@ -675,6 +693,25 @@ impl FundingRateSource for RemoteAdapter {
                 })
             })
             .collect()
+    }
+
+    async fn list_funding_rates(
+        &self,
+        exchange_id: &common::ExchangeId,
+        symbols: &[String],
+    ) -> Result<Vec<FundingRateSnapshot>, PortError> {
+        let resp: market::ListFundingRatesResponse = self
+            .unary(
+                SERVICE_MARKET,
+                "ListFundingRates",
+                market::ListFundingRatesRequest {
+                    exchange_id: exchange_id.clone().into(),
+                    symbols: symbols.to_vec(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        resp.funding_rates.iter().map(funding_rate_to_port).collect()
     }
 }
 

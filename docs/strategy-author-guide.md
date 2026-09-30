@@ -37,10 +37,12 @@ pub struct StrategyContext {
 }
 ```
 
-All six ports are implemented by every in-tree backend (`mock`, `api` /
-`RemoteAdapter`, `terminal` / `TerminalAdapter`), so any strategy can run
-against any of them. A backend that genuinely cannot serve one — a venue with
-no funding feed, say — returns `PortError::Unsupported`, which the control
+All six ports are implemented by every in-tree backend (`mock` / `MockAdapter`,
+and `api` / `terminal` / `RemoteAdapter` — the two remote backends converged
+onto the same canonical services and now differ only in endpoint and
+credentials), so any strategy can run against any of them. A backend that
+genuinely cannot serve one — a venue with no funding feed, say — returns
+`PortError::Unsupported`, which the control
 plane surfaces to a remote strategy as the Connect code `unimplemented`. Treat
 that as permanent: it is the answer "this venue has no such endpoint", not a
 transient failure, so retrying cannot help.

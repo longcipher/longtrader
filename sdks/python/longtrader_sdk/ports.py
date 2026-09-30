@@ -103,8 +103,10 @@ class MarketPort(ABC):
         """Unary order book snapshot."""
 
     @abstractmethod
-    def get_candles(self, symbol: str, timeframe: str = "M1", limit: int = 100) -> Any:
-        """OHLCV candles; ``timeframe`` is the contract's string form."""
+    def get_candles(
+        self, symbol: str, timeframe: int | None = None, limit: int = 100
+    ) -> Any:
+        """OHLCV candles; ``timeframe`` is the contract enum value."""
 
     @abstractmethod
     def list_symbols(self) -> Any:
@@ -157,7 +159,9 @@ class SessionMarketPort(MarketPort):
     def fetch_order_book(self, symbol: str, depth: int = 10) -> Any:
         return self._session.fetch_order_book(symbol, depth)
 
-    def get_candles(self, symbol: str, timeframe: str = "M1", limit: int = 100) -> Any:
+    def get_candles(
+        self, symbol: str, timeframe: int | None = None, limit: int = 100
+    ) -> Any:
         return self._session.get_candles(symbol, timeframe, limit)
 
     def list_symbols(self) -> Any:

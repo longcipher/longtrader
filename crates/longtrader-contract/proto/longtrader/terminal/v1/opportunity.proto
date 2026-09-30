@@ -4,6 +4,7 @@ package longtrader.terminal.v1;
 
 import "google/protobuf/timestamp.proto";
 
+import "longtrader/common/v1/types.proto";
 import "longtrader/terminal/v1/hedge.proto";
 
 // ========== Opportunity ==========
@@ -32,7 +33,7 @@ message Opportunity {
   // Matched threshold id (for highlighting).
   repeated string hit_thresholds = 11;
   // Current total notional (0 = no position).
-  double current_notional = 12;
+  common.v1.Decimal current_notional = 12;
   google.protobuf.Timestamp updated_at = 13;
 }
 

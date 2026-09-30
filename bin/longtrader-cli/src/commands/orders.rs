@@ -1,46 +1,58 @@
-use color_eyre::Result;
-use longtrader_proto::{client::TerminalClient, proto::longtrader::terminal::v1::Side};
+use color_eyre::{Result, eyre::eyre};
+use longtrader_contract::ext::decimal_to_common;
+use longtrader_proto::{
+    client::TerminalClient,
+    proto::longtrader::{common::v1 as common, trading::v1 as utrading},
+};
+use rust_decimal::Decimal;
 
 use crate::output::Renderer;
 
+fn parse_dec(s: &str, field: &'static str) -> Result<Decimal> {
+    s.parse::<Decimal>().map_err(|_| eyre!("bad decimal for {field}: {s:?}"))
+}
+
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn place_order(
     client: &TerminalClient,
-    venue: &str,
+    exchange: &common::ExchangeId,
     symbol: &str,
-    side: Side,
+    side: utrading::OrderSide,
     quantity: &str,
     price: Option<&str>,
     take_profit: Option<&str>,
     stop_loss: Option<&str>,
     output: &Renderer,
 ) -> Result<()> {
-    let order_type = if price.is_some() {
-        longtrader_proto::proto::longtrader::terminal::v1::OrderType::Limit
-    } else {
-        longtrader_proto::proto::longtrader::terminal::v1::OrderType::Market
+    // A price turns the order into a limit; without one it is a market order.
+    let order_type =
+        if price.is_some() { utrading::OrderType::Limit } else { utrading::OrderType::Market };
+
+    let bracket = |v: Option<&str>, field: &'static str| -> Result<_> {
+        Ok(v.map(|p| parse_dec(p, field).map(|d| decimal_to_common(d).into()))
+            .transpose()?
+            .unwrap_or_default())
     };
 
-    let client_order_id = format!("cli-{}", ulid::Ulid::generate());
+    let order = utrading::OrderRequest {
+        client_order_id: format!("cli-{}", ulid::Ulid::generate()),
+        symbol: symbol.to_string(),
+        r#type: buffa::EnumValue::Known(order_type),
+        side: buffa::EnumValue::Known(side),
+        amount: decimal_to_common(parse_dec(quantity, "quantity")?).into(),
+        price: bracket(price, "price")?,
+        take_profit: bracket(take_profit, "take_profit")?,
+        stop_loss: bracket(stop_loss, "stop_loss")?,
+        ..Default::default()
+    };
 
-    match client
-        .place_order(
-            venue,
-            symbol,
-            side,
-            order_type,
-            quantity,
-            price,
-            // The CLI has no trigger-price flag; market/limit only.
-            None,
-            take_profit,
-            stop_loss,
-            &client_order_id,
-            // The CLI is an operator tool, never a strategy: its orders are
-            // explicitly allowed to open exposure.
-            false,
-        )
-        .await
-    {
+    let req = utrading::CreateOrderRequest {
+        exchange_id: exchange.clone().into(),
+        order: order.into(),
+        ..Default::default()
+    };
+
+    match client.create_order(req).await {
         Ok(order) => {
             output.render_orders(&[order]);
             Ok(())

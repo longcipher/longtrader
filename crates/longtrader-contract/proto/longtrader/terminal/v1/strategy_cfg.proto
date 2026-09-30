@@ -110,9 +110,9 @@ message EvaluateExpressionRequest {
   // Strategy expression (e.g. "basis * 100" / "open_spread - open_line").
   string expression = 1;
   // Multi leg price (quote; optional, default 0).
-  optional double long_price = 2;
+  optional common.v1.Decimal long_price = 2;
   // Empty leg price (quote; optional, default 0).
-  optional double short_price = 3;
+  optional common.v1.Decimal short_price = 3;
   // Empty leg exchange rate (empty leg price family × scale converted to multi leg units).
   double scale = 4;
   // Parameter slot values (aligned by index).
@@ -174,9 +174,9 @@ message ListNotificationsResponse {
 // details (corresponds to QQQ's "episode records").
 message EpisodeFill {
   google.protobuf.Timestamp timestamp = 1;
-  double price = 2;
-  double quantity = 3;
-  double fee = 4;
+  common.v1.Decimal price = 2;
+  common.v1.Decimal quantity = 3;
+  common.v1.Decimal fee = 4;
 }
 message Episode {
   string id = 1;
@@ -185,13 +185,13 @@ message Episode {
   // 0 = no position.
   google.protobuf.Timestamp closed_at = 4;
   // Spread P&L (quote).
-  double spread_pnl = 5;
+  common.v1.Decimal spread_pnl = 5;
   // Funding rate net income (quote).
-  double funding_accrued = 6;
+  common.v1.Decimal funding_accrued = 6;
   // Cumulative fees (quote).
-  double fees_paid = 7;
+  common.v1.Decimal fees_paid = 7;
   // Net P&L = spread P&L + funding rate net income − fees.
-  double net_pnl = 8;
+  common.v1.Decimal net_pnl = 8;
   // Multi leg per-trade execution.
   repeated EpisodeFill long_fills = 9;
   // Empty leg per-trade execution.
