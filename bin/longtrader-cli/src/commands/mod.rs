@@ -208,3 +208,93 @@ pub(crate) async fn dispatch(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// A contract selector built the way `exchange_id` is expected to build one:
+    /// the `id` half filled from the venue, the `label` half left at its default.
+    fn selector(id: &str) -> common::ExchangeId {
+        common::ExchangeId { id: id.to_string(), ..Default::default() }
+    }
+
+    // ---- exchange_id: the empty selector ----
+
+    #[test]
+    fn an_empty_venue_selects_the_backends_single_active_venue() {
+        // Documented contract: an empty `ExchangeId.id` resolves server-side to
+        // whichever venue the terminal has active, which is what the CLI's
+        // `--venue ""` means.
+        let selector = exchange_id("");
+        assert_eq!(selector.id, "");
+        assert_eq!(selector.label, "");
+    }
+
+    #[test]
+    fn the_empty_venue_selector_is_wire_identical_to_the_default_message() {
+        // Recorded ambiguity: because nothing on the wire distinguishes an
+        // all-defaults `ExchangeId` from a deliberately empty selector, a server
+        // cannot tell "the caller chose the active venue" from "the caller forgot
+        // to say". Both decode to the same bytes.
+        assert_eq!(exchange_id(""), common::ExchangeId::default());
+    }
+
+    #[test]
+    fn a_venue_label_passes_through_untouched() {
+        let selector = exchange_id("binance");
+        assert_eq!(selector.id, "binance");
+    }
+
+    #[test]
+    fn the_label_field_is_never_populated_by_the_venue_flag() {
+        // `common.v1.ExchangeId` has both an `id` and a `label`, but the CLI only
+        // ever fills `id`, so the label half of every request is empty.
+        for venue in ["", "mock", "binance", "BINANCE", " with spaces "] {
+            assert_eq!(exchange_id(venue).label, "", "venue={venue:?}");
+        }
+    }
+
+    #[test]
+    fn a_venue_is_never_normalised_trimmed_or_case_folded() {
+        // No `to_uppercase`, no `trim`, no defaulting: whatever the shell passed
+        // is what the backend is asked for, so a typo is a backend error rather
+        // than a silent correction here.
+        for venue in ["mock", "MOCK", " mock", "mock ", "Mock"] {
+            assert_eq!(exchange_id(venue).id, venue);
+        }
+    }
+
+    #[test]
+    fn the_selector_populates_the_id_half_and_nothing_else() {
+        assert_eq!(exchange_id("binance"), selector("binance"));
+        assert_eq!(exchange_id("binance").label, "");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// `exchange_id` is the identity on the venue string plus a fixed empty
+        /// label: whatever goes in comes back out of `id`, and `label` is never
+        /// touched. Nothing about the string can be reinterpreted on the way.
+        #[test]
+        fn exchange_id_is_the_identity_on_the_venue_string(venue in ".{0,24}") {
+            let selector = exchange_id(&venue);
+            prop_assert_eq!(selector.id.as_str(), venue.as_str(), "venue={:?}", venue);
+            prop_assert_eq!(selector.label, "");
+        }
+
+        /// The selector is injective on the venue string: two venues produce the
+        /// same request only when they are the same venue, so the CLI can never
+        /// silently collapse two callers onto one backend selector.
+        #[test]
+        fn two_venues_share_a_selector_only_when_they_are_the_same_venue(
+            left in ".{0,12}",
+            right in ".{0,12}",
+        ) {
+            prop_assert_eq!(exchange_id(&left) == exchange_id(&right), left == right);
+        }
+    }
+}

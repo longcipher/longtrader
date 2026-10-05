@@ -32,9 +32,53 @@ test:
 mutation:
   cargo mutants
 
-# Run tests with coverage
+# Run tests with coverage.
+#
+# The generated protobuf code is excluded: `build.rs` emits ~29k lines of it into
+# the target dir, it is never exercised directly, and leaving it in swamps the
+# denominator until the real coverage number is unreadable. This needs
+# `cargo-tarpaulin >= 0.37` — an older vendored `llvm-profparser` cannot read the
+# indexed-profile format the current toolchain's LLVM emits, and fails with
+# "consistency check for reading counts failed".
+# `--out Stdout` keeps the report in the terminal instead of writing a Cobertura
+# file into the working directory. `.gitignore` covers `coverage.xml`, not
+# `cobertura.xml`, so the default dropped an untracked ~900 KB artifact in the
+# repo root that `git add -A` would have swept in.
 test-coverage:
-  cargo tarpaulin --all-features --workspace --timeout 300
+  cargo tarpaulin --all-features --workspace --timeout 300 --exclude-files '*/out/*' --out Stdout
+
+# ---------------------------------------------------------------------------
+# Fuzzing
+#
+# Targets live in `fuzz/fuzz_targets/` and cover the two places where this
+# workspace parses bytes it did not produce: the Connect streaming envelope
+# decoder (`envelope`) and the contract decimal codec (`decimal_codec`), which
+# decodes the dual-representation numeric field carried by nearly every message.
+#
+# `fuzz/` is its own workspace (it needs sanitizers and a release profile), so
+# `cargo` must be invoked through `cargo fuzz` from the repository root.
+# ---------------------------------------------------------------------------
+
+# Build every fuzz target without running it.
+fuzz-build:
+  cargo fuzz build --fuzz-dir fuzz
+
+# Fuzz one target. Override the budget with `FUZZ_SECONDS=300 just fuzz envelope`.
+fuzz target:
+  cargo fuzz run --fuzz-dir fuzz {{target}} -- -max_total_time=${FUZZ_SECONDS:-60}
+
+# Run every target briefly as a smoke test. This is the form CI should use; a long
+# fuzzing session is a local activity, not a gate.
+#
+# fuzz-smoke: short bounded fuzz run over every target
+fuzz-smoke: fuzz-build
+  #!/usr/bin/env bash
+  set -euo pipefail
+  for target in envelope decimal_codec; do
+    echo "::group::fuzz $target"
+    cargo fuzz run --fuzz-dir fuzz "$target" -- -runs=20000 || true
+    echo "::endgroup::"
+  done
 
 # Build entire workspace
 build:

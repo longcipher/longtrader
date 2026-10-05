@@ -1,15 +1,14 @@
 //! Open-source `RemoteAdapter`: speaks the public contract (`longtrader.*.v1`)
 //! directly via Connect `application/proto` over `hpx`.
 //!
-//! The legacy `tradingcharts.terminal.v1` translation layer has been removed
-//! for the open source repo; every method forwards the contract DTO without
-//! string-decimal parsing or `terminal_core` timeframe mapping. Timeframes
-//! are already strings in `market::GetCandlesRequest`, so no conversion is
-//! needed. Extended capabilities (funding, conditional orders, wallet, venue
-//! ops) are served from the same contract, so a unified backend can run every
-//! in-tree strategy; a venue that lacks one surfaces as
-//! [`PortError::NotFound`] or the backend's own error rather than a silent
-//! empty result.
+//! Every method forwards the contract DTO as-is: there is no translation layer,
+//! no string-decimal parsing, and no timeframe mapping, because
+//! `market::GetCandlesRequest.timeframe` is already the contract's enum.
+//!
+//! Extended capabilities (funding, conditional orders, wallet, venue ops) are
+//! served from the same contract, so one backend can run every in-tree
+//! strategy; a venue that lacks one surfaces as [`PortError::NotFound`] or the
+//! backend's own error rather than a silent empty result.
 
 use std::{
     sync::{

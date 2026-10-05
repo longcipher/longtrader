@@ -1085,4 +1085,1292 @@ mod tests {
             .await
             .expect("an operator call has no session lifecycle to gate on");
     }
+
+    // ---- Shared fixtures for the remaining surface ------------------------
+    //
+    // The helpers below are the same shape as the ones above (a real Connect
+    // round trip through `build_router`); they exist because these tests need
+    // the *other* side of the fixtures — the adapter handle, the session client,
+    // or the market client — in the same process.
+
+    /// The mock venue's `exchange_id` request field.
+    fn mock_exchange() -> buffa::MessageField<common::ExchangeId, buffa::Inline<common::ExchangeId>>
+    {
+        common::ExchangeId { id: "mock".to_string(), ..Default::default() }.into()
+    }
+
+    /// A `google.protobuf.Duration` of `millis`, for lease negotiation.
+    fn lease_duration(millis: u64) -> buffa_types::google::protobuf::Duration {
+        buffa_types::google::protobuf::Duration {
+            seconds: i64::try_from(millis / 1000).expect("whole seconds fit i64"),
+            nanos: i32::try_from((millis % 1000) * 1_000_000).expect("millis fit i32 nanos"),
+            ..Default::default()
+        }
+    }
+
+    /// The `lease_timeout` policy field. `None` means "leave the negotiated lease
+    /// alone", which is why an absent field is meaningful rather than zero.
+    fn lease_field(
+        millis: Option<u64>,
+    ) -> buffa::MessageField<
+        buffa_types::google::protobuf::Duration,
+        buffa::Inline<buffa_types::google::protobuf::Duration>,
+    > {
+        millis.map_or_else(buffa::MessageField::none, |ms| {
+            buffa::MessageField::some(lease_duration(ms))
+        })
+    }
+
+    /// A limit-order payload for `symbol`. The session id lives on the enclosing
+    /// request, so both the batch RPC and an operator-style unscoped placement
+    /// need the inner message built separately.
+    fn order_payload(symbol: &str, coid: &str) -> trading::OrderRequest {
+        let mut order = order_req("").order.as_option().expect("order request").clone();
+        order.symbol = symbol.to_string();
+        order.client_order_id = coid.to_string();
+        order
+    }
+
+    /// One limit-order leg for the batch `CreateOrders` RPC.
+    fn batch_leg(coid: &str) -> trading::OrderRequest {
+        order_payload("BTC/USDT", coid)
+    }
+
+    /// An *unscoped* create-order request, the way the CLI places one. A non-empty
+    /// `session_id` would be gated against a session lifecycle that a plain
+    /// operator call has none of.
+    fn operator_order(symbol: &str, coid: &str) -> trading::CreateOrderRequest {
+        trading::CreateOrderRequest {
+            order: buffa::MessageField::some(order_payload(symbol, coid)),
+            ..order_req("")
+        }
+    }
+
+    /// One `worker.v1.LogEvent` for the client-streaming `ReportLog` RPC.
+    fn log_event(session_id: &str, level: worker::LogLevel, message: &str) -> worker::LogEvent {
+        worker::LogEvent {
+            session_id: session_id.to_string(),
+            level: buffa::EnumValue::Known(level),
+            message: message.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Boot the capability-enabled router with the session client *and* the
+    /// backend handle, so a test can script an adapter-side failure and still
+    /// observe what the session was credited with.
+    async fn boot_scripted() -> (
+        Arc<MockAdapter>,
+        worker::WorkerSessionServiceClient<connectrpc::client::HttpClient>,
+        trading::TradingServiceClient<connectrpc::client::HttpClient>,
+    ) {
+        let adapter = Arc::new(MockAdapter::new(rust_decimal_macros::dec!(100)));
+        let manager = Arc::new(
+            SessionManager::new(
+                None,
+                common::ExchangeId::default(),
+                Arc::clone(&adapter) as Arc<dyn TradingGateway>,
+                Arc::clone(&adapter) as Arc<dyn MarketDataSource>,
+            )
+            .with_capabilities(crate::session::Capabilities::all(Arc::clone(&adapter))),
+        );
+        manager.install_self().await;
+        let addr = spawn(manager).await;
+
+        let transport = connectrpc::client::HttpClient::plaintext();
+        let uri: axum::http::Uri = format!("http://{addr}").parse().expect("valid uri");
+        let config = ClientConfig::new(uri);
+        (
+            adapter,
+            worker::WorkerSessionServiceClient::new(transport.clone(), config.clone()),
+            trading::TradingServiceClient::new(transport, config),
+        )
+    }
+
+    /// Boot a router whose backend declares no capabilities, returning the
+    /// market client, so `market.v1`'s funding RPCs get the same `unimplemented`
+    /// coverage the trading ones already have.
+    async fn boot_market_without_capabilities()
+    -> market::MarketDataServiceClient<connectrpc::client::HttpClient> {
+        let adapter = Arc::new(MockAdapter::new(rust_decimal_macros::dec!(100)));
+        let manager = Arc::new(SessionManager::new(
+            None,
+            common::ExchangeId::default(),
+            Arc::clone(&adapter) as Arc<dyn TradingGateway>,
+            adapter as Arc<dyn MarketDataSource>,
+        ));
+        manager.install_self().await;
+        let addr = spawn(manager).await;
+
+        let transport = connectrpc::client::HttpClient::plaintext();
+        let uri: axum::http::Uri = format!("http://{addr}").parse().expect("valid uri");
+        market::MarketDataServiceClient::new(transport, ClientConfig::new(uri))
+    }
+
+    /// How long to wait for one more streamed event. A `StreamStrategyEvents`
+    /// subscription has no natural end — the session outlives the test — so a
+    /// drain has to stop on an idle gap rather than on a clean `None`.
+    const STREAM_IDLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+    // ---- Market data passthrough -------------------------------------------
+    //
+    // The worker is a thin proxy here; these RPCs exist so an
+    // external-language strategy sees the same surface a native one does. The
+    // adapter's own unit tests cover the conversions, so what is asserted here
+    // is that the proxy wiring and the Connect encoding survive the round trip.
+
+    #[tokio::test]
+    async fn instrument_discovery_lists_and_searches_the_mocks_symbols() {
+        let (_adapter, _trading, market_client, _ops) = boot_with_capabilities().await;
+
+        let listed = market_client
+            .list_symbols(market::ListSymbolsRequest {
+                exchange_id: mock_exchange(),
+                ..Default::default()
+            })
+            .await
+            .expect("list symbols")
+            .into_owned();
+        assert_eq!(listed.symbols.len(), 1, "the mock advertises one instrument");
+        assert_eq!(listed.symbols[0].name, "MOCK-USDT");
+        assert_eq!(listed.symbols[0].quote_asset, "USDT", "instrument metadata must survive");
+
+        // Search is a case-insensitive substring match over name / display name.
+        let hit = market_client
+            .search_symbols(market::SearchSymbolsRequest {
+                exchange_id: mock_exchange(),
+                query: "mock".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("search")
+            .into_owned();
+        assert_eq!(hit.symbols.len(), 1, "a substring match must be case-insensitive");
+
+        let miss = market_client
+            .search_symbols(market::SearchSymbolsRequest {
+                exchange_id: mock_exchange(),
+                query: "no-such-instrument".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("search")
+            .into_owned();
+        assert!(miss.symbols.is_empty(), "an unmatched query yields no rows, not an error");
+    }
+
+    /// A ticker read is the price a strategy sizes on, so the assertion is on
+    /// the *wire* decimal: a value that encoded wrong would arrive as 0 and look
+    /// like a free fill.
+    #[tokio::test]
+    async fn ticker_reads_carry_the_venue_value_across_the_wire() {
+        use rust_decimal_macros::dec;
+        let (_adapter, _trading, market_client, _ops) = boot_with_capabilities().await;
+
+        let one = market_client
+            .fetch_ticker(market::FetchTickerRequest {
+                exchange_id: mock_exchange(),
+                symbol: "BTC/USDT".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("fetch ticker")
+            .into_owned();
+        let last = one.ticker.as_option().expect("ticker present");
+        assert_eq!(last.symbol, "BTC/USDT");
+        assert_eq!(
+            longtrader_contract::ext::common_to_decimal(last.last.as_option().expect("last"))
+                .expect("decodes"),
+            dec!(100),
+        );
+
+        // An empty symbol list means "every symbol the venue reports".
+        let all = market_client
+            .list_tickers(market::ListTickersRequest {
+                exchange_id: mock_exchange(),
+                symbols: vec![],
+                ..Default::default()
+            })
+            .await
+            .expect("list tickers")
+            .into_owned();
+        assert_eq!(all.tickers.len(), 1);
+
+        // An explicit filter must be honoured rather than returning everything:
+        // a batch of one symbol must not silently become a batch of all.
+        let none = market_client
+            .list_tickers(market::ListTickersRequest {
+                exchange_id: mock_exchange(),
+                symbols: vec!["NOPE/USDT".to_string()],
+                ..Default::default()
+            })
+            .await
+            .expect("list tickers")
+            .into_owned();
+        assert!(none.tickers.is_empty(), "an unknown symbol must yield no row, not a price");
+    }
+
+    #[tokio::test]
+    async fn order_book_depth_follows_the_requested_page_size() {
+        let (_adapter, _trading, market_client, _ops) = boot_with_capabilities().await;
+
+        let deep = market_client
+            .fetch_order_book(market::FetchOrderBookRequest {
+                exchange_id: mock_exchange(),
+                symbol: "BTC/USDT".to_string(),
+                pagination: buffa::MessageField::some(common::Pagination {
+                    limit: 5,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("order book")
+            .into_owned();
+        let book = deep.orderbook.as_option().expect("orderbook present");
+        assert_eq!(book.symbol, "BTC/USDT");
+        assert_eq!(book.bids.len(), 5, "the requested depth must reach the adapter intact");
+        assert_eq!(book.asks.len(), 5);
+
+        // Bids must sit below the mid and asks above it: a crossed book would
+        // make the very first maker fill lose money.
+        let best_bid = longtrader_contract::ext::common_to_decimal(
+            book.bids[0].price.as_option().expect("bid price"),
+        )
+        .expect("decodes");
+        let best_ask = longtrader_contract::ext::common_to_decimal(
+            book.asks[0].price.as_option().expect("ask price"),
+        )
+        .expect("decodes");
+        assert!(best_bid < best_ask, "the book must not be crossed: {best_bid} / {best_ask}");
+
+        // No pagination: the proxy still resolves a usable one-level book rather
+        // than erroring, like every other unqualified market call.
+        let shallow = market_client
+            .fetch_order_book(market::FetchOrderBookRequest {
+                exchange_id: mock_exchange(),
+                symbol: "BTC/USDT".to_string(),
+                pagination: buffa::MessageField::none(),
+                ..Default::default()
+            })
+            .await
+            .expect("order book")
+            .into_owned();
+        assert_eq!(shallow.orderbook.as_option().expect("orderbook").bids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn candles_are_returned_ascending_and_honour_the_limit() {
+        let (_adapter, _trading, market_client, _ops) = boot_with_capabilities().await;
+
+        let resp = market_client
+            .get_candles(market::GetCandlesRequest {
+                exchange_id: mock_exchange(),
+                symbol: "BTC/USDT".to_string(),
+                timeframe: buffa::EnumValue::Known(market::Timeframe::M5),
+                pagination: buffa::MessageField::some(common::Pagination {
+                    limit: 7,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("candles")
+            .into_owned();
+        assert_eq!(resp.candles.len(), 7, "the requested limit must be honoured");
+        let times: Vec<i64> = resp.candles.iter().map(|c| c.timestamp_ms).collect();
+        assert!(times.windows(2).all(|w| w[0] < w[1]), "candles must ascend: {times:?}");
+    }
+
+    /// A batch funding read must carry the *requested* symbol on every row: a
+    /// carry strategy sizes a position off this row, so an unattributed rate is
+    /// worse than no rate at all.
+    #[tokio::test]
+    async fn batch_funding_rates_report_the_symbols_that_were_asked_for() {
+        use rust_decimal_macros::dec;
+        let (adapter, _trading, market_client, _ops) = boot_with_capabilities().await;
+        adapter.set_funding_rate(dec!(0.0001)).await;
+
+        let listed = market_client
+            .list_funding_rates(market::ListFundingRatesRequest {
+                exchange_id: mock_exchange(),
+                symbols: vec!["BTC/USDT".to_string(), "ETH/USDT".to_string()],
+                ..Default::default()
+            })
+            .await
+            .expect("batch funding")
+            .into_owned();
+        let symbols: Vec<&str> = listed.funding_rates.iter().map(|r| r.symbol.as_str()).collect();
+        assert_eq!(symbols, vec!["BTC/USDT", "ETH/USDT"]);
+        for rate in &listed.funding_rates {
+            assert_eq!(
+                longtrader_contract::ext::common_to_decimal(rate.rate.as_option().expect("rate"))
+                    .expect("decodes"),
+                dec!(0.0001),
+            );
+            assert!(
+                rate.next_funding_time_ms > 0,
+                "the settlement time must reach the client or a carry leg cannot time its exit"
+            );
+        }
+
+        // An unpriced contract is absent from the batch, never given another
+        // contract's rate.
+        adapter.set_funding_symbols(vec!["BTC/USDT".to_string()]).await;
+        let narrowed = market_client
+            .list_funding_rates(market::ListFundingRatesRequest {
+                exchange_id: mock_exchange(),
+                symbols: vec!["BTC/USDT".to_string(), "ETH/USDT".to_string()],
+                ..Default::default()
+            })
+            .await
+            .expect("batch funding")
+            .into_owned();
+        let symbols: Vec<&str> = narrowed.funding_rates.iter().map(|r| r.symbol.as_str()).collect();
+        assert_eq!(symbols, vec!["BTC/USDT"], "an unpriced contract must be omitted");
+    }
+
+    /// The funding RPCs are capability-gated like their trading counterparts: a
+    /// backend that cannot price funding must say `unimplemented`, because an
+    /// empty success reads as "this venue has no basis at all".
+    #[tokio::test]
+    async fn batch_funding_rates_without_a_backend_capability_is_unimplemented() {
+        let market_client = boot_market_without_capabilities().await;
+        let err = market_client
+            .list_funding_rates(market::ListFundingRatesRequest {
+                exchange_id: mock_exchange(),
+                symbols: vec!["BTC/USDT".to_string()],
+                ..Default::default()
+            })
+            .await
+            .expect_err("no funding capability");
+        assert_eq!(err.code, connectrpc::ErrorCode::Unimplemented, "{err:?}");
+    }
+
+    /// A ticker subscription takes the `DropOldest` arm of the proxy's policy
+    /// selection; the events must reach the client as a live stream.
+    #[tokio::test]
+    async fn a_ticker_subscription_streams_events_to_the_client() {
+        let (_adapter, _trading, market_client, _ops) = boot_with_capabilities().await;
+        let mut stream = market_client
+            .stream_market_data(market::StreamMarketDataRequest {
+                exchange_id: mock_exchange(),
+                subscriptions: vec![market::StreamSubscription {
+                    channel: buffa::EnumValue::Known(market::StreamChannel::Ticker),
+                    symbol: "BTC/USDT".to_string(),
+                    ..Default::default()
+                }],
+                resume_token: String::new(),
+                ..Default::default()
+            })
+            .await
+            .expect("ticker stream");
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            stream.message::<market::MarketDataEvent>(),
+        )
+        .await
+        .expect("the mock polls every symbol it was subscribed to")
+        .expect("stream read")
+        .expect("a subscribed symbol must produce events")
+        .to_owned_message();
+        assert!(
+            matches!(event.event, Some(market::market_data_event::Event::Ticker(_))),
+            "got a non-ticker event: {event:?}"
+        );
+        assert!(event.header.sequence > 0, "every streamed event must carry a watermark");
+        assert!(!event.resume_token.is_empty(), "a streamed event must be resumable");
+    }
+
+    /// An orderbook subscription is the one that selects `Coalesce` — the most
+    /// conservative of the two stream policies — and it must survive being
+    /// mixed with a ticker subscription on the same request. Abandoning the
+    /// stream mid-flight is the normal case (a strategy crash), so the router
+    /// has to keep serving afterwards.
+    #[tokio::test]
+    async fn an_orderbook_subscription_selects_the_coalesce_policy() {
+        let (_adapter, _trading, market_client, _ops) = boot_with_capabilities().await;
+        let subscription = |channel: market::StreamChannel| market::StreamSubscription {
+            channel: buffa::EnumValue::Known(channel),
+            symbol: "BTC/USDT".to_string(),
+            ..Default::default()
+        };
+        let mut stream = market_client
+            .stream_market_data(market::StreamMarketDataRequest {
+                exchange_id: mock_exchange(),
+                subscriptions: vec![
+                    subscription(market::StreamChannel::Orderbook),
+                    subscription(market::StreamChannel::Ticker),
+                ],
+                resume_token: String::new(),
+                ..Default::default()
+            })
+            .await
+            .expect("orderbook stream");
+
+        // The mock answers each channel with a synthetic event of the matching
+        // variant, so the two subscriptions here deliver an `Orderbook` and a
+        // `Ticker`. What is asserted is that both are pumped under the
+        // coalescing policy without wedging.
+        let mut received = 0usize;
+        for _ in 0..4 {
+            let next =
+                tokio::time::timeout(STREAM_IDLE, stream.message::<market::MarketDataEvent>())
+                    .await;
+            let Ok(Ok(Some(_))) = next else { break };
+            received += 1;
+        }
+        drop(stream);
+        assert!(received > 0, "an orderbook subscription must still deliver events");
+
+        let health = market_client
+            .list_symbols(market::ListSymbolsRequest {
+                exchange_id: mock_exchange(),
+                ..Default::default()
+            })
+            .await
+            .expect("the router must keep serving after an abandoned stream")
+            .into_owned();
+        assert_eq!(health.symbols.len(), 1);
+    }
+
+    /// A stream whose venue cannot be resolved has nothing to poll, so it must
+    /// never fabricate an event — and it must *end* rather than hang. With no
+    /// producer task left holding the pipe open, the poller closes the channel
+    /// and the client observes a clean end-of-stream. A client that waited for
+    /// an event here would previously have waited forever.
+    #[tokio::test]
+    async fn a_stream_without_an_exchange_id_ends_without_producing_an_event() {
+        let (_adapter, _trading, market_client, _ops) = boot_with_capabilities().await;
+        let mut stream = market_client
+            .stream_market_data(market::StreamMarketDataRequest {
+                exchange_id: buffa::MessageField::none(),
+                subscriptions: vec![market::StreamSubscription {
+                    channel: buffa::EnumValue::Known(market::StreamChannel::Ticker),
+                    symbol: "BTC/USDT".to_string(),
+                    ..Default::default()
+                }],
+                resume_token: String::new(),
+                ..Default::default()
+            })
+            .await
+            .expect("stream");
+        let first =
+            tokio::time::timeout(STREAM_IDLE, stream.message::<market::MarketDataEvent>()).await;
+        assert!(
+            matches!(first, Ok(Ok(None))),
+            "an unresolvable venue must end the stream with no event: {first:?}"
+        );
+    }
+
+    // ---- Trading passthrough ----------------------------------------------
+    //
+    // Everything below is a straight port forward, so what matters is that the
+    // response carries the venue's own record (a response rebuilt from the
+    // request is byte-identical whether the right thing happened or not) and
+    // that a rejection is typed.
+
+    #[tokio::test]
+    async fn cancelling_names_the_order_it_cancelled_and_refuses_an_unknown_id() {
+        let (_adapter, trading_client, _market, _ops) = boot_with_capabilities().await;
+        let created = trading_client.create_order(order_req("")).await.expect("place").into_owned();
+        let order = created.order.as_option().expect("order").clone();
+
+        let canceled = trading_client
+            .cancel_order(trading::CancelOrderRequest {
+                exchange_id: mock_exchange(),
+                order_id: order.id.clone(),
+                symbol: order.symbol.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("cancel")
+            .into_owned();
+        let back = canceled.order.as_option().expect("order");
+        assert_eq!(back.id, order.id, "the cancel must name the order it cancelled");
+        assert_eq!(back.status, buffa::EnumValue::Known(trading::OrderStatus::Canceled));
+        assert_eq!(back.client_order_id, "grid-e2e", "the geometry must survive the round trip");
+
+        // An id the venue never issued must not read as a successful cancel.
+        let err = trading_client
+            .cancel_order(trading::CancelOrderRequest {
+                exchange_id: mock_exchange(),
+                order_id: "mock-does-not-exist".to_string(),
+                symbol: "BTC/USDT".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("an id the venue never issued");
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument, "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn cancel_all_clears_the_open_set_and_the_list_reflects_it() {
+        let (_adapter, trading_client, _market, _ops) = boot_with_capabilities().await;
+        for coid in ["grid-a", "grid-b"] {
+            trading_client.create_order(operator_order("BTC/USDT", coid)).await.expect("place");
+        }
+        let open = trading_client
+            .fetch_open_orders(trading::FetchOpenOrdersRequest {
+                exchange_id: mock_exchange(),
+                symbol: String::new(),
+                pagination: buffa::MessageField::none(),
+                ..Default::default()
+            })
+            .await
+            .expect("open orders")
+            .into_owned();
+        assert_eq!(open.orders.len(), 2);
+
+        let canceled = trading_client
+            .cancel_all_orders(trading::CancelAllOrdersRequest {
+                exchange_id: mock_exchange(),
+                symbol: String::new(),
+                ..Default::default()
+            })
+            .await
+            .expect("cancel all")
+            .into_owned();
+        assert_eq!(canceled.orders.len(), 2, "every cancelled order must be reported back");
+        assert!(
+            canceled
+                .orders
+                .iter()
+                .all(|o| o.status == buffa::EnumValue::Known(trading::OrderStatus::Canceled)),
+            "a cancel-all must not report an order as still open"
+        );
+
+        let after = trading_client
+            .fetch_open_orders(trading::FetchOpenOrdersRequest {
+                exchange_id: mock_exchange(),
+                symbol: String::new(),
+                pagination: buffa::MessageField::none(),
+                ..Default::default()
+            })
+            .await
+            .expect("open orders")
+            .into_owned();
+        assert!(after.orders.is_empty(), "the open set must actually be empty afterwards");
+    }
+
+    /// A symbol filter must be honoured: cancelling one symbol must leave the
+    /// other symbol's order resting, or a strategy scoping its own cancel would
+    /// flatten a position it does not own.
+    #[tokio::test]
+    async fn cancel_all_honours_the_symbol_filter() {
+        let (_adapter, trading_client, _market, _ops) = boot_with_capabilities().await;
+        trading_client.create_order(operator_order("BTC/USDT", "grid-btc")).await.expect("btc");
+        trading_client.create_order(operator_order("ETH/USDT", "grid-eth")).await.expect("eth");
+
+        let canceled = trading_client
+            .cancel_all_orders(trading::CancelAllOrdersRequest {
+                exchange_id: mock_exchange(),
+                symbol: "BTC/USDT".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("cancel all")
+            .into_owned();
+        assert_eq!(canceled.orders.len(), 1);
+        assert_eq!(canceled.orders[0].symbol, "BTC/USDT");
+
+        let survivors = trading_client
+            .fetch_open_orders(trading::FetchOpenOrdersRequest {
+                exchange_id: mock_exchange(),
+                symbol: "ETH/USDT".to_string(),
+                pagination: buffa::MessageField::none(),
+                ..Default::default()
+            })
+            .await
+            .expect("open orders")
+            .into_owned();
+        assert_eq!(survivors.orders.len(), 1, "an unrelated symbol must be left alone");
+        assert_eq!(survivors.orders[0].symbol, "ETH/USDT");
+    }
+
+    /// The account balance must be the venue's number, not the worker's opinion
+    /// of it — an SMM strategy sizes every order off this field.
+    #[tokio::test]
+    async fn account_reads_come_from_the_venue() {
+        use rust_decimal_macros::dec;
+        let (_adapter, trading_client, _market, _ops) = boot_with_capabilities().await;
+
+        let resp = trading_client
+            .get_account(trading::GetAccountRequest {
+                exchange_id: mock_exchange(),
+                ..Default::default()
+            })
+            .await
+            .expect("account")
+            .into_owned();
+        let account = resp.account.as_option().expect("account present");
+        // The mock prices at 100 and reports balance = price * 1000.
+        assert_eq!(
+            longtrader_contract::ext::common_to_decimal(
+                account.balance.as_option().expect("balance")
+            )
+            .expect("decodes"),
+            dec!(100000),
+        );
+        assert_eq!(
+            longtrader_contract::ext::common_to_decimal(
+                account.free_margin.as_option().expect("free margin")
+            )
+            .expect("decodes"),
+            dec!(100000),
+        );
+    }
+
+    /// A backend that simply has no history must answer with an empty result, not
+    /// a server fault: an `internal` here would be retried forever against a
+    /// permanent answer.
+    #[tokio::test]
+    async fn history_and_position_reads_return_empty_rather_than_failing() {
+        let (_adapter, trading_client, _market, _ops) = boot_with_capabilities().await;
+
+        let positions = trading_client
+            .get_positions(trading::GetPositionsRequest {
+                exchange_id: mock_exchange(),
+                symbols: vec![],
+                ..Default::default()
+            })
+            .await
+            .expect("positions")
+            .into_owned();
+        assert!(positions.positions.is_empty());
+
+        let history = trading_client
+            .get_order_history(trading::GetOrderHistoryRequest {
+                exchange_id: mock_exchange(),
+                pagination: buffa::MessageField::none(),
+                ..Default::default()
+            })
+            .await
+            .expect("order history")
+            .into_owned();
+        assert!(history.orders.is_empty());
+
+        let closed = trading_client
+            .get_closed_positions(trading::GetClosedPositionsRequest {
+                exchange_id: mock_exchange(),
+                pagination: buffa::MessageField::none(),
+                ..Default::default()
+            })
+            .await
+            .expect("closed positions")
+            .into_owned();
+        assert!(closed.positions.is_empty());
+
+        trading_client
+            .close_all_positions(trading::CloseAllPositionsRequest {
+                exchange_id: mock_exchange(),
+                ..Default::default()
+            })
+            .await
+            .expect("closing zero positions is a success, not a fault");
+    }
+
+    /// A position the venue does not hold is the caller's mistake, and the answer
+    /// has to say so: an empty success would read as "position closed" and the
+    /// strategy would move on believing it is flat.
+    #[tokio::test]
+    async fn closing_or_modifying_an_unknown_position_is_an_invalid_argument() {
+        let (_adapter, trading_client, _market, _ops) = boot_with_capabilities().await;
+
+        let err = trading_client
+            .close_position(trading::ClosePositionRequest {
+                exchange_id: mock_exchange(),
+                position_id: "no-such-position".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("an unknown position id");
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument, "{err:?}");
+
+        let err = trading_client
+            .modify_position(trading::ModifyPositionRequest {
+                exchange_id: mock_exchange(),
+                position_id: "no-such-position".to_string(),
+                take_profit: buffa::MessageField::some(
+                    longtrader_contract::ext::decimal_to_common(rust_decimal_macros::dec!(120)),
+                ),
+                stop_loss: buffa::MessageField::none(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("an unknown position id");
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument, "{err:?}");
+    }
+
+    /// A batch is attributed exactly like a single order, and every leg must
+    /// carry the venue's own id — that id is what the kill-switch cancels by.
+    #[tokio::test]
+    async fn a_batch_submission_is_attributed_to_its_session() {
+        let (session_client, trading_client) = boot_session_with_capabilities().await;
+        let session_id = active_session(&session_client).await;
+
+        let created = trading_client
+            .create_orders(trading::CreateOrdersRequest {
+                exchange_id: mock_exchange(),
+                orders: vec![batch_leg("grid-1"), batch_leg("grid-2")],
+                session_id: session_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("batch")
+            .into_owned();
+        assert_eq!(created.orders.len(), 2);
+        assert!(
+            created.orders.iter().all(|o| !o.id.is_empty()),
+            "every leg must carry the venue's id or the kill-switch cannot cancel it"
+        );
+
+        let status = session_client
+            .strategy_status(worker::StrategyStatusRequest { session_id, ..Default::default() })
+            .await
+            .expect("status")
+            .into_owned();
+        assert_eq!(status.orders_submitted, 2, "the whole batch must be attributed");
+    }
+
+    /// The gate is all-or-nothing for a batch and runs before the first leg
+    /// reaches the venue — otherwise a pre-ACTIVE session could place half a
+    /// batch and the remaining half would be silently unattributed.
+    #[tokio::test]
+    async fn a_pre_active_batch_is_rejected_whole() {
+        let (session_client, trading_client) = boot_session_with_capabilities().await;
+        let attached = session_client
+            .attach_session(worker::AttachSessionRequest::default())
+            .await
+            .expect("attach")
+            .into_owned();
+
+        let err = trading_client
+            .create_orders(trading::CreateOrdersRequest {
+                exchange_id: mock_exchange(),
+                orders: vec![batch_leg("grid-1"), batch_leg("grid-2")],
+                session_id: attached.session_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("a pre-ACTIVE session must not place a batch");
+        assert_eq!(err.code, connectrpc::ErrorCode::FailedPrecondition, "{err:?}");
+        assert!(
+            err.details.iter().any(|d| d.type_url == "longtrader.common.v1.ErrorDetail"),
+            "the typed reason must survive to the wire: {err:?}"
+        );
+
+        let open = trading_client
+            .fetch_open_orders(trading::FetchOpenOrdersRequest {
+                exchange_id: mock_exchange(),
+                symbol: String::new(),
+                pagination: buffa::MessageField::none(),
+                ..Default::default()
+            })
+            .await
+            .expect("open orders")
+            .into_owned();
+        assert!(open.orders.is_empty(), "a rejected batch must not leave an order behind");
+    }
+
+    /// When the venue rejects a batch the RPC fails and the session is credited
+    /// with nothing: a session that believes it submitted two orders it never
+    /// got would size its next cancel wrongly.
+    #[tokio::test]
+    async fn a_failed_batch_attributes_nothing_to_the_session() {
+        let (adapter, session_client, trading_client) = boot_scripted().await;
+        let session_id = active_session(&session_client).await;
+        adapter.fail_next_creates(1).await;
+
+        let err = trading_client
+            .create_orders(trading::CreateOrdersRequest {
+                exchange_id: mock_exchange(),
+                orders: vec![batch_leg("grid-1"), batch_leg("grid-2")],
+                session_id: session_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("the scripted venue failure must surface");
+        // The mock scripts an HTTP-flavoured `500`, which is not a gRPC status
+        // code, so the mapper degrades it to `internal` rather than guessing.
+        assert_eq!(err.code, connectrpc::ErrorCode::Internal, "{err:?}");
+
+        let status = session_client
+            .strategy_status(worker::StrategyStatusRequest { session_id, ..Default::default() })
+            .await
+            .expect("status")
+            .into_owned();
+        assert_eq!(status.orders_submitted, 0, "a failed batch must not be attributed");
+    }
+
+    // ---- worker.v1 RPCs ----------------------------------------------------
+
+    #[tokio::test]
+    async fn keep_alive_reports_the_negotiated_interval_and_rejects_an_unknown_session() {
+        let (session_client, _trading) = boot().await;
+        let session_id = active_session(&session_client).await;
+
+        let resp = session_client
+            .keep_alive(worker::KeepAliveRequest {
+                session_id: session_id.clone(),
+                client_time_ns: 0,
+                ..Default::default()
+            })
+            .await
+            .expect("keep alive")
+            .into_owned();
+        assert_eq!(resp.heartbeat_interval_ms, crate::session::DEFAULT_HEARTBEAT_MS);
+        assert!(resp.server_time_ns > 0, "the host must stamp its own clock");
+
+        let err = session_client
+            .keep_alive(worker::KeepAliveRequest {
+                session_id: "no-such-session".to_string(),
+                client_time_ns: 0,
+                ..Default::default()
+            })
+            .await
+            .expect_err("a heartbeat for a session that does not exist");
+        assert_eq!(err.code, connectrpc::ErrorCode::NotFound, "{err:?}");
+    }
+
+    /// `SetKillSwitchPolicy` must refuse what it cannot route or honour: an
+    /// unroutable scope discriminant and an out-of-bounds lease are both the
+    /// caller's mistake, so both are `invalid_argument` rather than a silent
+    /// no-op that leaves the session on a policy its owner never chose.
+    #[tokio::test]
+    async fn set_kill_switch_policy_rejects_an_unknown_scope_and_a_bad_lease() {
+        /// Send one policy for `session_id`; `lease_ms = None` leaves the lease
+        /// untouched, `None` scope means "leave the scope untouched".
+        async fn set_policy(
+            client: &worker::WorkerSessionServiceClient<connectrpc::client::HttpClient>,
+            session_id: &str,
+            lease_ms: Option<u64>,
+            scope: buffa::EnumValue<worker::kill_switch_policy::Scope>,
+        ) -> Result<(), connectrpc::ConnectError> {
+            client
+                .set_kill_switch_policy(worker::SetKillSwitchPolicyRequest {
+                    session_id: session_id.to_string(),
+                    policy: buffa::MessageField::some(worker::KillSwitchPolicy {
+                        lease_timeout: lease_field(lease_ms),
+                        scope,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .await
+                .map(|_| ())
+        }
+
+        let (session_client, _trading) = boot().await;
+        let session_id = active_session(&session_client).await;
+
+        set_policy(
+            &session_client,
+            &session_id,
+            Some(600),
+            buffa::EnumValue::Known(worker::kill_switch_policy::Scope::AllOrders),
+        )
+        .await
+        .expect("a well-formed policy must be accepted");
+
+        // An explicitly unspecified scope means "leave unchanged"; treating it as
+        // a reset would silently downgrade a chosen kill-switch scope.
+        set_policy(
+            &session_client,
+            &session_id,
+            None,
+            buffa::EnumValue::Known(worker::kill_switch_policy::Scope::Unspecified),
+        )
+        .await
+        .expect("Unspecified must mean leave-unchanged, not a reset");
+
+        let err = set_policy(&session_client, &session_id, None, buffa::EnumValue::Unknown(99))
+            .await
+            .expect_err("an unroutable scope discriminant");
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument, "{err:?}");
+
+        // 400ms is below the documented 500ms DoS floor.
+        let err = set_policy(
+            &session_client,
+            &session_id,
+            Some(400),
+            buffa::EnumValue::Known(worker::kill_switch_policy::Scope::SessionOrders),
+        )
+        .await
+        .expect_err("a lease below the documented floor");
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument, "{err:?}");
+
+        let err = session_client
+            .set_kill_switch_policy(worker::SetKillSwitchPolicyRequest {
+                session_id: "no-such-session".to_string(),
+                policy: buffa::MessageField::some(worker::KillSwitchPolicy {
+                    lease_timeout: lease_field(None),
+                    scope: buffa::EnumValue::Known(worker::kill_switch_policy::Scope::None),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect_err("a policy for a session that does not exist");
+        assert_eq!(err.code, connectrpc::ErrorCode::NotFound, "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn register_strategy_publishes_the_identity_status_reports() {
+        let (session_client, _trading) = boot().await;
+        let session_id = active_session(&session_client).await;
+
+        let before = session_client
+            .strategy_status(worker::StrategyStatusRequest {
+                session_id: session_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("status")
+            .into_owned();
+        assert!(before.strategy_id.is_empty(), "no strategy has registered yet");
+        assert_eq!(before.state, buffa::EnumValue::Known(worker::SessionState::Active));
+
+        let registered = session_client
+            .register_strategy(worker::RegisterStrategyRequest {
+                session_id: session_id.clone(),
+                name: "grid-e2e".to_string(),
+                params: std::iter::once(("symbol".to_string(), "BTC/USDT".to_string())).collect(),
+                ..Default::default()
+            })
+            .await
+            .expect("register")
+            .into_owned();
+        assert!(!registered.strategy_id.is_empty(), "the host must issue a strategy id");
+
+        let after = session_client
+            .strategy_status(worker::StrategyStatusRequest { session_id, ..Default::default() })
+            .await
+            .expect("status")
+            .into_owned();
+        assert_eq!(after.strategy_id, registered.strategy_id);
+        assert_eq!(after.name, "grid-e2e");
+        assert!(
+            after.started_at.as_option().is_some(),
+            "a registered strategy must carry a start time"
+        );
+    }
+
+    /// The RPC-level stop must cancel the session's orders, report the state it
+    /// actually reached, and be safe to repeat — a supervisor that retries must
+    /// not be able to knock a stopped session out of its terminal state.
+    #[tokio::test]
+    async fn stop_strategy_cancels_the_sessions_orders_and_is_repeatable() {
+        let (session_client, trading_client) = boot_session_with_capabilities().await;
+        let session_id = active_session(&session_client).await;
+        let created =
+            trading_client.create_order(order_req(&session_id)).await.expect("place").into_owned();
+        let order = created.order.as_option().expect("order").clone();
+
+        let stopped = session_client
+            .stop_strategy(worker::StopStrategyRequest {
+                session_id: session_id.clone(),
+                cancel_open_orders: true,
+                ..Default::default()
+            })
+            .await
+            .expect("stop")
+            .into_owned();
+        assert_eq!(
+            stopped.final_state,
+            buffa::EnumValue::Known(worker::SessionState::GracefulShutdown),
+        );
+
+        let open = trading_client
+            .fetch_open_orders(trading::FetchOpenOrdersRequest {
+                exchange_id: mock_exchange(),
+                symbol: String::new(),
+                pagination: buffa::MessageField::none(),
+                ..Default::default()
+            })
+            .await
+            .expect("open orders")
+            .into_owned();
+        assert!(
+            !open.orders.iter().any(|o| o.id == order.id),
+            "StopStrategy(cancel_open_orders) must reach the venue"
+        );
+
+        let again = session_client
+            .stop_strategy(worker::StopStrategyRequest {
+                session_id: session_id.clone(),
+                cancel_open_orders: false,
+                ..Default::default()
+            })
+            .await
+            .expect("a repeated stop must not fail")
+            .into_owned();
+        assert_eq!(
+            again.final_state,
+            buffa::EnumValue::Known(worker::SessionState::GracefulShutdown),
+            "the final state must stay terminal across a repeated stop"
+        );
+
+        let err = session_client
+            .stop_strategy(worker::StopStrategyRequest {
+                session_id: "no-such-session".to_string(),
+                cancel_open_orders: false,
+                ..Default::default()
+            })
+            .await
+            .expect_err("stopping a session that does not exist");
+        assert_eq!(err.code, connectrpc::ErrorCode::NotFound, "{err:?}");
+    }
+
+    /// `ReportLog` is the strategy's only log channel, so the accepted counter
+    /// has to be honest, and a log addressed to a session that does not exist
+    /// must not be swallowed into a success.
+    #[tokio::test]
+    async fn report_log_counts_what_it_accepted_and_refuses_an_unknown_session() {
+        let (session_client, _trading) = boot().await;
+        let session_id = active_session(&session_client).await;
+        session_client
+            .register_strategy(worker::RegisterStrategyRequest {
+                session_id: session_id.clone(),
+                name: "grid-e2e".to_string(),
+                params: Default::default(),
+                ..Default::default()
+            })
+            .await
+            .expect("register");
+
+        let resp = session_client
+            .report_log(connectrpc::stream_iter(vec![
+                log_event(&session_id, worker::LogLevel::Info, "first"),
+                log_event(&session_id, worker::LogLevel::Error, "second"),
+                // An enum discriminant the host does not know. The wire value
+                // survives, so the host — not the codec — has to decide.
+                worker::LogEvent {
+                    session_id: session_id.clone(),
+                    level: buffa::EnumValue::Unknown(99),
+                    message: "third".to_string(),
+                    ..Default::default()
+                },
+            ]))
+            .await
+            .expect("report log")
+            .into_owned();
+        assert_eq!(resp.accepted, 3, "every event in the stream must be counted");
+
+        let status = session_client
+            .strategy_status(worker::StrategyStatusRequest {
+                session_id: session_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("status")
+            .into_owned();
+        assert_eq!(status.log_events, 3, "every accepted event must be counted on the session");
+
+        // An unroutable level becomes `Unspecified` rather than being dropped or
+        // recorded as a level the strategy never sent.
+        let mut stream = session_client
+            .stream_strategy_events(worker::StreamStrategyEventsRequest {
+                session_id: session_id.clone(),
+                resume_token: String::new(),
+                ..Default::default()
+            })
+            .await
+            .expect("stream");
+        let mut logs = Vec::new();
+        for _ in 0..8 {
+            let next =
+                tokio::time::timeout(STREAM_IDLE, stream.message::<worker::StrategyEvent>()).await;
+            let Ok(Ok(Some(message))) = next else { break };
+            let event = message.to_owned_message();
+            if let Some(worker::strategy_event::Event::Log(log)) = event.event {
+                logs.push(log);
+            }
+        }
+        drop(stream);
+        let levels: Vec<buffa::EnumValue<worker::LogLevel>> =
+            logs.iter().map(|l| l.level).collect();
+        assert_eq!(
+            levels,
+            vec![
+                buffa::EnumValue::Known(worker::LogLevel::Info),
+                buffa::EnumValue::Known(worker::LogLevel::Error),
+                buffa::EnumValue::Known(worker::LogLevel::Unspecified),
+            ]
+        );
+        let messages: Vec<&str> = logs.iter().map(|l| l.message.as_str()).collect();
+        assert_eq!(messages, vec!["first", "second", "third"], "the stream must stay ordered");
+
+        let err = session_client
+            .report_log(connectrpc::stream_iter(vec![log_event(
+                "no-such-session",
+                worker::LogLevel::Info,
+                "orphan",
+            )]))
+            .await
+            .expect_err("a log for a session that does not exist");
+        assert_eq!(err.code, connectrpc::ErrorCode::NotFound, "{err:?}");
+    }
+
+    /// A resume token is the cursor a reconnecting strategy hands back, so one
+    /// the host cannot parse must be rejected. Treating it as "start from
+    /// scratch" would silently replay every event the client already applied.
+    #[tokio::test]
+    async fn a_non_numeric_resume_token_is_rejected() {
+        let (session_client, _trading) = boot().await;
+        let session_id = active_session(&session_client).await;
+
+        // A server-streaming RPC opens successfully and surfaces the failure on
+        // the first read, so the rejection has to be asserted there.
+        let mut stream = session_client
+            .stream_strategy_events(worker::StreamStrategyEventsRequest {
+                session_id,
+                resume_token: "not-a-sequence".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("the stream opens");
+        let err = stream.message::<worker::StrategyEvent>().await.expect_err("a bad token");
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument, "{err:?}");
+        assert!(
+            err.message.as_deref().unwrap_or_default().contains("resume_token"),
+            "the message must name the offending field: {err:?}"
+        );
+    }
+
+    /// Replay from a valid token resumes *after* it and stays gap-free, so the
+    /// watermark the client is handed can be trusted for a full `ReconcileState`.
+    #[tokio::test]
+    async fn a_valid_resume_token_replays_only_what_the_client_missed() {
+        let (session_client, _trading) = boot().await;
+        let session_id = active_session(&session_client).await;
+        for i in 0..4 {
+            session_client
+                .report_log(connectrpc::stream_iter(vec![log_event(
+                    &session_id,
+                    worker::LogLevel::Info,
+                    &format!("m{i}"),
+                )]))
+                .await
+                .expect("report log");
+        }
+
+        // From the beginning: the two reconcile transitions plus four logs.
+        let mut all = session_client
+            .stream_strategy_events(worker::StreamStrategyEventsRequest {
+                session_id: session_id.clone(),
+                resume_token: String::new(),
+                ..Default::default()
+            })
+            .await
+            .expect("stream");
+        let mut sequences = Vec::new();
+        for _ in 0..6 {
+            let next =
+                tokio::time::timeout(STREAM_IDLE, all.message::<worker::StrategyEvent>()).await;
+            let Ok(Ok(Some(message))) = next else { break };
+            sequences.push(message.to_owned_message().header.sequence);
+        }
+        drop(all);
+        assert_eq!(sequences, vec![1, 2, 3, 4, 5, 6], "the ring must replay in order");
+
+        let mut tail = session_client
+            .stream_strategy_events(worker::StreamStrategyEventsRequest {
+                session_id: session_id.clone(),
+                resume_token: "4".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("stream");
+        let mut tail_sequences = Vec::new();
+        for _ in 0..4 {
+            let next =
+                tokio::time::timeout(STREAM_IDLE, tail.message::<worker::StrategyEvent>()).await;
+            let Ok(Ok(Some(message))) = next else { break };
+            tail_sequences.push(message.to_owned_message().header.sequence);
+        }
+        drop(tail);
+        assert_eq!(tail_sequences, vec![5, 6], "a resume must start strictly after the token");
+        assert!(
+            !crate::session::SessionHandle::is_gap(4, tail_sequences[0]),
+            "a replay from a live ring must be gap-free"
+        );
+
+        // A token past the end of the ring replays nothing rather than wrapping
+        // or fabricating an event the client never missed.
+        let mut beyond = session_client
+            .stream_strategy_events(worker::StreamStrategyEventsRequest {
+                session_id,
+                resume_token: "99".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("stream");
+        let read =
+            tokio::time::timeout(STREAM_IDLE, beyond.message::<worker::StrategyEvent>()).await;
+        drop(beyond);
+        assert!(read.is_err(), "a token past the ring's end must replay nothing: {read:?}");
+    }
+
+    /// Abandoning a stream is the normal case, not an exception: a strategy that
+    /// crashes mid-stream must not take the session or the router with it, and a
+    /// later subscriber must still see the backlog plus everything after it.
+    #[tokio::test]
+    async fn abandoning_an_event_stream_leaves_the_session_usable() {
+        let (session_client, _trading) = boot().await;
+        let session_id = active_session(&session_client).await;
+
+        let mut stream = session_client
+            .stream_strategy_events(worker::StreamStrategyEventsRequest {
+                session_id: session_id.clone(),
+                resume_token: String::new(),
+                ..Default::default()
+            })
+            .await
+            .expect("stream");
+        // Drain the replay so the stream is parked on the broadcast receiver,
+        // which is the state a crashed strategy would leave behind.
+        for _ in 0..2 {
+            let _ =
+                tokio::time::timeout(STREAM_IDLE, stream.message::<worker::StrategyEvent>()).await;
+        }
+        drop(stream);
+
+        let status = session_client
+            .strategy_status(worker::StrategyStatusRequest {
+                session_id: session_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("the session must still answer after a dropped stream")
+            .into_owned();
+        assert_eq!(status.state, buffa::EnumValue::Known(worker::SessionState::Active));
+
+        session_client
+            .report_log(connectrpc::stream_iter(vec![log_event(
+                &session_id,
+                worker::LogLevel::Warn,
+                "after-disconnect",
+            )]))
+            .await
+            .expect("report log");
+
+        let mut again = session_client
+            .stream_strategy_events(worker::StreamStrategyEventsRequest {
+                session_id,
+                resume_token: String::new(),
+                ..Default::default()
+            })
+            .await
+            .expect("stream");
+        let mut received = 0usize;
+        for _ in 0..4 {
+            let next =
+                tokio::time::timeout(STREAM_IDLE, again.message::<worker::StrategyEvent>()).await;
+            let Ok(Ok(Some(_))) = next else { break };
+            received += 1;
+        }
+        drop(again);
+        assert_eq!(received, 3, "two reconcile transitions plus the post-disconnect log");
+    }
 }

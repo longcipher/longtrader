@@ -15,19 +15,25 @@ imports it.
 
 ## Why the decimal is hand-rolled
 
-`common.v1.Decimal` is `{int64 unscaled = 1, int32 scale = 2, string
-raw_str = 3}` and a **writer must populate all three**. The host's fast-path
-decoder trusts the numeric pair, so a value sent as a bare `raw_str` arrives
-as zero. `ParseDecimal` therefore derives `unscaled` and `scale` from the
-literal and fills `raw_str` as well, and it errors on an int64 overflow rather
-than wrapping the mantissa.
+`common.v1.Decimal` is one field: `string value = 1`, the number in base 10.
+There is deliberately no numeric fast path beside it — a second representation
+is what made "which one is authoritative?" a question every reader had to
+answer, and it is why the retired int64 mantissa had to under-power the host
+decimal's own 96-bit coefficient.
 
-Readers must accept either representation (`Decimal.Float64` and
-`Decimal.String` do), because producers choose: the Rust host uses the numeric
-pair whenever the mantissa fits, and the mock venue never sets `raw_str`.
-`Decimal.IsZero` follows the same precedence — `raw_str` first, the numeric
-pair as fallback — so that a self-inconsistent message cannot report "zero" and
-"5" from two different accessors.
+`ParseDecimal` validates a literal against the grammar the message documents and
+carries it through verbatim. It rejects everything the host would reject: a
+blank payload, a digit separator, an exponent, a leading `+`, a bare `.5` or
+`1.`, surrounding whitespace, more than 28 fractional digits, and a coefficient
+that does not fit 96 bits. Verbatim matters — the host's `1.100` and `1.1` are
+different decimals, so re-rendering the text would change what the number means.
+
+Reading is validated by the same rules. `Decimal.Validate` says why a payload
+is unusable, and `Float64`, `Rat` and `IsZero` all reject a payload they cannot
+read instead of answering `0`, because presence lives on the containing field: a
+blank payload means the writer never populated it, which is a contract violation
+and not a price of zero. There is no precedence left to get wrong, since there is
+only one field to read.
 
 ## Contract coverage
 

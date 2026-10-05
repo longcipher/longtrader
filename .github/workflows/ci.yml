@@ -48,6 +48,36 @@ jobs:
       - run: just ci
 
   # ---------------------------------------------------------------------------
+  # Fuzz: a short bounded run over the two wire-format parsers.
+  #
+  # `cargo fuzz` needs nightly (for `-Zsanitizer`) and is slow to build, so it is
+  # a separate job rather than a step in the `rust` job. The run is deliberately
+  # bounded: a crash in either target is a real defect, but a long fuzzing
+  # session belongs on a laptop, not in a PR gate.
+  # ---------------------------------------------------------------------------
+  fuzz:
+    name: Fuzz (wire-format parsers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-fuzz
+
+      # `-D warnings` is not applied here: `fuzz/` is its own workspace and its
+      # generated libfuzzer plumbing is outside the workspace lint budget.
+      - run: just fuzz-smoke
+
+  # ---------------------------------------------------------------------------
   # Proto: buf lint + buf breaking against the PR base.
   #
   # Mirrors `just proto-lint` / `just proto-breaking`. `fetch-depth: 0` so the

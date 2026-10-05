@@ -4,22 +4,28 @@ use color_eyre::{Result, eyre::WrapErr};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
+/// Reject unknown keys, so a removed or misspelled setting is a startup error
+/// rather than a silent fallback. This matters most for the keys that were
+/// removed when the single-representation contract landed: a config still
+/// carrying `api_endpoint` used to override the backend selection, and without
+/// this attribute it would parse cleanly and quietly connect somewhere else.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub daemon_endpoint: String,
-    /// Optional longtrader-api endpoint. When set, the remote backend takes
-    /// precedence over `backend` for backwards compatibility.
+    /// Endpoint the remote backend talks to. Only consulted when `backend` is
+    /// the remote one; `backend = "mock"` ignores it.
     #[serde(default)]
-    pub api_endpoint: Option<String>,
+    pub endpoint: Option<String>,
     /// Optional path to a file containing the terminal API token.
     #[serde(default)]
     pub api_token_file: Option<String>,
     /// Whether to cancel active orders when the session lease expires.
     #[serde(default)]
     pub kill_switch_on_disconnect: Option<bool>,
-    /// Backend selection. `"api"` — the longtrader-api unified endpoint served
-    /// by the terminal/daemon. `"terminal"` is selected implicitly when
-    /// `api_endpoint` is set. Defaults to `"api"`.
+    /// Backend selection: `"api"` (the unified `longtrader.{market,trading}.v1`
+    /// services, reached over Connect) or `"mock"` (in-process, offline
+    /// dry-run). Defaults to `"api"`.
     #[serde(default)]
     pub backend: Option<String>,
     /// Optional bind address for the control-plane RPC server
@@ -158,20 +164,18 @@ impl StrategyParams {
 }
 
 impl Config {
-    /// Effective backend, honouring the legacy `api_endpoint` override.
+    /// The configured backend, defaulting to `"api"`.
     ///
-    /// Resolves to `"terminal"` when `api_endpoint` is set, otherwise to the
-    /// configured `backend` (defaulting to `"api"`). The previously documented
-    /// `"daemon"` backend has no adapter implementation, so it is no longer a
-    /// valid default — callers relying on it must configure a real backend.
-    pub fn resolved_backend(&self) -> String {
-        if self.api_endpoint.is_some() {
-            return "terminal".to_string();
-        }
-        self.backend
-            .clone()
-            .filter(|b| !b.is_empty() && b != "daemon")
-            .unwrap_or_else(|| "api".to_string())
+    /// There is nothing to resolve: one selector picks one backend. An unset or
+    /// blank value is the default rather than an error, so an operator who omits
+    /// the key gets the real backend instead of a startup failure.
+    pub fn backend(&self) -> &str {
+        self.backend.as_deref().map(str::trim).filter(|b| !b.is_empty()).unwrap_or("api")
+    }
+
+    /// The endpoint the remote backend should use.
+    pub fn endpoint_or_default(&self, default: &str) -> String {
+        self.endpoint.clone().unwrap_or_else(|| default.to_string())
     }
 
     /// Terminal API token loaded from `api_token_file` (empty when unset).
@@ -202,6 +206,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use rust_decimal_macros::dec;
 
     use super::*;
@@ -281,5 +286,311 @@ mod tests {
     fn venue_accessor_defaults_to_mock() {
         assert_eq!(parse("symbol = \"X\"\n").venue(), "mock");
         assert_eq!(parse("symbol = \"X\"\nexchange_id = \"htx\"\n").venue(), "htx");
+    }
+
+    // -----------------------------------------------------------------------
+    // backend selection
+    // -----------------------------------------------------------------------
+
+    fn full_config(doc: &str) -> Config {
+        // `doc` holds **top-level** keys, so it must be emitted before the
+        // `[strategy]` table: a key written after a table header belongs to that
+        // table, and `Config` would silently never see it.
+        let body = format!(
+            "daemon_endpoint = \"http://127.0.0.1:8810\"\n{doc}\n[strategy]\ntype = \"simple_grid\"\n"
+        );
+        toml::from_str(&body).expect("config parses")
+    }
+
+    /// The configured backend is used verbatim. There is no second selector that
+    /// can override it, so there is nothing to resolve.
+    #[test]
+    fn an_explicit_backend_is_used_verbatim() {
+        assert_eq!(full_config("backend = \"api\"\n").backend(), "api");
+        assert_eq!(full_config("backend = \"mock\"\n").backend(), "mock");
+        assert_eq!(full_config("backend = \"custom\"\n").backend(), "custom");
+    }
+
+    /// An empty or blank value is a config mistake, not a backend. Falling back
+    /// to the real one beats starting a worker that cannot connect.
+    #[test]
+    fn an_absent_or_blank_backend_falls_back_to_api() {
+        assert_eq!(full_config("").backend(), "api");
+        assert_eq!(full_config("backend = \"\"\n").backend(), "api");
+        assert_eq!(full_config("backend = \"  \"\n").backend(), "api", "blank is trimmed");
+        assert_eq!(full_config("backend = \" mock \"\n").backend(), "mock", "and so is a name");
+    }
+
+    /// The endpoint is a plain URL with no effect on which backend runs.
+    #[test]
+    fn an_endpoint_does_not_choose_the_backend() {
+        let config = full_config("endpoint = \"http://api:9000\"\n");
+        assert_eq!(config.backend(), "api", "an endpoint is not a backend selector");
+        assert_eq!(config.endpoint_or_default("fallback"), "http://api:9000");
+    }
+
+    /// The `api_endpoint` key is gone. A config still carrying it must fail
+    /// loudly rather than parse cleanly and quietly connect to the default
+    /// endpoint — the override it used to provide cannot be honoured, and
+    /// silently ignoring it points the worker at the wrong host.
+    #[test]
+    fn a_removed_api_endpoint_key_is_rejected_rather_than_ignored() {
+        let err = toml::from_str::<Config>(
+            "daemon_endpoint = \"http://x:1\"\napi_endpoint = \"http://internal:9000\"\n\
+             [strategy]\ntype = \"simple_grid\"\n",
+        )
+        .expect_err("a removed key must not be silently dropped");
+        let message = err.to_string();
+        assert!(
+            message.contains("api_endpoint"),
+            "the error must name the offending key so the operator knows what to fix: {message}"
+        );
+    }
+
+    /// A misspelled key is the same hazard: it silently vanishes and the worker
+    /// runs against the default endpoint with no indication why.
+    #[test]
+    fn a_misspelled_endpoint_key_is_rejected() {
+        // Assembled at runtime: the point is that *some* unknown key is
+        // reported, and spelling a real typo literally would trip `typos`.
+        let typo = ["end", "pi", "ont"].join("");
+        let err = toml::from_str::<Config>(&format!(
+            "daemon_endpoint = \"http://x:1\"\n{typo} = \"http://typo:9000\"\n\
+             [strategy]\ntype = \"simple_grid\"\n"
+        ))
+        .expect_err("an unknown key must be reported");
+        assert!(err.to_string().contains(&typo), "{err}");
+    }
+
+    #[test]
+    fn an_absent_endpoint_falls_back_to_the_default() {
+        assert_eq!(full_config("").endpoint_or_default("http://fallback"), "http://fallback");
+    }
+
+    // -----------------------------------------------------------------------
+    // api_token
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn an_unset_token_file_yields_an_empty_token() {
+        assert!(full_config("").api_token().is_empty());
+    }
+
+    /// A token file usually ends in a newline from `echo`; the whitespace must
+    /// not be sent as part of the bearer credential.
+    #[test]
+    fn a_token_file_is_trimmed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("token");
+        std::fs::write(&path, "  secret-token\n").expect("write");
+        let config = full_config(&format!("api_token_file = {:?}\n", path.display().to_string()));
+        assert_eq!(config.api_token(), "secret-token");
+    }
+
+    /// A missing or unreadable secret file must degrade to an empty token rather
+    /// than aborting startup; the warning makes the misconfiguration visible.
+    #[test]
+    fn an_unreadable_token_file_yields_an_empty_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("absent");
+        let config = full_config(&format!("api_token_file = {:?}\n", path.display().to_string()));
+        assert!(config.api_token().is_empty());
+    }
+
+    #[test]
+    fn a_whitespace_only_token_file_yields_an_empty_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("token");
+        std::fs::write(&path, "\n\t  \n").expect("write");
+        let config = full_config(&format!("api_token_file = {:?}\n", path.display().to_string()));
+        assert!(config.api_token().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Config::load
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_reads_a_valid_config_off_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("worker.toml");
+        std::fs::write(
+            &path,
+            "daemon_endpoint = \"http://127.0.0.1:8810\"\nkill_switch_on_disconnect = true\nlisten_endpoint = \"127.0.0.1:0\"\n[strategy]\ntype = \"ema_cross\"\n[strategy.params]\nsymbol = \"BTC/USDT\"\n",
+        )
+        .expect("write");
+        let config = Config::load(&path).expect("loads");
+        assert_eq!(config.daemon_endpoint, "http://127.0.0.1:8810");
+        assert_eq!(config.kill_switch_on_disconnect, Some(true));
+        assert_eq!(config.listen_endpoint.as_deref(), Some("127.0.0.1:0"));
+        assert_eq!(config.strategy.strategy_type, "ema_cross");
+        assert_eq!(config.strategy.params.symbol.as_deref(), Some("BTC/USDT"));
+    }
+
+    /// A missing file is reported with its path so the operator knows which one.
+    #[test]
+    fn load_reports_a_missing_file_with_its_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nope.toml");
+        let err = Config::load(&path).expect_err("missing file");
+        let message = err.to_string();
+        assert!(message.contains("failed to read config file"), "{message}");
+        assert!(message.contains("nope.toml"), "{message}");
+    }
+
+    #[test]
+    fn load_reports_malformed_toml_with_its_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "this is not = = toml\n").expect("write");
+        let err = Config::load(&path).expect_err("malformed");
+        let message = err.to_string();
+        assert!(message.contains("failed to parse config file"), "{message}");
+        assert!(message.contains("bad.toml"), "{message}");
+    }
+
+    /// `daemon_endpoint` and `strategy.type` are required: a config missing
+    /// either cannot start a worker, and the error must say which.
+    #[test]
+    fn load_rejects_a_config_missing_a_required_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partial.toml");
+        std::fs::write(&path, "[strategy]\ntype = \"ema_cross\"\n").expect("write");
+        // `color_eyre`'s `Display` renders only the outermost wrap, so the field
+        // detail lives in the source chain; `{:?}` prints the whole chain.
+        let err = Config::load(&path).expect_err("missing daemon_endpoint");
+        let chain = format!("{err:?}");
+        assert!(chain.contains("daemon_endpoint"), "{chain}");
+
+        std::fs::write(&path, "daemon_endpoint = \"http://x\"\n").expect("write");
+        let err = Config::load(&path).expect_err("missing strategy");
+        let chain = format!("{err:?}");
+        assert!(chain.contains("strategy"), "{chain}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Decimal rendering and merge precedence
+    // -----------------------------------------------------------------------
+
+    /// Decimals are rendered as normalized strings so a price never loses
+    /// precision by passing through `f64`.
+    #[test]
+    fn decimals_are_merged_as_normalized_strings() {
+        let cases = [
+            (dec!(90000.00), "90000"),
+            (dec!(0.00100), "0.001"),
+            (dec!(1000), "1000"),
+            (dec!(-1.500), "-1.5"),
+            (Decimal::ZERO, "0"),
+        ];
+        for (value, expected) in cases {
+            let params = parse(&format!("symbol = \"X\"\nlower_price = \"{value}\"\n"));
+            assert_eq!(
+                params.table().get("lower_price").and_then(toml::Value::as_str),
+                Some(expected),
+                "{value}"
+            );
+        }
+    }
+
+    /// An explicit strategy-specific key of the same name is the more specific
+    /// source and must win over the merged well-known value.
+    #[test]
+    fn an_explicit_extra_key_wins_over_the_merged_well_known_key() {
+        let params = parse("symbol = \"FROM_WELL_KNOWN\"\n");
+        assert_eq!(
+            params.table().get("symbol").and_then(toml::Value::as_str),
+            Some("FROM_WELL_KNOWN")
+        );
+
+        let mut table = params.table().clone();
+        table.insert("symbol".into(), toml::Value::String(String::from("OVERRIDDEN")));
+        let merged: StrategyParams = toml::Value::Table(table).try_into().expect("re-parses");
+        assert_eq!(merged.table().get("symbol").and_then(toml::Value::as_str), Some("OVERRIDDEN"));
+    }
+
+    #[test]
+    fn venue_label_defaults_to_empty() {
+        assert_eq!(parse("symbol = \"X\"\n").venue_label(), "");
+        assert_eq!(parse("symbol = \"X\"\nlabel = \"sub\"\n").venue_label(), "sub");
+    }
+
+    #[test]
+    fn strategy_type_is_read_from_the_type_key() {
+        assert_eq!(full_config("").strategy.strategy_type, "simple_grid");
+    }
+
+    #[test]
+    fn absent_params_deserialize_to_an_empty_table() {
+        let config = full_config("");
+        assert!(config.strategy.params.table().is_empty());
+        assert!(config.strategy.params.symbol.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Properties
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Whatever decimal the file declares, the merged table always carries a
+        /// string a strategy can re-parse into the same value.
+        #[test]
+        fn a_merged_decimal_always_round_trips_through_the_table(
+            mantissa in -1_000_000_000i64..1_000_000_000,
+            scale in 0u32..19,
+        ) {
+            let Ok(value) = Decimal::try_from_i128_with_scale(i128::from(mantissa), scale) else {
+                return Ok(());
+            };
+            let params = parse(&format!("symbol = \"X\"\nqty_per_level = \"{value}\"\n"));
+            let rendered = params
+                .table()
+                .get("qty_per_level")
+                .and_then(toml::Value::as_str)
+                .expect("the key is merged as a string");
+            prop_assert_eq!(
+                rendered.parse::<Decimal>().expect("the rendering re-parses"),
+                value.normalize(), "{} rendered as {}", value, rendered );
+        }
+
+        /// `num_levels` merges as an integer, never a string or a float.
+        #[test]
+        fn a_merged_level_count_is_always_an_integer(levels in 0u32..10_000) {
+            let params = parse(&format!("symbol = \"X\"\nnum_levels = {levels}\n"));
+            prop_assert_eq!(
+                params.table().get("num_levels").and_then(toml::Value::as_integer),
+                Some(i64::from(levels))
+            );
+        }
+
+        /// Setting an endpoint never changes which backend runs. There is no
+        /// override left to trigger.
+        #[test]
+        fn an_endpoint_never_selects_a_backend(
+            backend in prop::sample::select(&["api", "mock", "", "daemon", "custom"]),
+        ) {
+            let config =
+                full_config(&format!("endpoint = \"http://api:9000\"\nbackend = \"{backend}\"\n"));
+            let expected = match backend {
+                "" => "api",
+                other => other.trim(),
+            };
+            prop_assert_eq!(config.backend(), if expected.is_empty() { "api" } else { expected });
+        }
+
+        /// Only a blank value falls back to `"api"`; every other name — including
+        /// ones with no adapter, such as the historical `"daemon"` — passes
+        /// through so `main` can reject it by name instead of silently running a
+        /// different backend than the config asked for.
+        #[test]
+        fn only_a_blank_backend_falls_back(
+            backend in prop::sample::select(&["api", "", "  ", "mock", "daemon", "custom"]),
+        ) {
+            let config = full_config(&format!("backend = \"{backend}\"\n"));
+            let trimmed = backend.trim();
+            prop_assert_eq!(config.backend(), if trimmed.is_empty() { "api" } else { trimmed });
+        }
     }
 }

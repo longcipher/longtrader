@@ -1,15 +1,14 @@
 # rebalance
 
 Reads the account snapshot, computes each asset's value against live prices, and
-rebalances toward `targets` weights (as fractions that should sum to 1). Trades
-are planned in quote value and only executed for assets whose weight drift
-exceeds `band_pct` (default 5%).
+rebalances toward `targets` weights. Trades are planned in quote value and only
+executed for assets whose weight drift exceeds `band_pct` (default 5%).
 
 ## Parameters
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `targets` | BTreeMap<String, Decimal> | required | target weights per asset, e.g. `{ "BTC": "0.5", "ETH": "0.5" }` |
+| `targets` | BTreeMap<String, Decimal> | required | target weights per asset, e.g. `{ "BTC": "0.5", "ETH": "0.5" }`. Must be non-empty, non-negative, and sum to 1 within 1e-6 — checked at startup, and the error names the actual sum |
 | `band_pct` | Decimal | `0.05` | rebalance only when `|actual − target|` weight exceeds this |
 | `quote_asset` | String | `"USDT"` | numéraire used for valuation |
 | `include_quote_asset` | bool | `true` | include the quote asset in the weight budget |

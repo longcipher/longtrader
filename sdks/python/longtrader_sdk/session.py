@@ -42,6 +42,16 @@ TERMINAL_STATES = frozenset({KILL_SWITCH_TRIPPED, GRACEFUL_SHUTDOWN})
 #: before the session reaches ACTIVE (see `SessionManager::authorize_order_submission`).
 SYNC_IN_PROGRESS = "SYNC_IN_PROGRESS"
 
+# Fractional digits the contract's decimal keeps. A 29th digit would be
+# accepted by a rounding parser and silently altered, so the grammar stops at
+# the ceiling rather than at "some limit".
+DECIMAL_MAX_SCALE = 28
+
+# Widest coefficient the contract's decimal holds: a 96-bit unsigned integer,
+# exactly ``rust_decimal``'s ``Decimal::MAX``. It makes 79228162514264337593543950335
+# the widest integer this SDK can put on the wire.
+DECIMAL_MAX_MANTISSA = 79228162514264337593543950335
+
 
 class ConnectError(Exception):
     """A Connect error reply: non-200 unary response with a JSON body."""
@@ -168,22 +178,39 @@ def _log_event(pb, session_id: str, level: int, message: str, fields: dict | Non
     return ev
 
 
-def _to_decimal(value: Any) -> Any:
+def to_decimal(value: Any) -> Any:
     """Build a ``common.v1.Decimal`` from a Decimal / int / float / str.
 
-    The contract carries decimals as ``{unscaled, scale, raw_str}``. Writing
-    ``raw_str`` alone leaves ``unscaled``/``scale`` at zero, and the host's
-    decoder trusts the numeric pair, so a value passed as a bare string would
-    silently become zero on the wire. All three fields are therefore populated
-    from a single exact ``Decimal``.
+    The contract carries one representation: the number in base 10. There is
+    deliberately no numeric companion beside it, because a second
+    representation is what turned "which one is authoritative?" into a question
+    every reader had to answer.
+
+    The payload is validated against the grammar the message documents, so
+    every value rejected here is one the host would reject too, and a bad
+    literal surfaces here instead of as a rejected RPC.
     """
     from decimal import Decimal, InvalidOperation
 
     from .proto.longtrader.common.v1 import types_pb2 as common_pb
 
+    if isinstance(value, str):
+        # A string is already the wire form, so it is validated as it stands:
+        # an exponent or a digit separator in it is a typo worth reporting, not
+        # something to quietly re-render as a different number. The payload is
+        # then carried verbatim, because trailing zeros are part of the value --
+        # the host's "1.100" and "1.1" are different decimals.
+        _validate_decimal_text(value)
+        return common_pb.Decimal(value=value)
     if isinstance(value, Decimal):
         dec = value
     elif isinstance(value, float):
+        # `repr` is the shortest decimal that round-trips to this double, so a
+        # price built from arithmetic carries no binary noise. It switches to
+        # exponent notation below 1e-7 -- exactly where a satoshi price lives --
+        # and `_positional_text` below expands it again. What the caller already
+        # lost to the f64 is not recoverable here: pass a `Decimal` or a string
+        # when the digits have to be exact.
         dec = Decimal(repr(value))
     elif isinstance(value, int):
         dec = Decimal(value)
@@ -194,12 +221,131 @@ def _to_decimal(value: Any) -> Any:
             raise ValueError(f"cannot interpret {value!r} as a decimal") from exc
     if not dec.is_finite():
         raise ValueError(f"decimal must be finite, got {value!r}")
+    text = _positional_text(dec)
+    _validate_decimal_text(text)
+    return common_pb.Decimal(value=text)
+
+
+def from_decimal(value: Any) -> Any:
+    """Decode a ``common.v1.Decimal`` into a ``decimal.Decimal``.
+
+    The mirror image of :func:`to_decimal`: the payload is held to the same
+    grammar and then handed to ``decimal.Decimal``, which constructs exactly --
+    the context precision governs arithmetic, not construction -- so a 96-bit
+    coefficient over 28 decimal places survives intact.
+
+    A blank payload is an error rather than a zero. Presence lives on the
+    containing field, so an absent field is ``None`` here and an empty payload
+    means the writer never populated a value.
+    """
+    from decimal import Decimal
+
+    if value is None:
+        raise ValueError(
+            "decimal is absent: check the containing field's presence first"
+        )
+    text = value.value
+    _validate_decimal_text(text)
+    return Decimal(text)
+
+
+def _positional_text(dec: Any) -> str:
+    """Render ``dec`` as a plain base-10 literal: no exponent, no lost digit.
+
+    ``Decimal`` keeps its digits as a coefficient and a power of ten, so the
+    literal is rebuilt from those directly. Two things make this preferable to
+    leaning on ``format(dec, "f")``: the context precision (28 by default) is
+    never allowed anywhere near the digits -- which is the whole point, since a
+    96-bit coefficient is wider than it -- and trailing zeros survive, because
+    they are part of the value the host will read.
+    """
     sign, digits, exponent = dec.as_tuple()
-    out = common_pb.Decimal()
-    out.unscaled = int("".join(map(str, digits))) * (-1 if sign else 1)
-    out.scale = -exponent
-    out.raw_str = format(dec, "f")
-    return out
+    text = "".join(map(str, digits))
+    if exponent >= 0:
+        text += "0" * exponent
+    elif -exponent < len(digits):
+        point = len(digits) + exponent
+        text = text[:point] + "." + text[point:]
+    else:
+        text = "0." + "0" * (-exponent - len(digits)) + text
+    return f"-{text}" if sign else text
+
+
+def _is_ascii_digits(text: str) -> bool:
+    """True for a non-empty run of ASCII ``0``-``9``.
+
+    ``str.isdigit`` alone is not enough: it also accepts superscripts and other
+    Unicode digit forms, and ``int`` would fold them into a mantissa the host
+    never agreed to.
+    """
+    return text.isascii() and text.isdigit()
+
+
+def _validate_decimal_text(text: str) -> None:
+    """Raise ``ValueError`` unless ``text`` is a payload the host would accept.
+
+    Parsing is not validation: ``decimal.Decimal`` would take ``"1e3"``,
+    ``"+7"``, ``" 12.50 "`` and ``"1_000"``, none of which the contract defines,
+    so an unvalidated payload would reach the wire and come back rejected. The
+    grammar is a subset of what the parser accepts, so this never rejects a
+    value that would otherwise have decoded.
+    """
+    # Blank is its own case: it is the shape a message nobody populated has, so
+    # it says "the writer populated nothing" rather than "the payload was
+    # garbage".
+    if not text.strip():
+        raise ValueError(
+            f"decimal payload {text!r} is empty: a value is carried by the "
+            "containing field's presence"
+        )
+    # Named before the digit checks so the diagnosis points at the actual
+    # surprise rather than at "expected only digits".
+    if "_" in text:
+        raise _decimal_grammar_error(text, "digit separators are not accepted")
+    if "e" in text or "E" in text:
+        raise _decimal_grammar_error(text, "exponents are not accepted")
+    if text.startswith("+"):
+        raise _decimal_grammar_error(text, "a leading `+` is not accepted")
+
+    body = text[1:] if text.startswith("-") else text
+    point = body.find(".")
+    whole = body if point < 0 else body[:point]
+    fraction = "" if point < 0 else body[point + 1 :]
+    if not whole:
+        raise _decimal_grammar_error(
+            text, "expected at least one digit before the decimal point"
+        )
+    if not _is_ascii_digits(whole):
+        raise _decimal_grammar_error(
+            text, "expected only digits before the decimal point"
+        )
+    if point >= 0:
+        if not fraction:
+            raise _decimal_grammar_error(
+                text, "expected at least one digit after the decimal point"
+            )
+        if not _is_ascii_digits(fraction):
+            raise _decimal_grammar_error(
+                text, "expected only digits after the decimal point"
+            )
+        if len(fraction) > DECIMAL_MAX_SCALE:
+            raise _decimal_grammar_error(
+                text, "more fractional digits than a decimal can hold"
+            )
+
+    # Dropping the point leaves the coefficient, which has to fit the 96 bits
+    # the contract's decimal holds. This is the one check a grammar cannot make,
+    # because "79228162514264337593543950336" looks like any other integer.
+    if int(whole + fraction) > DECIMAL_MAX_MANTISSA:
+        raise ValueError(
+            f"decimal {text!r} is out of range for a decimal: the mantissa needs "
+            "more than the 96 bits a decimal holds"
+        )
+
+
+def _decimal_grammar_error(text: str, reason: str) -> ValueError:
+    """A payload that breaks the grammar, naming the clause it broke."""
+    return ValueError(f"decimal {text!r} is not a base-10 decimal: {reason}")
 
 
 def _exchange_id(exchange_id: str) -> Any:
@@ -239,13 +385,13 @@ def _order_request(
         symbol=symbol,
         type=_enum(pb, "OrderType", order_type, "OrderType"),
         side=_enum(pb, "OrderSide", side, "OrderSide"),
-        amount=_to_decimal(amount),
+        amount=to_decimal(amount),
         time_in_force=_enum(pb, "TimeInForce", time_in_force, "TimeInForce"),
         post_only=post_only,
         reduce_only=reduce_only,
     )
     if price is not None:
-        req.price.CopyFrom(_to_decimal(price))
+        req.price.CopyFrom(to_decimal(price))
     return req
 
 
@@ -922,9 +1068,9 @@ class Session:
             exchange_id=_exchange_id(exchange_id), position_id=position_id
         )
         if take_profit is not None:
-            req.take_profit.CopyFrom(_to_decimal(take_profit))
+            req.take_profit.CopyFrom(to_decimal(take_profit))
         if stop_loss is not None:
-            req.stop_loss.CopyFrom(_to_decimal(stop_loss))
+            req.stop_loss.CopyFrom(to_decimal(stop_loss))
         return self._unary(
             "ModifyPosition",
             req.SerializeToString(),

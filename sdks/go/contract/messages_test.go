@@ -76,8 +76,8 @@ func TestCreateOrderRequestCarriesSessionID(t *testing.T) {
 	if err != nil || amount != 0.001 {
 		t.Errorf("amount = %v (%v), want 0.001", amount, err)
 	}
-	if decoded.Order.Price.RawStr != price {
-		t.Errorf("price = %q, want %q", decoded.Order.Price.RawStr, price)
+	if decoded.Order.Price.Value != price {
+		t.Errorf("price = %q, want %q", decoded.Order.Price.Value, price)
 	}
 }
 
@@ -239,8 +239,8 @@ func TestOrderRoundTripWithMapAndTimestamps(t *testing.T) {
 		Info:          map[string]string{"source": "grid", "ttl": "30"},
 		CreatedAt:     &Timestamp{Seconds: 11},
 		UpdatedAt:     &Timestamp{Seconds: 12},
-		TakeProfit:    &Decimal{Unscaled: 3100, Scale: 0, RawStr: "3100"},
-		StopLoss:      &Decimal{Unscaled: 2900, Scale: 0, RawStr: "2900"},
+		TakeProfit:    &Decimal{Value: "3100"},
+		StopLoss:      &Decimal{Value: "2900"},
 	}
 	var decoded Order
 	if err := decoded.Unmarshal(Marshal(order)); err != nil {
@@ -252,10 +252,10 @@ func TestOrderRoundTripWithMapAndTimestamps(t *testing.T) {
 	if decoded.Info["source"] != "grid" || decoded.Info["ttl"] != "30" {
 		t.Errorf("info = %v", decoded.Info)
 	}
-	if decoded.TakeProfit == nil || decoded.TakeProfit.Unscaled != 3100 {
+	if decoded.TakeProfit == nil || decoded.TakeProfit.Value != "3100" {
 		t.Errorf("take profit = %+v", decoded.TakeProfit)
 	}
-	if decoded.StopLoss == nil || decoded.StopLoss.Unscaled != 2900 {
+	if decoded.StopLoss == nil || decoded.StopLoss.Value != "2900" {
 		t.Errorf("stop loss = %+v", decoded.StopLoss)
 	}
 	if got := decoded.Cost.MustFloat64(); got != 750.03125 {
@@ -352,17 +352,17 @@ func TestLogEventRoundTripWithFields(t *testing.T) {
 	}
 }
 
-func TestTickerRoundTripWithMockVenueShape(t *testing.T) {
-	// The mock venue fills only unscaled/scale. A reader that consults raw_str
-	// alone would see no price at all, so the decode path must keep the
-	// numeric pair usable.
+func TestTickerRoundTripWithVenueShape(t *testing.T) {
+	// A ticker is four decimals and a header, and every price is one base-10
+	// string: there is no second field for a reader to consult or prefer, so
+	// the round trip has to carry the payload itself.
 	ticker := &Ticker{
 		Symbol:    "BTC/USDT",
 		Header:    &EventHeader{Sequence: 3},
-		Bid:       Decimal{Unscaled: 639999925, Scale: 4},
-		Ask:       Decimal{Unscaled: 640000075, Scale: 4},
-		Last:      Decimal{Unscaled: 640000000, Scale: 4},
-		BidVolume: Decimal{Unscaled: 15, Scale: 0},
+		Bid:       mustDecimal(t, "63999.9925"),
+		Ask:       mustDecimal(t, "64000.0075"),
+		Last:      mustDecimal(t, "64000"),
+		BidVolume: mustDecimal(t, "15"),
 	}
 	var decoded Ticker
 	if err := decoded.Unmarshal(Marshal(ticker)); err != nil {
@@ -374,6 +374,9 @@ func TestTickerRoundTripWithMockVenueShape(t *testing.T) {
 	if decoded.Header == nil || decoded.Header.Sequence != 3 {
 		t.Errorf("header = %+v", decoded.Header)
 	}
+	if err := decoded.Bid.Validate(); err != nil {
+		t.Errorf("bid did not survive the trip: %v", err)
+	}
 	bid, err := decoded.Bid.Float64()
 	if err != nil || bid != 63999.9925 {
 		t.Errorf("bid = %v (%v), want 63999.9925", bid, err)
@@ -381,6 +384,9 @@ func TestTickerRoundTripWithMockVenueShape(t *testing.T) {
 	ask, err := decoded.Ask.Float64()
 	if err != nil || ask != 64000.0075 {
 		t.Errorf("ask = %v (%v), want 64000.0075", ask, err)
+	}
+	if decoded.BidVolume.Value != "15" {
+		t.Errorf("bid volume = %q, want %q", decoded.BidVolume.Value, "15")
 	}
 }
 

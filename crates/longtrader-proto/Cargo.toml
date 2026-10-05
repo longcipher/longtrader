@@ -54,5 +54,8 @@ web-sys = { workspace = true, optional = true, features = [
     "Window",
 ] }
 
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true

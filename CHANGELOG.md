@@ -12,6 +12,39 @@ version (0.x.0).
 
 ## [Unreleased]
 
+- **Contract (breaking): `common.v1.Decimal` carries one representation.** The
+  message was `int64 unscaled` + `int32 scale` + `string raw_str`, and the
+  invariant was that a writer populates exactly one of them while a reader
+  supports both. That dual representation is gone; the message is now a single
+  `string value` holding base-10 text.
+  - Every reader had to answer "which representation is authoritative?", and the
+    answer was a precedence rule plus a fallback — an unparsable `raw_str`
+    silently fell back to the numeric pair. That fallback is removed: a payload
+    outside the documented grammar is an error.
+  - The int64 mantissa was narrower than `rust_decimal`'s own 96-bit
+    coefficient, which is why the `raw_str` branch had to exist at all. Nothing
+    narrows a value now.
+  - "Unset" and "zero" are now distinguishable. A present `Decimal` always
+    carries a populated `value`, so an unpopulated message is its own error
+    instead of decoding as zero — which is exactly what an all-defaults message
+    used to do.
+  - The documented grammar is now *enforced* on read rather than inherited from
+    `rust_decimal`'s `FromStr`, which also accepts Rust literal syntax: digit
+    separators (`1_000`), exponents, a leading `+`, a bare `.5` and a bare `1.`
+    are all rejected. So `1_000` no longer silently becomes 1000.
+  - A non-canonical spelling (`007`, `-0`, `1.500`) is legal input and
+    canonicalises on encode, so payloads must not be compared by byte equality to
+    decide whether two decimals hold the same number.
+- **Contract (breaking): `FundingRate.funding_interval_hours` gained presence.**
+  It was a bare `uint32` documented as "0 when unknown", which collided with a
+  venue that genuinely reports zero. It is now `optional`, and the worker sends
+  it absent rather than zero.
+- **Strategy: `supertrend` reverses in one poll.** A long turned short used to
+  exit on one poll and open the short on a later one. Both legs are now submitted
+  in the same cycle, as two orders of `qty` in the same direction rather than one
+  order of `2 * qty`, which is the only form correct on both netting and hedging
+  venues. `Phase` is committed to `Flat` between the legs so a refused second leg
+  is recoverable.
 - **Contract (breaking): the terminal surface converged onto the canonical
   services.** `terminal.v1` had grown a near-complete second copy of the
   contract, with its own string-decimal payloads, its own `Side`/`OrderType`/

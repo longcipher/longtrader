@@ -13,32 +13,66 @@ import (
 	"github.com/longcipher/longtrader/sdks/go/contract"
 )
 
-// The mock venue fills only unscaled/scale and leaves raw_str empty, so a
-// reader that consults the text form alone sees no price at all.
-func TestDecimalToFloatReadsBothRepresentations(t *testing.T) {
-	cases := []struct {
-		name string
-		in   contract.Decimal
-		want float64
-		ok   bool
-	}{
-		{"raw_str only", contract.Decimal{RawStr: "64000.25"}, 64000.25, true},
-		{"numeric only", contract.Decimal{Unscaled: 6400025, Scale: 2}, 64000.25, true},
-		{"negative numeric only", contract.Decimal{Unscaled: -5, Scale: 1}, -0.5, true},
-		{"both", contract.Decimal{Unscaled: 125, Scale: 2, RawStr: "1.25"}, 1.25, true},
-		{"zero", contract.Decimal{}, 0, true},
-		{"malformed raw_str", contract.Decimal{RawStr: "abc"}, 0, false},
-		{"negative scale", contract.Decimal{Unscaled: 1, Scale: -1}, 0, false},
-		{"absurd scale", contract.Decimal{Unscaled: 1, Scale: 40}, 0, false},
+// A ticker whose prices are blank or out-of-grammar has no usable price, and
+// the grid must refuse to run rather than price itself from a value the reader
+// could not parse. Reading an unreadable price as zero is the failure this
+// guards: it hands the venue a ladder at zero.
+func TestRunRefusesToPriceFromAnUnusableTicker(t *testing.T) {
+	cases := map[string]contract.Decimal{
+		"blank payload":    {},
+		"malformed":        {Value: "abc"},
+		"not base 10":      {Value: "1e3"},
+		"outside the wire": {Value: "79228162514264337593543950336"},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, ok := decimalToFloat(tc.in)
-			if ok != tc.ok {
-				t.Fatalf("ok = %v, want %v", ok, tc.ok)
+	for name, unusable := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.ReadAll(r.Body)
+				reply := func(msg contract.Message) {
+					w.Header().Set("Content-Type", "application/proto")
+					_, _ = w.Write(contract.Marshal(msg))
+				}
+				switch {
+				case hasSuffix(r.URL.Path, "/AttachSession"):
+					reply(&contract.AttachSessionResponse{SessionID: "sess-1", HeartbeatIntervalMS: 5000})
+				case hasSuffix(r.URL.Path, "/RegisterStrategy"):
+					reply(&contract.RegisterStrategyResponse{StrategyID: "strategy-1"})
+				case hasSuffix(r.URL.Path, "/ReconcileState"):
+					reply(&contract.ReconcileStateResponse{SnapshotSequence: 1})
+				case hasSuffix(r.URL.Path, "/FetchTicker"):
+					reply(&contract.FetchTickerResponse{Ticker: &contract.Ticker{
+						Symbol: "BTC/USDT",
+						Bid:    unusable,
+						Ask:    unusable,
+						Last:   unusable,
+						Close:  unusable,
+					}})
+				case hasSuffix(r.URL.Path, "/StopStrategy"):
+					reply(&contract.StopStrategyResponse{FinalState: contract.SessionStateGracefulShutdown})
+				case hasSuffix(r.URL.Path, "/KeepAlive"):
+					reply(&contract.KeepAliveResponse{HeartbeatIntervalMS: 5000})
+				default:
+					t.Errorf("unexpected RPC %s", r.URL.Path)
+					http.Error(w, "unexpected", http.StatusNotImplemented)
+				}
+			}))
+			defer srv.Close()
+
+			opts := options{
+				baseURL:     srv.URL,
+				symbol:      "BTC/USDT",
+				levels:      1,
+				stepPct:     0.5,
+				amount:      "0.001",
+				iterations:  1,
+				refreshSecs: 0,
 			}
-			if ok && math.Abs(got-tc.want) > 1e-9 {
-				t.Errorf("value = %v, want %v", got, tc.want)
+			err := run(opts)
+			if err == nil {
+				t.Fatal("run placed a grid off an unreadable ticker")
+			}
+			if !strings.Contains(err.Error(), "no usable price") {
+				t.Errorf("error = %v, want it to name the unusable price", err)
 			}
 		})
 	}
@@ -104,9 +138,8 @@ func TestRunAgainstAnOfflineHost(t *testing.T) {
 		case hasSuffix(r.URL.Path, "/FetchTicker"):
 			reply(&contract.FetchTickerResponse{Ticker: &contract.Ticker{
 				Symbol: "BTC/USDT",
-				// The mock venue shape: unscaled/scale only.
-				Bid: contract.Decimal{Unscaled: 639999925, Scale: 4},
-				Ask: contract.Decimal{Unscaled: 640000075, Scale: 4},
+				Bid:    contract.Decimal{Value: "63999.9925"},
+				Ask:    contract.Decimal{Value: "64000.0075"},
 			}})
 		case hasSuffix(r.URL.Path, "/CreateOrders"):
 			var req contract.CreateOrdersRequest
@@ -155,20 +188,19 @@ func TestRunAgainstAnOfflineHost(t *testing.T) {
 	if first.SessionID != "sess-1" {
 		t.Errorf("CreateOrdersRequest.session_id = %q; the kill-switch would not be scoped to this run", first.SessionID)
 	}
-	if first.Orders[0].Amount.RawStr != "0.001" || first.Orders[0].Amount.Unscaled != 1 || first.Orders[0].Amount.Scale != 3 {
+	if first.Orders[0].Amount.Value != "0.001" {
 		t.Errorf("the rung amount decoded as %+v", first.Orders[0].Amount)
 	}
 	if first.Orders[0].Price.String() == "" {
 		t.Errorf("the buy rung has no price: %+v", first.Orders[0])
 	}
-	// The grid is symmetric around the mid price (64000).
-	buy, _ := contract.ParseDecimal(first.Orders[0].Price.String())
-	sell, _ := contract.ParseDecimal(first.Orders[1].Price.String())
-	buyPrice, err := buy.Float64()
+	// The grid is symmetric around the mid price (64000). Reading the price
+	// back through the accessor also proves the rung carries a usable payload.
+	buyPrice, err := first.Orders[0].Price.Float64()
 	if err != nil {
 		t.Fatalf("buy price: %v", err)
 	}
-	sellPrice, err := sell.Float64()
+	sellPrice, err := first.Orders[1].Price.Float64()
 	if err != nil {
 		t.Fatalf("sell price: %v", err)
 	}
@@ -239,8 +271,8 @@ func TestRunWiresTheExchangeIDThroughEveryRPC(t *testing.T) {
 			noteTicker(req.ExchangeID)
 			reply(&contract.FetchTickerResponse{Ticker: &contract.Ticker{
 				Symbol: "BTC/USDT",
-				Bid:    contract.Decimal{Unscaled: 639999925, Scale: 4},
-				Ask:    contract.Decimal{Unscaled: 640000075, Scale: 4},
+				Bid:    contract.Decimal{Value: "63999.9925"},
+				Ask:    contract.Decimal{Value: "64000.0075"},
 			}})
 		case hasSuffix(r.URL.Path, "/CreateOrders"):
 			var req contract.CreateOrdersRequest

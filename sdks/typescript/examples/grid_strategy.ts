@@ -23,11 +23,12 @@
  */
 import { randomUUID } from "node:crypto";
 import { create } from "@bufbuild/protobuf";
-import { Session, type OrderSpec } from "../src/index.js";
+import { Session, decimalNumber, type OrderSpec } from "../src/index.js";
 import {
   KillSwitchPolicySchema,
   KillSwitchPolicy_Scope,
 } from "../src/gen/longtrader/worker/v1/worker_pb.js";
+import type { Decimal } from "../src/gen/longtrader/common/v1/types_pb.js";
 
 /**
  * 26-char uppercase id, ULID-shaped. The backend dedupes on
@@ -101,29 +102,37 @@ function parseArgs(argv: string[]): Options {
 /** Poll one ticker and compute a mid price (bid -> ask -> last). */
 async function fetchMid(session: Session, symbol: string): Promise<number> {
   const ticker = await session.fetchTicker(symbol);
-  const bid = decimalToNumber(ticker.bid);
-  const ask = decimalToNumber(ticker.ask);
-  if (bid !== undefined && ask !== undefined) return (bid + ask) / 2;
-  const last = decimalToNumber(ticker.last);
-  if (last !== undefined) return last;
+  const bid = readPrice(ticker.bid);
+  const ask = readPrice(ticker.ask);
+  if (bid !== undefined && ask !== undefined && bid > 0 && ask > 0) {
+    return (bid + ask) / 2;
+  }
+  const last = readPrice(ticker.last);
+  if (last !== undefined && last > 0) return last;
   throw new Error(`ticker for ${symbol} has no usable price`);
 }
 
 /**
- * Read a `common.v1.Decimal` into a JS number.
+ * A `common.v1.Decimal` as a JS number, or undefined when it holds no price.
  *
- * The contract carries two representations and a writer populates only one:
- * the hot-path `unscaled`/`scale` pair, or the human-readable `rawStr`
- * fallback. A reader must accept both, or it silently sees zero whenever the
- * producer chose the other form.
+ * The contract's decimal is one base-10 string, so there is nothing to
+ * reconcile before reading it: `decimalNumber` holds the payload to the grammar
+ * the message documents and converts it, rounding to the nearest f64. A payload
+ * that is absent, blank or out of grammar is reported as "no price" rather than
+ * as 0 -- presence lives on the containing field, so a writer that sent nothing
+ * has not sent a price of zero, and reading it as one would price the grid at
+ * nothing.
+ *
+ * The grid maths here is arithmetic on floats and does not need more; anything
+ * that has to stay exact reads `decimalText` instead, which keeps every digit.
  */
-function decimalToNumber(
-  value: { unscaled: bigint; scale: number; rawStr: string } | undefined,
-): number | undefined {
+function readPrice(value: Decimal | undefined): number | undefined {
   if (value === undefined) return undefined;
-  if (value.rawStr !== "") return Number(value.rawStr);
-  if (value.unscaled === 0n) return 0;
-  return Number(value.unscaled) / 10 ** value.scale;
+  try {
+    return decimalNumber(value);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Cancel stale rungs, then batch-place a fresh grid around the mid. */

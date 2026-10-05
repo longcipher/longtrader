@@ -1,0 +1,48 @@
+[package]
+name = "longtrader-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# `cargo fuzz` builds every target in release with sanitizers and cannot share
+# the parent workspace's `target/`, so it is its own workspace.
+[workspace]
+members = ["."]
+
+[workspace.dependencies]
+longtrader-contract = { path = "../crates/longtrader-contract" }
+longtrader-worker = { path = "../bin/longtrader-worker" }
+
+# Each `fuzz_targets/*.rs` is its own sanitizer-instrumented binary.
+[[bin]]
+name = "decimal_codec"
+path = "fuzz_targets/decimal_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope"
+path = "fuzz_targets/envelope.rs"
+test = false
+doc = false
+bench = false
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+rust_decimal = "1.43.0"
+
+[dependencies.longtrader-contract]
+workspace = true
+
+[dependencies.longtrader-worker]
+workspace = true
+
+# The worker pulls in tokio/axum/connectrpc, which the parsers under test do not
+# use but which are part of the crate graph.
+[profile.release]
+debug = 1

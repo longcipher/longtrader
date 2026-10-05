@@ -17,7 +17,7 @@ use longtrader_worker::{
 
 /// Default terminal API endpoint (embedded `longtrader-terminal`, see H04).
 /// Standalone `longtrader-api serve` listens on `0.0.0.0:8080` — set
-/// `api_endpoint = "http://127.0.0.1:8080"` explicitly for that layout.
+/// `endpoint = "http://127.0.0.1:8080"` explicitly for that layout.
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8810";
 
 #[derive(Parser, Debug)]
@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let config = Config::load(&cli.config)?;
-    let backend = config.resolved_backend();
+    let backend = config.backend();
     tracing::info!(
         backend = %backend,
         strategy = %config.strategy.strategy_type,
@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    match backend.as_str() {
+    match backend {
         "mock" => {
             // Offline dry-run: deterministic in-process venue, no network.
             let mock = Arc::new(MockAdapter::new(rust_decimal::Decimal::from(95_000)));
@@ -69,27 +69,16 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        // The terminal backend (tradingcharts-server, longtrader-api) serves the
-        // same canonical `longtrader.{market,trading}.v1` services as the
-        // unified backend, so both share one adapter and differ only in
-        // endpoint + credentials.
-        "terminal" | "api" => {
-            let endpoint =
-                config.api_endpoint.clone().unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
+        // The remote backend speaks the canonical `longtrader.{market,trading}.v1`
+        // services over Connect, whether they are served by an embedded
+        // `longtrader-terminal` or a standalone `longtrader-api`.
+        "api" => {
+            let endpoint = config.endpoint_or_default(DEFAULT_ENDPOINT);
             let adapter = Arc::new(RemoteAdapter::new(&endpoint, &config.api_token()));
-            tracing::info!(endpoint = %endpoint, backend = %backend, "connected to backend");
+            tracing::info!(endpoint = %endpoint, "connected to backend");
             start_with(adapter, &config).await
         }
-        // Historically documented but never implemented; map to the unified
-        // endpoint with a warning rather than crashing on a valid-looking config.
-        "daemon" => {
-            tracing::warn!("backend 'daemon' is not implemented; using the unified 'api' endpoint");
-            let endpoint =
-                config.api_endpoint.clone().unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
-            let adapter = Arc::new(RemoteAdapter::new(&endpoint, &config.api_token()));
-            start_with(adapter, &config).await
-        }
-        other => bail!("unknown backend: {other} (expected 'mock', 'api' or 'terminal')"),
+        other => bail!("unknown backend: {other} (expected 'mock' or 'api')"),
     }
 }
 

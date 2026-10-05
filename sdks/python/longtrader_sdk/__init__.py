@@ -26,6 +26,8 @@ from .session import (
     TERMINAL_STATES,
     ConnectError,
     Session,
+    from_decimal,
+    to_decimal,
 )
 
 __all__ = [
@@ -47,5 +49,7 @@ __all__ = [
     "GRACEFUL_SHUTDOWN",
     "TERMINAL_STATES",
     "SYNC_IN_PROGRESS",
+    "to_decimal",
+    "from_decimal",
 ]
 __version__ = "0.2.0"

@@ -11,13 +11,13 @@ use tokio::sync::mpsc;
 use crate::proto::{common, market, trading, worker};
 
 // ---------------------------------------------------------------------------
-// Decimal dual-representation
+// Decimal encode/decode
 //
-// The authoritative encode/decode lives in `longtrader_contract::ext`
-// (`decimal_to_common` / `common_to_decimal`). The previous duplicate helpers
-// here were removed so the representation split has a single owner; the old
-// fast path silently zeroed an out-of-range `scale`, a latent data-corruption
-// bug. Strategy code should call `longtrader_contract::ext::decimal_to_common`.
+// The wire representation of a decimal is a single base-10 string, and
+// `longtrader_contract::ext` owns the only encode/decode pair for it
+// (`decimal_to_common` / `common_to_decimal`). The duplicate helpers that used
+// to live here were removed so that pair has one owner. Strategy code should
+// call `longtrader_contract::ext::decimal_to_common` directly.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -529,6 +529,7 @@ pub trait WalletGateway: Send + Sync {
     /// `client_transfer_id` is an optional idempotency key. Transfers move
     /// funds, so a retry without one risks a double spend; supply it whenever
     /// the caller can retry.
+    #[allow(clippy::too_many_arguments)]
     async fn transfer(
         &self,
         exchange_id: &common::ExchangeId,
@@ -537,4 +538,434 @@ pub trait WalletGateway: Send + Sync {
         dest_label: &str,
         client_transfer_id: &str,
     ) -> Result<TransferReceipt, PortError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use longtrader_contract::ext::common_to_decimal;
+    use proptest::prelude::*;
+    use rust_decimal_macros::dec;
+
+    use super::*;
+
+    /// The decode failure for a payload no `Decimal` can hold.
+    ///
+    /// `Decimal` carries one base-10 string, so "cannot represent" is a property
+    /// of that payload rather than of a numeric pair. Built by running the real
+    /// decoder so the fixture cannot drift from what the parser does.
+    fn out_of_range(payload: &str) -> DecimalConvertError {
+        let wire = common::Decimal { value: payload.to_string(), ..Default::default() };
+        match common_to_decimal(&wire) {
+            Err(err) => err,
+            Ok(_) => unreachable!("{payload} must not decode"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Sequence-gap detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn consecutive_sequences_are_not_a_gap() {
+        assert!(!is_sequence_gap(0, 1));
+        assert!(!is_sequence_gap(1, 2));
+        assert!(!is_sequence_gap(u64::MAX - 1, u64::MAX));
+    }
+
+    /// `wrapping_add` is what makes `u64::MAX -> 0` contiguous rather than a
+    /// gap; a saturating add would have reported a false resync here.
+    #[test]
+    fn the_sequence_wraps_through_zero_without_a_gap() {
+        assert!(!is_sequence_gap(u64::MAX, 0), "u64::MAX -> 0 is contiguous");
+    }
+
+    #[test]
+    fn skipped_duplicate_and_regressed_sequences_are_gaps() {
+        assert!(is_sequence_gap(0, 0), "a duplicate is not an increment");
+        assert!(is_sequence_gap(0, 2), "a skip is a gap");
+        assert!(is_sequence_gap(5, 1), "a regression is a gap");
+        assert!(is_sequence_gap(1, 0), "one backwards is a gap");
+    }
+
+    #[test]
+    fn a_missing_watermark_is_never_a_gap() {
+        let header = common::EventHeader { sequence: 4_242, ..Default::default() };
+        assert!(!has_sequence_gap(None, &header), "the first event cannot gap");
+    }
+
+    #[test]
+    fn has_sequence_gap_forwards_the_watermark() {
+        let header = common::EventHeader { sequence: 10, ..Default::default() };
+        assert!(!has_sequence_gap(Some(9), &header));
+        assert!(has_sequence_gap(Some(10), &header));
+        assert!(has_sequence_gap(Some(3), &header));
+    }
+
+    // -----------------------------------------------------------------------
+    // Overflow policy mapping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn orderbook_channels_coalesce_and_everything_else_drops_the_oldest() {
+        assert_eq!(
+            overflow_policy_for_channel(market::StreamChannel::Orderbook),
+            OverflowPolicy::Coalesce
+        );
+        for channel in [
+            market::StreamChannel::Ticker,
+            market::StreamChannel::Trades,
+            market::StreamChannel::Ohlcv,
+            market::StreamChannel::Unspecified,
+        ] {
+            assert_eq!(
+                overflow_policy_for_channel(channel),
+                OverflowPolicy::DropOldest,
+                "{channel:?} must drop the oldest"
+            );
+        }
+    }
+
+    /// The policy constants are the documented §6.5 table; pin every one so a
+    /// refactor cannot quietly repoint a channel at a lossy policy.
+    #[test]
+    fn the_documented_policy_constants_are_stable() {
+        assert_eq!(OVERFLOW_TICKER, OverflowPolicy::DropOldest);
+        assert_eq!(OVERFLOW_ORDERBOOK, OverflowPolicy::Coalesce);
+        assert_eq!(OVERFLOW_ORDERS, OverflowPolicy::Block);
+        assert_eq!(OVERFLOW_TRADES, OverflowPolicy::DropOldest);
+        assert_eq!(OVERFLOW_OHLCV, OverflowPolicy::DropOldest);
+        assert_eq!(OVERFLOW_BALANCES, OverflowPolicy::Block);
+        assert_eq!(OVERFLOW_POSITIONS, OverflowPolicy::Block);
+    }
+
+    // -----------------------------------------------------------------------
+    // PortError
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn every_port_error_renders_a_distinct_message() {
+        let errors = [
+            PortError::Transport("socket closed".into()),
+            PortError::Rpc { code: 5, message: "not found".into() },
+            PortError::Unsupported("trigger orders".into()),
+            PortError::MissingField("last".into()),
+            PortError::InvalidArgument("qty must be positive".into()),
+            PortError::NotFound("venue operation nope".into()),
+        ];
+        let rendered: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        for pair in rendered.iter().zip(rendered.iter().skip(1)) {
+            assert_ne!(pair.0, pair.1, "two errors share the message {}", pair.0);
+        }
+        for message in &rendered {
+            assert!(!message.is_empty(), "an error rendered as an empty string");
+        }
+        assert!(rendered.iter().any(|m| m.contains('5') && m.contains("not found")));
+    }
+
+    /// `NotFound` must read as "the backend answered, no such object" rather
+    /// than as the "this backend can never have it" `Unsupported`.
+    #[test]
+    fn not_found_and_unsupported_are_distinguishable_in_the_message() {
+        let not_found = PortError::NotFound("thing".into()).to_string();
+        let unsupported = PortError::Unsupported("thing".into()).to_string();
+        assert_ne!(not_found, unsupported);
+        assert!(not_found.contains("not found"));
+        assert!(unsupported.contains("unsupported"));
+    }
+
+    #[test]
+    fn a_decimal_convert_error_converts_into_a_port_error() {
+        // 29 nines is inside the contract grammar but wider than a `Decimal`.
+        let payload = "9".repeat(29);
+        let err: PortError = out_of_range(&payload).into();
+        assert!(matches!(err, PortError::Decimal(_)));
+        assert!(err.to_string().contains(&payload), "the payload must be echoed: {err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Wire-name mappings
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trigger_order_status_wire_names() {
+        assert_eq!(TriggerOrderStatus::Open.as_str(), "open");
+        assert_eq!(TriggerOrderStatus::Triggered.as_str(), "triggered");
+        assert_eq!(TriggerOrderStatus::Canceled.as_str(), "canceled");
+        assert_eq!(TriggerOrderStatus::Rejected.as_str(), "rejected");
+    }
+
+    #[test]
+    fn trigger_order_status_display_matches_as_str() {
+        for status in [
+            TriggerOrderStatus::Open,
+            TriggerOrderStatus::Triggered,
+            TriggerOrderStatus::Canceled,
+            TriggerOrderStatus::Rejected,
+        ] {
+            assert_eq!(status.to_string(), status.as_str(), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn trigger_order_status_defaults_to_open() {
+        assert_eq!(TriggerOrderStatus::default(), TriggerOrderStatus::Open);
+    }
+
+    /// `VenueOpParamType::as_str` mirrors `ops.v1.ParamType`; the proxy maps
+    /// these straight onto the wire, so a drift would publish an unknown enum
+    /// name to clients.
+    #[test]
+    fn venue_op_param_type_wire_names() {
+        assert_eq!(VenueOpParamType::Unspecified.as_str(), "PARAM_TYPE_UNSPECIFIED");
+        assert_eq!(VenueOpParamType::String.as_str(), "PARAM_TYPE_STRING");
+        assert_eq!(VenueOpParamType::Int64.as_str(), "PARAM_TYPE_INT64");
+        assert_eq!(VenueOpParamType::Decimal.as_str(), "PARAM_TYPE_DECIMAL");
+        assert_eq!(VenueOpParamType::Bool.as_str(), "PARAM_TYPE_BOOL");
+        assert_eq!(VenueOpParamType::Enum.as_str(), "PARAM_TYPE_ENUM");
+        assert_eq!(VenueOpParamType::List.as_str(), "PARAM_TYPE_LIST");
+        assert_eq!(VenueOpParamType::Map.as_str(), "PARAM_TYPE_MAP");
+    }
+
+    #[test]
+    fn venue_op_param_type_defaults_to_unspecified() {
+        assert_eq!(VenueOpParamType::default(), VenueOpParamType::Unspecified);
+    }
+
+    /// The wire names are part of the published contract, so they must be
+    /// unique across every variant.
+    #[test]
+    fn every_param_type_name_is_unique() {
+        let all = [
+            VenueOpParamType::Unspecified,
+            VenueOpParamType::String,
+            VenueOpParamType::Int64,
+            VenueOpParamType::Decimal,
+            VenueOpParamType::Bool,
+            VenueOpParamType::Enum,
+            VenueOpParamType::List,
+            VenueOpParamType::Map,
+        ];
+        let mut names: Vec<&str> = all.iter().map(|t| t.as_str()).collect();
+        names.sort_unstable();
+        let count = names.len();
+        names.dedup();
+        assert_eq!(names.len(), count, "two param types share a wire name");
+    }
+
+    // -----------------------------------------------------------------------
+    // Defaulted trait methods
+    // -----------------------------------------------------------------------
+
+    /// A backend that only implements `list_venue_ops` must still get the
+    /// documented `describe_venue_op` behaviour for free.
+    struct StubOps {
+        ops: Vec<VenueOpDescriptor>,
+    }
+
+    #[async_trait]
+    impl VenueOpInvoker for StubOps {
+        async fn invoke_venue_op(
+            &self,
+            _exchange_id: &common::ExchangeId,
+            _op: &str,
+            _params: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, PortError> {
+            Err(PortError::Unsupported("invoke".into()))
+        }
+
+        async fn list_venue_ops(
+            &self,
+            _exchange_id: &common::ExchangeId,
+        ) -> Result<Vec<VenueOpDescriptor>, PortError> {
+            Ok(self.ops.clone())
+        }
+    }
+
+    fn op(name: &str) -> VenueOpDescriptor {
+        VenueOpDescriptor {
+            name: name.into(),
+            category: "account".into(),
+            summary: String::new(),
+            mutating: false,
+            params: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_default_describe_venue_op_finds_a_known_operation() {
+        let stub = StubOps { ops: vec![op("account.balance"), op("account.transfer")] };
+        let exchange = common::ExchangeId { id: "mock".into(), ..Default::default() };
+        let found = stub.describe_venue_op(&exchange, "account.transfer").await.expect("found");
+        assert_eq!(found.name, "account.transfer");
+    }
+
+    #[tokio::test]
+    async fn the_default_describe_venue_op_reports_not_found() {
+        let stub = StubOps { ops: vec![op("account.balance")] };
+        let exchange = common::ExchangeId { id: "mock".into(), ..Default::default() };
+        let err = stub.describe_venue_op(&exchange, "nope").await.expect_err("must not resolve");
+        assert!(matches!(err, PortError::NotFound(_)), "got {err:?}");
+        assert!(err.to_string().contains("nope"), "the message must name the op: {err}");
+    }
+
+    #[tokio::test]
+    async fn the_default_describe_venue_op_on_an_empty_registry_is_not_found() {
+        let stub = StubOps { ops: Vec::new() };
+        let exchange = common::ExchangeId { id: "mock".into(), ..Default::default() };
+        let err = stub.describe_venue_op(&exchange, "account.balance").await.expect_err("empty");
+        assert!(matches!(err, PortError::NotFound(_)), "got {err:?}");
+    }
+
+    /// The default `fetch_deposits` forwards an empty currency filter and the
+    /// `deposit` entry type; a backend that ignores the filter would report
+    /// withdrawals as deposits.
+    #[tokio::test]
+    async fn the_default_fetch_deposits_forwards_the_deposit_filter() {
+        struct RecordingWallet {
+            seen: std::sync::Mutex<Option<(String, String, u32)>>,
+        }
+
+        #[async_trait]
+        impl WalletGateway for RecordingWallet {
+            async fn list_ledger_entries(
+                &self,
+                _exchange_id: &common::ExchangeId,
+                currency: &str,
+                entry_type: &str,
+                limit: u32,
+            ) -> Result<Vec<LedgerEntry>, PortError> {
+                *self.seen.lock().expect("wallet mutex") =
+                    Some((currency.to_string(), entry_type.to_string(), limit));
+                Ok(Vec::new())
+            }
+
+            async fn transfer(
+                &self,
+                _exchange_id: &common::ExchangeId,
+                _asset: &str,
+                _amount: Decimal,
+                _dest_label: &str,
+                _client_transfer_id: &str,
+            ) -> Result<TransferReceipt, PortError> {
+                Err(PortError::Unsupported("transfer".into()))
+            }
+        }
+
+        let wallet = RecordingWallet { seen: std::sync::Mutex::new(None) };
+        let exchange = common::ExchangeId { id: "mock".into(), ..Default::default() };
+        let rows = wallet.fetch_deposits(&exchange, 42).await.expect("deposits");
+        assert!(rows.is_empty());
+        let seen = wallet.seen.lock().expect("wallet mutex").clone();
+        assert_eq!(
+            seen,
+            Some((String::new(), "deposit".to_string(), 42)),
+            "the default must forward an empty currency filter and the deposit type"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Ledger signing
+    // -----------------------------------------------------------------------
+
+    /// `LedgerEntry::amount` is signed on purpose: a caller must not be able to
+    /// read a withdrawal as a deposit.
+    #[test]
+    fn ledger_entries_keep_the_direction_in_the_sign() {
+        let deposit = LedgerEntry {
+            id: "d1".into(),
+            currency: "USDT".into(),
+            amount: dec!(100),
+            entry_type: "deposit".into(),
+            completed: true,
+            time_ms: 0,
+        };
+        let withdrawal = LedgerEntry { amount: dec!(-100), ..deposit.clone() };
+        assert!(deposit.amount.is_sign_positive());
+        assert!(withdrawal.amount.is_sign_negative());
+        assert_ne!(deposit, withdrawal);
+    }
+
+    // -----------------------------------------------------------------------
+    // Properties
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// `is_sequence_gap(prev, next)` is gap-free exactly when `next` is
+        /// `prev + 1` in wrapping arithmetic.
+        #[test]
+        fn a_sequence_is_gap_free_exactly_when_it_wraps_to_prev_plus_one(
+            prev in any::<u64>(),
+            delta in 0u64..8,
+        ) {
+            let next = prev.wrapping_add(delta);
+            prop_assert_eq!(is_sequence_gap(prev, next), delta != 1, "prev={} delta={}", prev, delta );
+        }
+
+        /// Adding a sequence and then checking the next one is always
+        /// gap-free: the detector must agree with its own producer.
+        #[test]
+        fn incrementing_then_checking_is_never_a_gap(prev in any::<u64>()) {
+            let next = prev.wrapping_add(1);
+            let header = common::EventHeader { sequence: next, ..Default::default() };
+            prop_assert!(!is_sequence_gap(prev, next));
+            prop_assert!(!has_sequence_gap(Some(prev), &header));
+        }
+
+        /// Presenting the same sequence twice always reports a gap.
+        #[test]
+        fn repeating_a_sequence_is_always_a_gap(sequence in any::<u64>()) {
+            let header = common::EventHeader { sequence, ..Default::default() };
+            prop_assert!(is_sequence_gap(sequence, sequence));
+            prop_assert!(has_sequence_gap(Some(sequence), &header));
+        }
+
+        /// Orderbook is the only channel that coalesces — the §6.5 table. Any
+        /// other channel, present or future, must drop the oldest instead.
+        #[test]
+        fn only_the_orderbook_channel_coalesces(
+            channel in prop::sample::select(&[
+                market::StreamChannel::Unspecified,
+                market::StreamChannel::Ticker,
+                market::StreamChannel::Orderbook,
+                market::StreamChannel::Trades,
+                market::StreamChannel::Ohlcv,
+            ]),
+        ) {
+            let policy = overflow_policy_for_channel(channel);
+            prop_assert_eq!(
+                policy == OverflowPolicy::Coalesce,
+                channel == market::StreamChannel::Orderbook, "{:?} mapped to {:?}", channel, policy
+            );
+        }
+
+        /// Every status renders as a non-empty, unique, lowercase wire name.
+        #[test]
+        fn trigger_order_status_names_are_stable(idx in 0u8..4) {
+            let status = match idx {
+                0 => TriggerOrderStatus::Open,
+                1 => TriggerOrderStatus::Triggered,
+                2 => TriggerOrderStatus::Canceled,
+                _ => TriggerOrderStatus::Rejected,
+            };
+            let name = status.as_str();
+            prop_assert!(!name.is_empty());
+            prop_assert_eq!(name.to_lowercase(), name);
+            prop_assert_eq!(status.to_string(), name);
+        }
+
+        /// `Decimal` converts into `PortError` and renders the offending payload.
+        ///
+        /// Nine digits past what the 96-bit mantissa holds: the payload is
+        /// grammar-clean, so only the width can reject it.
+        #[test]
+        fn an_out_of_range_decimal_always_converts(digits in 29usize..40) {
+            let payload = "9".repeat(digits);
+            let err: PortError = out_of_range(&payload).into();
+            prop_assert!(matches!(err, PortError::Decimal(_)));
+            prop_assert!(err.to_string().contains(&payload), "{err}");
+        }
+    }
 }

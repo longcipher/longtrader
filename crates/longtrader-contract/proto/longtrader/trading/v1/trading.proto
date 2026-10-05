@@ -199,8 +199,6 @@ message Order {
   bool reduce_only = 19;
   map<string, string> info = 20;
   // ---- Terminal extensions (additive) ----
-  // 21 was briefly used and removed; never reuse.
-  reserved 21;
   // Creation / last update.
   google.protobuf.Timestamp created_at = 22;
   google.protobuf.Timestamp updated_at = 23;
@@ -248,8 +246,6 @@ message Position {
   // simply means "not set".
   optional common.v1.Decimal take_profit = 12;
   optional common.v1.Decimal stop_loss = 13;
-  // 14-16 were briefly used and removed; never reuse.
-  reserved 14, 15, 16;
   // Position open time.
   google.protobuf.Timestamp opened_at = 17;
 }

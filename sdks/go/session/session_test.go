@@ -359,9 +359,9 @@ func TestCreateOrderEncodesSessionID(t *testing.T) {
 	if !req.Order.PostOnly {
 		t.Error("post_only was dropped")
 	}
-	// The amount must carry both decimal representations.
-	if req.Order.Amount.Unscaled != 1 || req.Order.Amount.Scale != 3 || req.Order.Amount.RawStr != "0.001" {
-		t.Errorf("amount decoded as %+v; the host trusts unscaled/scale", req.Order.Amount)
+	// The amount must carry the contract's single decimal payload.
+	if req.Order.Amount.Value != "0.001" {
+		t.Errorf("amount decoded as %+v; the host reads one base-10 string", req.Order.Amount)
 	}
 	if got := req.Order.Price.String(); got != price {
 		t.Errorf("price = %q, want %q", got, price)
@@ -1120,8 +1120,9 @@ func TestTradingAndMarketMethodsRoundTrip(t *testing.T) {
 		if ticker.Symbol != "BTC/USDT" {
 			t.Errorf("symbol = %q", ticker.Symbol)
 		}
-		// The mock venue fills only unscaled/scale; reading raw_str alone
-		// would report no price at all.
+		// The venue fills the one decimal payload, and every price in it is
+		// readable; a blank or malformed one would be an error here, not a
+		// silent zero.
 		bid, err := ticker.Bid.Float64()
 		if err != nil {
 			t.Fatalf("bid: %v", err)
@@ -1131,7 +1132,7 @@ func TestTradingAndMarketMethodsRoundTrip(t *testing.T) {
 			t.Fatalf("ask: %v", err)
 		}
 		if bid == 0 || ask == 0 {
-			t.Fatalf("bid/ask = %v/%v; the numeric decimal pair was dropped", bid, ask)
+			t.Fatalf("bid/ask = %v/%v; the decimal payload was dropped", bid, ask)
 		}
 		if mid := (bid + ask) / 2; mid < 63000 || mid > 65000 {
 			t.Errorf("mid = %v, out of the BTC/USDT range", mid)

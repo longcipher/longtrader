@@ -28,7 +28,7 @@ use connectrpc::{
 };
 use futures_util::StreamExt;
 
-use super::{ManagerError, SessionManager, SessionState};
+use super::{ClientIdentity, ManagerError, SessionManager, SessionState};
 use crate::proto::{common, worker};
 
 fn now_ts() -> buffa_types::google::protobuf::Timestamp {
@@ -79,6 +79,12 @@ impl From<ManagerError> for ConnectError {
             // structured `ErrorDetail`; the message text is for logs only.
             ManagerError::SyncInProgress { .. } => Self::failed_precondition(err.to_string())
                 .with_detail(error_detail(common::ErrorReason::SyncInProgress)),
+            // The stop itself succeeded (the message names the terminal state it
+            // reached); what failed is the venue's willingness to cancel. `internal`
+            // because there is no code for "your order may still be resting": the
+            // client must not read the session as cleanly unwound, and it does not
+            // learn that from a success.
+            ManagerError::CancelsFailed { .. } => Self::internal(err.to_string()),
             ManagerError::Port(e) => Self::internal(e.to_string()),
         }
     }
@@ -127,8 +133,12 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
         // `AttachSessionRequest.session_id`.
         let req = request.to_owned_message();
         let policy = req.policy.as_option().cloned();
-        let (session_id, heartbeat_interval_ms) =
-            self.manager.attach_with_reconnect(&req.token, policy, &req.session_id).await?;
+        let client =
+            ClientIdentity { name: req.client_name.clone(), version: req.client_version.clone() };
+        let (session_id, heartbeat_interval_ms) = self
+            .manager
+            .attach_with_reconnect(&req.token, policy, &req.session_id, &client)
+            .await?;
         let resp = worker::AttachSessionResponse {
             session_id,
             heartbeat_interval_ms,
@@ -200,27 +210,15 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
         // SESSION_ORDERS cancels only this session’s tracked client_order_id set;
         // ALL_ORDERS cancels every open order of the bound account(s);
         // NONE logs only — see SessionManager::trip_kill_switch.
+        //
+        // The lease/scope parsing is NOT re-implemented here: `apply_policy` is the
+        // single owner, so attach, reconnect and this RPC cannot drift on what
+        // `SCOPE_UNSPECIFIED` or an out-of-bounds lease mean. It also rejects a
+        // policy without applying any part of it, so a caller can never believe it
+        // has a lease the worker is not enforcing.
         if let Some(policy) = req.policy.as_option() {
             let mut session_policy = handle.policy().await;
-            if let Some(timeout) = policy.lease_timeout.as_option() {
-                session_policy.lease_timeout = super::lease::lease_timeout_from_proto(timeout)
-                    .map_err(|e| {
-                        ConnectError::invalid_argument(format!("bad lease_timeout: {e}"))
-                    })?;
-            }
-            match policy.scope {
-                buffa::EnumValue::Known(scope) => {
-                    if scope != worker::kill_switch_policy::Scope::Unspecified {
-                        // SCOPE_SESSION_ORDERS / SCOPE_ALL_ORDERS / SCOPE_NONE
-                        session_policy.scope = scope;
-                    }
-                }
-                buffa::EnumValue::Unknown(v) => {
-                    return Err(ConnectError::invalid_argument(format!(
-                        "unknown KillSwitchPolicy scope {v}"
-                    )));
-                }
-            }
+            super::apply_policy(&mut session_policy, policy)?;
             handle.set_policy(session_policy).await;
         }
         let resp = worker::SetKillSwitchPolicyResponse::default();

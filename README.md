@@ -146,8 +146,8 @@ cargo run -p longtrader-worker -- --config config.toml
 Minimal `config.toml`:
 
 ```toml
-backend = "terminal"                          # mock | terminal | api (unified)
-api_endpoint = "http://127.0.0.1:8810"      # embedded longtrader-terminal; standalone longtrader-api serve uses :8080
+backend = "api"                               # mock | api
+endpoint = "http://127.0.0.1:8810"            # embedded longtrader-terminal; standalone longtrader-api serve uses :8080
 api_token_file = "/run/secrets/longtrader_token"
 listen_endpoint = "127.0.0.1:9000"          # WorkerSessionService + proxies (optional)
 

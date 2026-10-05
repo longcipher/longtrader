@@ -28,6 +28,11 @@ struct State {
     price: Decimal,
     orders: Vec<trading::Order>,
     fail_next_creates: u32,
+    /// Every `create_order` seen so far, so a script can target one by position.
+    creates_seen: u32,
+    /// Fail every `create_order` at or after this 0-based index. `None` disables
+    /// it; it cannot default to `Some(0)` because that would fail every create.
+    fail_creates_from: Option<u32>,
     funding_rate: Decimal,
     op_balance: Decimal,
     deposits: Vec<LedgerEntry>,
@@ -163,7 +168,29 @@ impl MockAdapter {
 
     /// Script the next `n` order creations to fail (for error-path tests).
     pub async fn fail_next_creates(&self, n: u32) {
-        self.state.lock().await.fail_next_creates = n;
+        let mut state = self.state.lock().await;
+        state.fail_next_creates = n;
+        state.fail_creates_from = None;
+    }
+
+    /// Script a failure *in the middle* of a batch: every creation from the
+    /// 0-based `index` onward fails, and the ones before it are accepted.
+    ///
+    /// `fail_next_creates` always fails from the very first create, so a batch
+    /// scripted with it leaves nothing on the venue. That is the wrong shape for
+    /// the partial-success case a batch has to recover from, which needs at least
+    /// one leg to land before the failure.
+    pub async fn fail_creates_from(&self, index: u32) {
+        let mut state = self.state.lock().await;
+        state.fail_next_creates = 0;
+        state.fail_creates_from = Some(index);
+    }
+
+    /// Let every creation succeed again, whatever was scripted before.
+    pub async fn heal_creates(&self) {
+        let mut state = self.state.lock().await;
+        state.fail_next_creates = 0;
+        state.fail_creates_from = None;
     }
 }
 
@@ -174,8 +201,13 @@ impl TradingGateway for MockAdapter {
         req: trading::CreateOrderRequest,
     ) -> Result<trading::Order, PortError> {
         let mut state = self.state.lock().await;
+        let seen = state.creates_seen;
+        state.creates_seen += 1;
         if state.fail_next_creates > 0 {
             state.fail_next_creates -= 1;
+            return Err(PortError::Rpc { code: 500, message: "scripted failure".to_string() });
+        }
+        if state.fail_creates_from.is_some_and(|from| seen >= from) {
             return Err(PortError::Rpc { code: 500, message: "scripted failure".to_string() });
         }
         let order_req =
@@ -497,45 +529,101 @@ impl MarketDataSource for MockAdapter {
         req: market::StreamMarketDataRequest,
         policy: OverflowPolicy,
     ) -> Result<MarketEventStream, PortError> {
-        let _symbols: Vec<String> = req
-            .subscriptions
-            .iter()
-            .filter(|s| s.channel == EnumValue::Known(market::StreamChannel::Ticker))
-            .map(|s| s.symbol.clone())
-            .collect();
         let price = self.state.lock().await.price;
-        let this = self.clone();
         Ok(crate::adapters::poll_market_data(
             req,
             policy,
-            move |channel, exchange_id, symbol, seq| {
-                let this = this.clone();
-                let _ = (channel, exchange_id);
+            move |channel, _exchange_id, symbol, seq| {
                 let price = price;
                 async move {
-                    let _ = this;
                     let next = seq.fetch_add(1, Ordering::Relaxed) + 1;
                     let header = common::EventHeader {
                         trace_id: "mock".to_string(),
                         sequence: next,
                         ..common::EventHeader::default()
                     };
-                    let ticker = market::Ticker {
-                        header: MessageField::some(header),
-                        symbol,
-                        timestamp: MessageField::some(now_ts()),
-                        last: MessageField::some(decimal_to_common(price)),
-                        ..Default::default()
-                    };
+                    let event = synthetic_event(channel, symbol, price, header.clone());
                     Ok(Some(market::MarketDataEvent {
-                        header: ticker.header.clone(),
-                        event: Some(market::market_data_event::Event::Ticker(Box::new(ticker))),
+                        header: MessageField::some(header),
+                        event: Some(event),
                         resume_token: format!("{next}"),
                         ..Default::default()
                     }))
                 }
             },
         ))
+    }
+}
+
+/// One synthetic market-data event, in the variant the caller subscribed to.
+///
+/// The variant must match the channel: a strategy that subscribed for depth
+/// cannot be exercised against a feed that answers with tickers, because the
+/// event it decodes is not the one it asked for. `STREAM_CHANNEL_UNSPECIFIED`
+/// (and any unknown discriminant, which `poll_market_data` normalises to it)
+/// falls back to a ticker, the mock's default feed.
+fn synthetic_event(
+    channel: market::StreamChannel,
+    symbol: String,
+    price: Decimal,
+    header: common::EventHeader,
+) -> market::market_data_event::Event {
+    use market::market_data_event::Event as Variant;
+    let d = |v: Decimal| MessageField::some(decimal_to_common(v));
+    let stamp = || MessageField::some(now_ts());
+    match channel {
+        market::StreamChannel::Orderbook => {
+            // One level per side, symmetric around the synthetic price.
+            let step = Decimal::new(1, 2); // 0.01
+            let level = |offset: Decimal| market::PriceLevel {
+                price: d(price + offset),
+                amount: d(Decimal::ONE),
+                ..Default::default()
+            };
+            Variant::Orderbook(Box::new(market::OrderBook {
+                header: MessageField::some(header),
+                symbol,
+                timestamp: stamp(),
+                bids: vec![level(-step)],
+                asks: vec![level(step)],
+                ..Default::default()
+            }))
+        }
+        market::StreamChannel::Trades => {
+            // Built before the literal: the header moves into its field.
+            let id = format!("mock-trade-{}", header.sequence);
+            Variant::Trade(Box::new(market::PublicTrade {
+                header: MessageField::some(header),
+                id,
+                symbol,
+                timestamp: stamp(),
+                price: d(price),
+                amount: d(Decimal::ONE),
+                // A synthetic print has no taker; `UNSPECIFIED` says so, where a
+                // guessed side would read as a real aggressor fill.
+                side: EnumValue::Known(market::TradeSide::Unspecified),
+                ..Default::default()
+            }))
+        }
+        market::StreamChannel::Ohlcv => Variant::Ohlcv(Box::new(market::OHLCV {
+            header: MessageField::some(header),
+            timestamp: stamp(),
+            open: d(price),
+            high: d(price),
+            low: d(price),
+            close: d(price),
+            volume: d(Decimal::ONE),
+            ..Default::default()
+        })),
+        market::StreamChannel::Ticker | market::StreamChannel::Unspecified => {
+            Variant::Ticker(Box::new(market::Ticker {
+                header: MessageField::some(header),
+                symbol,
+                timestamp: stamp(),
+                last: d(price),
+                ..Default::default()
+            }))
+        }
     }
 }
 
@@ -713,6 +801,117 @@ mod tests {
         let times: Vec<i64> = rows.iter().map(|r| r.time_ms).collect();
         assert!(times.windows(2).all(|w| w[0] >= w[1]), "descending: {times:?}");
     }
+
+    /// A subscription must be answered in the variant it asked for. Answering
+    /// every channel with a ticker made an orderbook or trade strategy impossible
+    /// to exercise offline: it decodes the event it subscribed for and finds
+    /// something else entirely.
+    ///
+    /// Pinned through `market_event_key`, the single owner of "which variant is
+    /// this" (it is also what the `Coalesce` policy dedupes on, so a mismatch
+    /// would additionally let an orderbook evict a ticker).
+    #[test]
+    fn a_channel_is_answered_in_the_variant_it_asked_for() {
+        let cases = [
+            (market::StreamChannel::Ticker, "ticker:BTC/USDT"),
+            (market::StreamChannel::Orderbook, "book:BTC/USDT"),
+            (market::StreamChannel::Trades, "trade:BTC/USDT"),
+            // OHLCV carries no symbol of its own, so its key has an empty half.
+            (market::StreamChannel::Ohlcv, "ohlcv:"),
+        ];
+        for (channel, expected_key) in cases {
+            let event = synthetic_event(
+                channel,
+                "BTC/USDT".to_string(),
+                dec!(100),
+                common::EventHeader { sequence: 1, ..common::EventHeader::default() },
+            );
+            let wrapped = market::MarketDataEvent { event: Some(event), ..Default::default() };
+            assert_eq!(
+                crate::adapters::market_event_key(&wrapped),
+                expected_key,
+                "channel {channel:?} was answered with the wrong variant"
+            );
+        }
+    }
+
+    /// A book with no depth is not a book: a depth strategy reading
+    /// `bids.first()` must get a level, symmetric around the synthetic price.
+    #[test]
+    fn an_orderbook_event_carries_depth_around_the_synthetic_price() {
+        let event = synthetic_event(
+            market::StreamChannel::Orderbook,
+            "BTC/USDT".to_string(),
+            dec!(100),
+            common::EventHeader::default(),
+        );
+        let book = match &event {
+            market::market_data_event::Event::Orderbook(book) => Some(book.as_ref()),
+            _ => None,
+        }
+        .expect("ORDERBOOK must be answered with a book");
+        assert_eq!(book.symbol, "BTC/USDT");
+        assert_eq!(book.bids.len(), 1);
+        assert_eq!(book.asks.len(), 1);
+        let price_of = |level: &market::PriceLevel| {
+            longtrader_contract::ext::common_to_decimal(
+                level.price.as_option().expect("level price"),
+            )
+            .expect("the price decodes")
+        };
+        assert_eq!(price_of(&book.bids[0]), dec!(99.99), "the bid sits below the price");
+        assert_eq!(price_of(&book.asks[0]), dec!(100.01), "the ask sits above the price");
+    }
+
+    /// An unspecified channel is the mock's ticker feed: it must still answer
+    /// rather than go silent, and carry the synthetic price.
+    #[test]
+    fn an_unspecified_channel_falls_back_to_a_ticker() {
+        let event = synthetic_event(
+            market::StreamChannel::Unspecified,
+            "BTC/USDT".to_string(),
+            dec!(100),
+            common::EventHeader { sequence: 7, ..common::EventHeader::default() },
+        );
+        let ticker = match &event {
+            market::market_data_event::Event::Ticker(ticker) => Some(ticker.as_ref()),
+            _ => None,
+        }
+        .expect("an unspecified channel must fall back to a ticker");
+        assert_eq!(ticker.symbol, "BTC/USDT");
+        assert_eq!(ticker.header.as_option().expect("header").sequence, 7);
+        let last = ticker.last.as_option().expect("the synthetic price");
+        assert_eq!(
+            longtrader_contract::ext::common_to_decimal(last).expect("the price decodes"),
+            dec!(100)
+        );
+    }
+
+    /// The port's documented contract is "empty `symbols` = every contract the
+    /// venue reports funding for". Iterating the request list made the one
+    /// request that asks for the most return nothing, which a carry strategy
+    /// reads as "this venue has no perps".
+    #[tokio::test]
+    async fn an_empty_symbol_list_returns_every_funded_contract() {
+        let a = adapter();
+        a.set_funding_rate(dec!(0.0001)).await;
+        let every = a
+            .list_funding_rates(&common::ExchangeId::default(), &[])
+            .await
+            .expect("an empty list means every contract the venue prices");
+        let symbols: Vec<&str> = every.iter().map(|s| s.symbol.as_str()).collect();
+        assert_eq!(symbols, vec!["MOCK-USDT"], "the mock venue lists exactly one contract");
+
+        // A narrowed venue prices exactly that set, and an empty request follows
+        // it rather than reporting the venue's listed-but-unpriced symbols.
+        a.set_funding_symbols(vec!["BTC/USDT".to_string()]).await;
+        let narrowed = a
+            .list_funding_rates(&common::ExchangeId::default(), &[])
+            .await
+            .expect("the priced set");
+        let symbols: Vec<&str> = narrowed.iter().map(|s| s.symbol.as_str()).collect();
+        assert_eq!(symbols, vec!["BTC/USDT"]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -780,17 +979,42 @@ impl FundingRateSource for MockAdapter {
         exchange_id: &common::ExchangeId,
         symbols: &[String],
     ) -> Result<Vec<FundingRateSnapshot>, PortError> {
+        // The documented contract is "empty = every contract the venue reports
+        // funding for". Iterating the request list made the one request that asks
+        // for the *most* return nothing at all, which reads as "this venue has no
+        // perps" — the opposite of what an empty list means everywhere else.
+        let requested =
+            if symbols.is_empty() { self.funding_universe().await } else { symbols.to_vec() };
         let mut out = Vec::new();
-        for symbol in symbols {
+        for symbol in &requested {
             match self.fetch_funding_rate(exchange_id, symbol).await {
                 Ok(snapshot) => out.push(snapshot),
-                // An unlisted symbol is simply absent from the batch, matching
+                // An unpriced symbol is simply absent from the batch, matching
                 // the "empty = everything the venue reports" contract.
                 Err(PortError::NotFound(_)) => {}
                 Err(err) => return Err(err),
             }
         }
         Ok(out)
+    }
+}
+
+impl MockAdapter {
+    /// Every contract the mock venue reports funding for.
+    ///
+    /// A narrowed `funding_symbols` *is* that set — it is what the venue prices —
+    /// and otherwise it is every symbol the venue lists. Resolved by reading the
+    /// state and releasing the lock before the `list_symbols` round trip, which
+    /// takes the same lock.
+    async fn funding_universe(&self) -> Vec<String> {
+        let narrowed = self.state.lock().await.funding_symbols.clone();
+        if !narrowed.is_empty() {
+            return narrowed;
+        }
+        self.list_symbols(market::ListSymbolsRequest::default()).await.map_or_else(
+            |_| Vec::new(),
+            |listed| listed.symbols.into_iter().map(|s| s.name).collect(),
+        )
     }
 }
 

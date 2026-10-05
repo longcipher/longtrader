@@ -289,4 +289,225 @@ mod tests {
         }
         assert_eq!(seen, vec![1, 2]);
     }
+
+    // -----------------------------------------------------------------------
+    // Capacity clamping
+    // -----------------------------------------------------------------------
+
+    /// `mpsc::channel(0)` panics, so a zero capacity is clamped to one. The
+    /// observable effect is that exactly one item survives a burst.
+    #[tokio::test]
+    async fn a_zero_capacity_is_clamped_to_one() {
+        let mut rx = drive(
+            0,
+            OverflowPolicy::DropOldest,
+            |v| *v,
+            |tx| {
+                Box::pin(async move {
+                    for v in 0..6u64 {
+                        tx.send(v).await;
+                    }
+                })
+            },
+        )
+        .await;
+        let mut seen = Vec::new();
+        while let Some(v) = rx.recv().await {
+            seen.push(v);
+        }
+        assert_eq!(seen, vec![5], "cap 0 behaves as cap 1: only the newest survives");
+    }
+
+    /// Under `Block`, a clamped capacity still delivers every item — nothing is
+    /// dropped, it just takes longer.
+    #[tokio::test]
+    async fn block_policy_with_a_clamped_capacity_still_delivers_everything() {
+        let mut rx = drive(
+            0,
+            OverflowPolicy::Block,
+            |v| *v,
+            |tx| {
+                Box::pin(async move {
+                    for v in 0..4u64 {
+                        tx.send(v).await;
+                    }
+                })
+            },
+        )
+        .await;
+        let mut seen = Vec::new();
+        while let Some(v) = rx.recv().await {
+            seen.push(v);
+        }
+        assert_eq!(seen, vec![0, 1, 2, 3]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Coalesce capacity
+    // -----------------------------------------------------------------------
+
+    /// More distinct keys than `cap` must evict from the front, keeping the
+    /// newest `cap` keys in arrival order.
+    #[tokio::test]
+    async fn coalesce_drops_the_oldest_key_when_distinct_keys_exceed_cap() {
+        let mut rx = drive(
+            2,
+            OverflowPolicy::Coalesce,
+            |item: &(char, u32)| item.0,
+            |tx| {
+                Box::pin(async move {
+                    for &(k, v) in &[('a', 1), ('b', 2), ('c', 3), ('d', 4)] {
+                        tx.send((k, v)).await;
+                    }
+                })
+            },
+        )
+        .await;
+        let mut seen = Vec::new();
+        while let Some(v) = rx.recv().await {
+            seen.push(v);
+        }
+        assert_eq!(seen, vec![('c', 3), ('d', 4)], "the two newest keys survive");
+    }
+
+    /// A repeated key never consumes extra capacity: refreshing an existing slot
+    /// replaces the payload in place, so a busy symbol cannot evict others.
+    #[tokio::test]
+    async fn coalesce_refreshing_a_key_does_not_consume_capacity() {
+        let mut rx = drive(
+            2,
+            OverflowPolicy::Coalesce,
+            |item: &(char, u32)| item.0,
+            |tx| {
+                Box::pin(async move {
+                    for &(k, v) in &[('a', 1), ('b', 1), ('a', 2), ('a', 3), ('a', 4)] {
+                        tx.send((k, v)).await;
+                    }
+                })
+            },
+        )
+        .await;
+        let mut seen = Vec::new();
+        while let Some(v) = rx.recv().await {
+            seen.push(v);
+        }
+        assert_eq!(seen, vec![('a', 4), ('b', 1)], "key 'a' was refreshed, not duplicated");
+    }
+
+    /// With a single key the coalesce stream is exactly "the latest value",
+    /// which is the orderbook contract.
+    #[tokio::test]
+    async fn coalesce_on_one_key_keeps_only_the_latest() {
+        let mut rx = drive(
+            8,
+            OverflowPolicy::Coalesce,
+            |item: &(char, u32)| item.0,
+            |tx| {
+                Box::pin(async move {
+                    for v in 1..=20u32 {
+                        tx.send(('x', v)).await;
+                    }
+                })
+            },
+        )
+        .await;
+        let mut seen = Vec::new();
+        while let Some(v) = rx.recv().await {
+            seen.push(v);
+        }
+        assert_eq!(seen, vec![('x', 20)]);
+    }
+
+    /// Under `DropOldest` the key function is irrelevant: every item occupies a
+    /// slot whether or not the key repeats.
+    #[tokio::test]
+    async fn drop_oldest_keeps_every_item_even_when_keys_repeat() {
+        let mut rx = drive(
+            3,
+            OverflowPolicy::DropOldest,
+            |item: &(char, u32)| item.0,
+            |tx| {
+                Box::pin(async move {
+                    for v in 1..=10u32 {
+                        tx.send(('x', v)).await;
+                    }
+                })
+            },
+        )
+        .await;
+        let mut seen = Vec::new();
+        while let Some(v) = rx.recv().await {
+            seen.push(v);
+        }
+        assert_eq!(
+            seen,
+            vec![('x', 8), ('x', 9), ('x', 10)],
+            "keys do not dedupe under DropOldest"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Lifecycle
+    // -----------------------------------------------------------------------
+
+    /// `is_closed` tracks the downstream receiver: false while a consumer is
+    /// attached, true once it drops.
+    #[tokio::test]
+    async fn is_closed_follows_the_downstream_receiver() {
+        let (tx, rx) = policy_channel::<u64, u64>(2, OverflowPolicy::Block, |v| *v);
+        assert!(!tx.is_closed(), "a live receiver is not closed");
+        drop(rx);
+        // The forward task observes the close asynchronously.
+        for _ in 0..100 {
+            if tx.is_closed() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(tx.is_closed(), "dropping the receiver must close the sender");
+    }
+
+    /// Closing before anything is sent still terminates the stream.
+    #[tokio::test]
+    async fn closing_an_empty_pipe_terminates_the_stream() {
+        let (tx, mut rx) = policy_channel::<u64, u64>(2, OverflowPolicy::DropOldest, |v| *v);
+        tx.close();
+        // The receiver only observes end-of-stream once the shared `PipeState`
+        // is gone, i.e. after every `PolicySender` clone is dropped.
+        drop(tx);
+        let idle = std::time::Duration::from_secs(5);
+        let closed = tokio::time::timeout(idle, rx.recv()).await;
+        assert!(matches!(closed, Ok(None)), "close with no items yields an empty stream");
+    }
+
+    /// A clone shares the same pipe, so closing through one clone closes both.
+    #[tokio::test]
+    async fn clones_share_one_pipe() {
+        let (tx, mut rx) = policy_channel::<u64, u64>(4, OverflowPolicy::DropOldest, |v| *v);
+        let other = tx.clone();
+        other.send(1).await;
+        other.send(2).await;
+        tx.close();
+        // The downstream sender lives in the shared `PipeState`, so the receiver
+        // only sees end-of-stream once *every* `PolicySender` is gone.
+        drop(tx);
+        drop(other);
+        let mut seen = Vec::new();
+        while let Some(v) = rx.recv().await {
+            seen.push(v);
+        }
+        assert_eq!(seen, vec![1, 2], "items sent through either clone arrive in order");
+    }
+
+    /// Close is idempotent: calling it twice must not panic or hang.
+    #[tokio::test]
+    async fn closing_twice_is_harmless() {
+        let (tx, mut rx) = policy_channel::<u64, u64>(2, OverflowPolicy::Block, |v| *v);
+        tx.close();
+        tx.close();
+        drop(tx);
+        let idle = std::time::Duration::from_secs(5);
+        let closed = tokio::time::timeout(idle, rx.recv()).await;
+        assert!(matches!(closed, Ok(None)), "a repeated close must still terminate");
+    }
 }

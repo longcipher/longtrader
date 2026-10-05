@@ -74,6 +74,15 @@ s.stop();
 - `OverflowPolicy` governs event-queue behavior under slow consumers
   (`DropOldest` preserves newest, `Coalesce` last-writer-wins, `Block`
   applies backpressure); sequence gaps require snapshot resync/reconcile.
+- `common.v1.Decimal` is one field: the number in base 10. There is no numeric
+  twin beside it, so there is no precedence to get wrong and no silent zero when
+  a producer picks the other form. `toDecimal` writes it and validates the
+  grammar the message documents; `decimalText` reads it back exactly and
+  `decimalNumber` reads it as an f64. **Prefer `decimalText` for anything that
+  has to stay exact**: the contract carries a 96-bit coefficient over 28 decimal
+  places, which a `number` cannot hold, and a `number` *input* is already
+  rounded before the SDK sees it. A value too wide or too deep for a decimal is
+  rejected, never truncated.
 
 ## License
 

@@ -1,8 +1,8 @@
 # hedge_grid
 
-Runs a grid on the primary venue (limit buys below / sells above the mid) and, on
-each detected fill imbalance (resting bid/ask count mismatch), sends an opposite
-market hedge order on the hedge venue to keep net delta ~zero.
+Runs a grid on the primary venue (limit buys below / sells above the mid) and, for
+every grid level that **leaves the resting order book**, sends an opposite market
+hedge order on the hedge venue to keep net delta ~zero.
 
 ## Parameters
 
@@ -44,5 +44,9 @@ qty_per_level = "0.001"
 
 - Hedge is a market order → slippage.
 - Hedge size equals `qty_per_level` regardless of actual fill size, so net delta is approximate.
-- Fill detection is by bid/ask count imbalance (not real size).
+- Fill detection is "a level this grid placed is no longer resting", which cannot
+  tell a fill from a venue-side cancel; a venue cancel of the whole ladder hedges
+  the entire grid. It is never triggered by the ladder's own bid/ask split.
+- A ticker `last` that is zero or negative is ignored (no orders are placed).
+- A rejected grid leg fails the cycle; the next poll re-seeds whatever is missing.
 - Requires two live venues (the mock stubs only one).

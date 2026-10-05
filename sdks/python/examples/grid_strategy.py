@@ -35,7 +35,7 @@ from pathlib import Path
 # Run without installing: put sdks/python on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from longtrader_sdk import Session  # noqa: E402
+from longtrader_sdk import Session, from_decimal  # noqa: E402
 from longtrader_sdk.proto.longtrader.common.v1 import types_pb2  # noqa: E402
 from longtrader_sdk.proto.longtrader.worker.v1 import worker_pb2  # noqa: E402
 
@@ -51,18 +51,20 @@ def ulid_like_id() -> str:
 
 
 def decimal_to_float(value: types_pb2.Decimal) -> float | None:
-    """Read a ``common.v1.Decimal`` into a float.
+    """Read a ``common.v1.Decimal`` into a float, or None when it holds no price.
 
-    The contract carries two representations and a writer populates only one:
-    the hot-path ``unscaled``/``scale`` pair, or the human-readable ``raw_str``
-    fallback. A reader must accept both, or it silently sees zero whenever the
-    producer chose the other form -- which is what the mock venue does.
+    The contract's decimal is one base-10 string, so there is nothing to
+    reconcile before reading it: ``from_decimal`` holds the payload to the
+    grammar the message documents and hands it to ``decimal.Decimal``, which is
+    exact. A payload that is blank or out of grammar is reported as "no price"
+    rather than as 0 -- presence lives on the containing field, so a writer that
+    sent nothing has not sent a price of zero, and reading it as one would price
+    the grid at nothing.
     """
-    if value.raw_str:
-        return float(value.raw_str)
-    if value.unscaled == 0:
-        return 0.0
-    return value.unscaled / (10**value.scale)
+    try:
+        return float(from_decimal(value))
+    except ValueError:
+        return None
 
 
 def fetch_mid(session: Session, symbol: str) -> float:
@@ -70,10 +72,10 @@ def fetch_mid(session: Session, symbol: str) -> float:
     ticker = session.fetch_ticker(symbol)
     bid = decimal_to_float(ticker.bid)
     ask = decimal_to_float(ticker.ask)
-    if bid is not None and ask is not None:
+    if bid is not None and ask is not None and bid > 0 and ask > 0:
         return (bid + ask) / 2.0
     last = decimal_to_float(ticker.last)
-    if last is not None:
+    if last is not None and last > 0:
         return last
     raise RuntimeError(f"ticker for {symbol} has no usable price")
 

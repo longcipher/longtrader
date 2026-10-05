@@ -8,8 +8,11 @@ export {
   MARKET_SERVICE,
   TERMINAL_STATES,
   SYNC_IN_PROGRESS,
+  toDecimal,
+  decimalText,
+  decimalNumber,
 } from "./session.js";
-export type { SessionState, OrderSpec } from "./session.js";
+export type { SessionState, OrderSpec, DecimalLike } from "./session.js";
 export {
   OverflowPolicy,
   TradingPort,

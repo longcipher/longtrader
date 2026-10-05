@@ -92,6 +92,7 @@ import {
   DecimalSchema,
   ExchangeIdSchema,
   PaginationSchema,
+  type Decimal,
 } from "./gen/longtrader/common/v1/types_pb.js";
 
 export const WORKER_SERVICE = "longtrader.worker.v1.WorkerSessionService";
@@ -193,22 +194,218 @@ async function* iterEvents<S extends DescMessage>(
   }
 }
 
-/** Coerce a decimal-ish value into the contract's `{unscaled, scale, rawStr}`. */
-function toDecimal(
-  value: bigint | number | string,
+/**
+ * A decimal-ish input the SDK accepts.
+ *
+ * `string` and `bigint` are exact. `number` is an f64, so its digits are
+ * *already rounded before the SDK ever sees the value*: the SDK renders it as
+ * the shortest decimal that round-trips to it, which invents and drops nothing,
+ * but it cannot recover digits the f64 already lost. Pass a `string` when a
+ * price has to be exact -- over a 96-bit coefficient and 28 decimal places it
+ * usually has to be.
+ */
+export type DecimalLike = bigint | number | string;
+
+/**
+ * Fractional digits the contract's decimal keeps. A 29th would be accepted by a
+ * rounding parser and silently altered, so the grammar stops at the ceiling.
+ */
+const DECIMAL_MAX_SCALE = 28;
+
+/**
+ * Widest coefficient the contract's decimal holds: a 96-bit unsigned integer,
+ * exactly `rust_decimal`'s `Decimal::MAX`.
+ */
+const DECIMAL_MAX_MANTISSA = 79228162514264337593543950335n;
+
+/**
+ * Build the contract `Decimal`, whose one field is the number in base 10.
+ *
+ * There is deliberately no numeric companion beside it: a second representation
+ * is what turned "which one is authoritative?" into a question every reader had
+ * to answer, and it is why the retired int64 mantissa had to under-power the
+ * host decimal's own 96-bit coefficient -- anything wider had to fall back to a
+ * string anyway.
+ *
+ * The payload is validated against the grammar the message documents, so every
+ * value rejected here is one the host would reject too, and a bad literal
+ * surfaces here instead of as a rejected RPC.
+ */
+export function toDecimal(
+  value: DecimalLike,
 ): MessageShape<typeof DecimalSchema> {
-  const text = typeof value === "string" ? value : value.toString();
-  if (!/^-?\d+(\.\d+)?$/.test(text)) {
-    throw new Error(`cannot interpret ${String(value)} as a decimal`);
+  return create(DecimalSchema, { value: renderDecimalText(value) });
+}
+
+/**
+ * The payload of a contract `Decimal`, exactly as it arrived.
+ *
+ * This is the only exact view of a contract decimal in this SDK, and it is what
+ * to use whenever the value must not lose a digit: the contract carries a 96-bit
+ * coefficient over 28 decimal places, which an f64 cannot hold, so the payload
+ * text is the value. A blank or out-of-grammar payload throws rather than
+ * answering 0 -- presence lives on the containing field, so a writer that
+ * populated nothing has not sent a price of zero.
+ */
+export function decimalText(value: Decimal | undefined): string {
+  if (value === undefined) {
+    throw new Error(
+      "decimal is absent: check the containing field's presence first",
+    );
   }
-  const negative = text.startsWith("-");
-  const [intPart, fracPart = ""] = (negative ? text.slice(1) : text).split(".");
-  const unscaled = BigInt(`${intPart}${fracPart}`) * (negative ? -1n : 1n);
-  return create(DecimalSchema, {
-    unscaled,
-    scale: fracPart.length,
-    rawStr: text,
-  });
+  validateDecimalText(value.value);
+  return value.value;
+}
+
+/**
+ * The payload of a contract `Decimal` as a JS number.
+ *
+ * Convenience arithmetic only, and correctly rounded rather than exact: a
+ * decimal the contract can carry does not always survive the f64. Never compare,
+ * accumulate or deduplicate prices through this -- use {@link decimalText}, which
+ * keeps every digit.
+ */
+export function decimalNumber(value: Decimal | undefined): number {
+  return Number(decimalText(value));
+}
+
+/**
+ * The payload an input encodes to, validated.
+ *
+ * A string is already the wire form, so it is carried verbatim: an exponent or a
+ * digit separator in it is a typo worth reporting, not something to quietly
+ * re-render as a different number, and trailing zeros are part of the value --
+ * the host's "1.100" and "1.1" are different decimals. A bigint is exact. A
+ * number is an f64 and is rendered as described on {@link renderDouble}.
+ */
+function renderDecimalText(value: DecimalLike): string {
+  const text =
+    typeof value === "string"
+      ? value
+      : typeof value === "bigint"
+        ? value.toString()
+        : renderDouble(value);
+  validateDecimalText(text);
+  return text;
+}
+
+/**
+ * Render an f64 as the base-10 payload the contract carries.
+ *
+ * `String(n)` is the shortest decimal that round-trips to `n`, which is what
+ * makes this faithful rather than lossy; exponent notation is then expanded
+ * positionally, because `String` switches to it outside [1e-7, 1e21) -- exactly
+ * where a satoshi-denominated price lives, so `1e-7` must become `0.0000001`
+ * rather than the `1e-7` the grammar forbids. What the f64 already lost is not
+ * recoverable here: that is what {@link DecimalLike} documents.
+ */
+function renderDouble(value: number): string {
+  if (!Number.isFinite(value)) {
+    throw new Error(`decimal must be finite, got ${String(value)}`);
+  }
+  return expandExponent(String(value));
+}
+
+/** Rewrite `1e-7` as `0.0000001`, leaving `123.456` alone. */
+function expandExponent(text: string): string {
+  const sign = text.startsWith("-") ? "-" : "";
+  // The exponent is located in the sign-stripped body, so its index cannot
+  // drift by the sign the leading slice removed.
+  const body = text.slice(sign.length);
+  const at = body.indexOf("e");
+  if (at < 0) return text;
+  const parts = body.slice(0, at).split(".");
+  const whole = parts[0] ?? "";
+  const fraction = parts[1] ?? "";
+  const exponent = Number(body.slice(at + 1));
+  const digits = whole + fraction;
+  const point = whole.length + exponent;
+  if (point <= 0) return `${sign}0.${"0".repeat(-point)}${digits}`;
+  if (point >= digits.length) {
+    return `${sign}${digits}${"0".repeat(point - digits.length)}`;
+  }
+  return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
+}
+
+/** Throw unless `text` is a payload the host would accept. */
+function validateDecimalText(text: string): void {
+  // Blank is its own case: it is the shape a message nobody populated has, so
+  // it says "the writer populated nothing" rather than "the payload was garbage".
+  if (text.trim() === "") {
+    throw new Error(
+      `decimal payload ${JSON.stringify(text)} is empty: a value is carried by ` +
+        "the containing field's presence",
+    );
+  }
+  // Named before the digit checks so the diagnosis points at the actual
+  // surprise rather than at "expected only digits".
+  if (text.includes("_")) {
+    throw decimalGrammarError(text, "digit separators are not accepted");
+  }
+  if (/[eE]/.test(text)) {
+    throw decimalGrammarError(text, "exponents are not accepted");
+  }
+  if (text.startsWith("+")) {
+    throw decimalGrammarError(text, "a leading `+` is not accepted");
+  }
+
+  const body = text.startsWith("-") ? text.slice(1) : text;
+  const point = body.indexOf(".");
+  const whole = point < 0 ? body : body.slice(0, point);
+  const fraction = point < 0 ? "" : body.slice(point + 1);
+  if (whole === "") {
+    throw decimalGrammarError(
+      text,
+      "expected at least one digit before the decimal point",
+    );
+  }
+  if (!isDigits(whole)) {
+    throw decimalGrammarError(
+      text,
+      "expected only digits before the decimal point",
+    );
+  }
+  if (point >= 0) {
+    if (fraction === "") {
+      throw decimalGrammarError(
+        text,
+        "expected at least one digit after the decimal point",
+      );
+    }
+    if (!isDigits(fraction)) {
+      throw decimalGrammarError(
+        text,
+        "expected only digits after the decimal point",
+      );
+    }
+    if (fraction.length > DECIMAL_MAX_SCALE) {
+      throw decimalGrammarError(
+        text,
+        "more fractional digits than a decimal can hold",
+      );
+    }
+  }
+
+  // Dropping the point leaves the coefficient, which has to fit the 96 bits the
+  // contract's decimal holds. This is the one check a grammar cannot make,
+  // because "79228162514264337593543950336" looks like any other integer.
+  if (BigInt(whole + fraction) > DECIMAL_MAX_MANTISSA) {
+    throw new Error(
+      `decimal ${JSON.stringify(text)} is out of range for a decimal: the ` +
+        "mantissa needs more than the 96 bits a decimal holds",
+    );
+  }
+}
+
+function decimalGrammarError(text: string, reason: string): Error {
+  return new Error(
+    `decimal ${JSON.stringify(text)} is not a base-10 decimal: ${reason}`,
+  );
+}
+
+/** ASCII `0`-`9` only: `\d` and `\w` would also accept other Unicode digits. */
+function isDigits(text: string): boolean {
+  return /^[0-9]+$/.test(text);
 }
 
 /** Build the contract `ExchangeId`; empty leaves the host default unset. */
@@ -272,8 +469,8 @@ export class ConnectError extends Error {
 /** Options for {@link Session.createOrder} and friends. */
 export interface OrderSpec {
   symbol: string;
-  amount: bigint | number | string;
-  price?: bigint | number | string;
+  amount: DecimalLike;
+  price?: DecimalLike;
   side?: "BUY" | "SELL";
   orderType?: "LIMIT" | "MARKET" | "STOP" | "STOP_LIMIT";
   timeInForce?: "GTC" | "IOC" | "FOK" | "POST_ONLY";
@@ -759,8 +956,8 @@ export class Session {
   async modifyPosition(
     positionId: string,
     opts: {
-      takeProfit?: bigint | number | string;
-      stopLoss?: bigint | number | string;
+      takeProfit?: DecimalLike;
+      stopLoss?: DecimalLike;
     },
   ) {
     const req = create(ModifyPositionRequestSchema, {

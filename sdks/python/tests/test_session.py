@@ -65,39 +65,174 @@ def test_preinstalled_longtrader_package_wins(monkeypatch):
     assert finder.find_spec("longtrader") is None
 
 
+def _wire_decimal(text: str):
+    """A ``common.v1.Decimal`` carrying ``text`` verbatim, as a producer sent it."""
+    return pb_common().Decimal(value=text)
+
+
 class TestDecimals:
-    def test_decimal_populates_all_three_fields(self):
-        d = sdk._to_decimal(Decimal("1.25"))
-        assert d.unscaled == 125
-        assert d.scale == 2
-        assert d.raw_str == "1.25"
+    """The contract's decimal is one base-10 string, and only one.
+
+    Every accessor here is about keeping that true: one field out, the documented
+    grammar in, a payload nobody populated read as an error rather than as a zero,
+    and no comparison that mistakes two spellings of one number for two numbers.
+    """
+
+    def test_encodes_only_the_base_10_value(self):
+        assert sdk.to_decimal(Decimal("1.25")).value == "1.25"
+
+    def test_the_message_has_exactly_one_field(self):
+        """There is no numeric companion left for a reader to prefer."""
+        assert set(pb_common().Decimal.DESCRIPTOR.fields_by_name) == {"value"}
+
+    def test_wire_carries_one_field_and_nothing_else(self):
+        # 0a 04 "1.25": field 1, length-delimited. A Decimal has one field, so
+        # the encoding has one tag and there is no second representation on it.
+        assert sdk.to_decimal(Decimal("1.25")).SerializeToString() == b"\x0a\x041.25"
 
     def test_float_avoids_binary_representation(self):
-        d = sdk._to_decimal(0.1)
-        assert d.raw_str == "0.1"
-        assert d.unscaled == 1
-        assert d.scale == 1
+        assert sdk.to_decimal(0.1).value == "0.1"
 
-    def test_string_input(self):
-        d = sdk._to_decimal("90000")
-        assert (d.unscaled, d.scale) == (90000, 0)
+    def test_float_reports_the_shortest_decimal_that_round_trips(self):
+        """No digit is invented; what the f64 already lost is not recovered."""
+        assert sdk.to_decimal(0.1 + 0.2).value == "0.30000000000000004"
+
+    def test_float_expands_exponent_notation(self):
+        """`repr` switches to exponents exactly where a satoshi price lives."""
+        assert sdk.to_decimal(1e-7).value == "0.0000001"
+        assert sdk.to_decimal(1e21).value == "1000000000000000000000"
+
+    def test_string_input_is_carried_verbatim(self):
+        assert sdk.to_decimal("90000").value == "90000"
+        assert sdk.to_decimal("-0.0025").value == "-0.0025"
+
+    def test_int_input(self):
+        assert sdk.to_decimal(95000).value == "95000"
 
     def test_negative(self):
-        d = sdk._to_decimal(Decimal("-0.5"))
-        assert d.unscaled == -5
-        assert d.scale == 1
+        assert sdk.to_decimal(Decimal("-0.5")).value == "-0.5"
 
     def test_zero(self):
-        d = sdk._to_decimal(0)
-        assert d.unscaled == 0
+        assert sdk.to_decimal(0).value == "0"
+
+    def test_trailing_zeros_are_part_of_the_value(self):
+        """The host's "1.100" and "1.1" are different decimals."""
+        padded = sdk.to_decimal(Decimal("1.100"))
+        bare = sdk.to_decimal(Decimal("1.1"))
+        assert padded.value == "1.100"
+        assert padded.value != bare.value
+
+    def test_decodes_the_payload_exactly(self):
+        """Construction is exact, so a 96-bit coefficient survives."""
+        d = sdk.from_decimal(_wire_decimal("7922816251426433759354395033.5"))
+        assert d == Decimal("7922816251426433759354395033.5")
+        assert str(d) == "7922816251426433759354395033.5"
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+    def test_blank_payload_is_never_read_as_zero(self, blank):
+        """A writer that populated nothing has not sent a price of zero."""
+        with pytest.raises(ValueError, match="empty"):
+            sdk.from_decimal(_wire_decimal(blank))
+
+    def test_absent_field_is_an_error(self):
+        with pytest.raises(ValueError, match="absent"):
+            sdk.from_decimal(None)
+
+    @pytest.mark.parametrize(
+        "spelling,canonical",
+        [
+            ("007", "7"),
+            ("00.5", "0.5"),
+            ("-0", "-0"),
+            ("1.500", "1.500"),
+        ],
+    )
+    def test_non_canonical_spelling_decodes_and_canonicalises(
+        self, spelling, canonical
+    ):
+        """A non-canonical spelling is legal input, not a different number."""
+        decoded = sdk.from_decimal(_wire_decimal(spelling))
+        assert sdk.to_decimal(decoded).value == canonical
+
+    def test_equality_must_not_be_byte_equality(self):
+        """Two spellings of one number are one number, however they are written."""
+        assert _wire_decimal("007").value != _wire_decimal("7").value
+        assert sdk.from_decimal(_wire_decimal("007")) == sdk.from_decimal(
+            _wire_decimal("7")
+        )
+
+    @pytest.mark.parametrize(
+        "text,reason",
+        [
+            ("abc", "only digits before the decimal point"),
+            ("1_000", "digit separators are not accepted"),
+            ("1e3", "exponents are not accepted"),
+            ("1E3", "exponents are not accepted"),
+            ("1.5e-3", "exponents are not accepted"),
+            ("1e", "exponents are not accepted"),
+            # `match` is a regex, so the literal `+` has to be escaped.
+            ("+7", r"a leading `\+` is not accepted"),
+            (".5", "at least one digit before the decimal point"),
+            ("1.", "at least one digit after the decimal point"),
+            ("-", "at least one digit before the decimal point"),
+            (".", "at least one digit before the decimal point"),
+            ("1.2.3", "only digits after the decimal point"),
+            ("1,25", "only digits before the decimal point"),
+            ("NaN", "only digits before the decimal point"),
+            ("Infinity", "only digits before the decimal point"),
+            ("0x10", "only digits before the decimal point"),
+            # Surrounding whitespace is not trimmed away: the contract defines
+            # no whitespace, and padding is a payload the host will reject.
+            (" 1", "only digits before the decimal point"),
+            ("1 ", "only digits before the decimal point"),
+            (" 12.50 ", "only digits before the decimal point"),
+            ("0." + "0" * 29, "more fractional digits than a decimal can hold"),
+        ],
+    )
+    def test_rejects_out_of_grammar_payloads(self, text, reason):
+        """A reader may not answer a payload the host would reject."""
+        with pytest.raises(ValueError, match=reason) as excinfo:
+            sdk.from_decimal(_wire_decimal(text))
+        assert text in str(excinfo.value), "the error must echo what arrived"
+
+    def test_the_writer_is_given_the_same_grammar(self):
+        """A bad literal surfaces here instead of as a rejected RPC."""
+        for text in ("1e3", "1_000", "+7", ".5", "1.", " 1", ""):
+            with pytest.raises(ValueError, match="decimal"):
+                sdk.to_decimal(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "79228162514264337593543950336",  # 2**96, one past the coefficient
+            "100000000000000000000000000000",
+            "-79228162514264337593543950336",
+            "7922816251426433759354395033.6",  # the point moves, the width does not
+            "12345678901234567890123456789012345",
+        ],
+    )
+    def test_rejects_wider_than_a_decimal(self, text):
+        with pytest.raises(ValueError, match="96 bits"):
+            sdk.to_decimal(text)
+
+    def test_accepts_the_widest_values_a_decimal_holds(self):
+        for text in (
+            "79228162514264337593543950335",
+            "7922816251426433759354395033.5",
+            "-79228162514264337593543950335",
+            "0." + "0" * 27 + "1",  # 28 fractional digits, the ceiling
+        ):
+            assert sdk.to_decimal(text).value == text
 
     def test_rejects_non_numeric(self):
         with pytest.raises(ValueError, match="decimal"):
-            sdk._to_decimal("not-a-number")
+            sdk.to_decimal(object())
 
     def test_rejects_non_finite(self):
         with pytest.raises(ValueError, match="finite"):
-            sdk._to_decimal(float("nan"))
+            sdk.to_decimal(float("nan"))
+        with pytest.raises(ValueError, match="finite"):
+            sdk.to_decimal(float("inf"))
 
 
 class TestEnums:
@@ -237,9 +372,8 @@ class TestRequestConstruction:
         decoded.ParseFromString(req.SerializeToString())
         assert decoded.session_id == "sess-123"
         assert decoded.order.client_order_id == "grid-1"
-        assert decoded.order.amount.unscaled == 1
-        assert decoded.order.amount.scale == 3
-        assert decoded.order.price.unscaled == 95000
+        assert decoded.order.amount.value == "0.001"
+        assert decoded.order.price.value == "95000"
         assert decoded.order.post_only is True
 
     def test_market_order_omits_price(self):

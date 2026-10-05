@@ -7,6 +7,8 @@
 use buffa::Message;
 use thiserror::Error;
 
+use crate::client_core::service_url;
+
 /// Transport-level error returned by [`unary`].
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -27,6 +29,10 @@ pub const CONNECT_PROTO_STREAM: &str = "application/connect+proto";
 
 /// Perform one Connect unary call: POST `base_url/{service}/{method}` with
 /// `application/proto` and an optional bearer token, then decode the response.
+///
+/// The URL is composed by the crate's shared `service_url` helper, which owns
+/// the trailing-slash and `://` invariants — the caller may pass a base exactly
+/// as it was configured.
 pub async fn unary<Q: Message, R: Message + Default>(
     http: &hpx::Client,
     base_url: &str,
@@ -35,7 +41,7 @@ pub async fn unary<Q: Message, R: Message + Default>(
     token: Option<&str>,
     req: Q,
 ) -> Result<R, TransportError> {
-    let url = format!("{}/{}/{}", base_url.trim_end_matches('/'), service, method);
+    let url = service_url(base_url, service, method);
     let body = req.encode_to_vec();
     let mut builder = http.post(&url).header("content-type", CONNECT_PROTO_UNARY).body(body);
     if let Some(token) = token.filter(|t| !t.is_empty()) {

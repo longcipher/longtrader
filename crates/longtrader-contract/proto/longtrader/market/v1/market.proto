@@ -111,7 +111,7 @@ message MarketDataEvent {
 // The single authority for timeframes across the contract: terminal, strategy
 // and backtest surfaces all reference this enum rather than redefining their
 // own. Non-time periods (tick / volume / range / renko) are aggregated locally
-// and mapped onto M1, so their numbers are reserved rather than assigned.
+// and mapped onto M1.
 enum Timeframe {
   TIMEFRAME_UNSPECIFIED = 0;
   TIMEFRAME_S100 = 9;
@@ -124,7 +124,6 @@ enum Timeframe {
   TIMEFRAME_H4 = 6;
   TIMEFRAME_D1 = 7;
   TIMEFRAME_W1 = 8;
-  reserved 11, 12, 13, 14;
 }
 
 // OHLCV candle. `timestamp_ms` is Unix milliseconds — the event-time convention
@@ -236,8 +235,10 @@ message FundingRate {
   int64 next_funding_time_ms = 3;
   // Absent when the venue does not report a mark price.
   optional common.v1.Decimal mark_price = 4;
-  // Hours between settlements; 0 when unknown.
-  uint32 funding_interval_hours = 5;
+  // Hours between settlements. Absent when the venue does not report an
+  // interval: presence carries that meaning, so a venue that genuinely settles
+  // every 0 hours is distinguishable from one that reports nothing.
+  optional uint32 funding_interval_hours = 5;
   // Absent when the venue does not report open interest.
   optional common.v1.Decimal open_interest = 6;
   // Absent when the venue does not report 24h volume.

@@ -163,7 +163,8 @@ func (o callOptions) exchangeId() *contract.ExchangeId {
 // OrderSpec is an ergonomic order submission: plain decimal strings in, one
 // order out. Amount and Price are decimal literals such as "0.001" or
 // "90000.25"; they are validated and encoded through contract.ParseDecimal,
-// which populates the contract's full dual decimal representation.
+// which rejects anything the contract's decimal grammar does not allow before
+// it reaches the wire.
 type OrderSpec struct {
 	// Symbol is the instrument, e.g. "BTC/USDT".
 	Symbol string

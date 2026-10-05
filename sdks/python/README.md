@@ -74,6 +74,14 @@ s.close()
 - `OverflowPolicy` governs event-queue behavior under slow consumers
   (`DROP_OLDEST` preserves newest, `COALESCE` last-writer-wins, `BLOCK`
   applies backpressure); sequence gaps require snapshot resync/reconcile.
+- `common.v1.Decimal` is one field: the number in base 10. There is no numeric
+  twin beside it, so there is no precedence to get wrong and no silent zero when
+  a producer picks the other form. `to_decimal` writes it and validates the
+  grammar the message documents; `from_decimal` reads it back into a
+  `decimal.Decimal`, which is exact — a 96-bit coefficient over 28 decimal
+  places survives it intact. A value too wide or too deep for a decimal is
+  rejected, never truncated, and a payload nobody populated is an error rather
+  than a zero.
 
 ## License
 

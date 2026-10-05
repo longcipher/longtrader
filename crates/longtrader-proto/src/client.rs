@@ -21,7 +21,6 @@ use thiserror::Error;
 use crate::{
     client_core::{
         SERVICE_MARKET, SERVICE_RUNTIME, SERVICE_STRATEGY, SERVICE_TRADING, service_url,
-        trim_base_url,
     },
     proto::longtrader::{
         account::v1 as account, common::v1 as common, market::v1 as umarket, ops::v1 as ops,
@@ -71,7 +70,9 @@ impl TerminalClient {
     }
 
     fn new_inner(base_url: &str, auth_token: Option<String>) -> Self {
-        let base_url = trim_base_url(base_url);
+        // The trailing-slash invariant lives in `service_url` / `transport::unary`,
+        // which every call site goes through, so the base is stored exactly as the
+        // caller passed it rather than pre-trimmed in a third place.
         let http = match hpx::Client::builder().http1_only().build() {
             Ok(client) => client,
             Err(e) => {
@@ -79,7 +80,7 @@ impl TerminalClient {
                 hpx::Client::new()
             }
         };
-        Self { base_url, auth_token, http }
+        Self { base_url: base_url.to_string(), auth_token, http }
     }
 
     fn url(&self, service: &str, method: &str) -> String {

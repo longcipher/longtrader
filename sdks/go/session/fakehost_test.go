@@ -225,9 +225,8 @@ func defaultHost(t *testing.T, overrides map[string]func(h *fakeHost, w http.Res
 		case "FetchTicker":
 			h.writeProto(w, &contract.FetchTickerResponse{Ticker: &contract.Ticker{
 				Symbol: "BTC/USDT",
-				// The mock venue fills only unscaled/scale.
-				Bid: contract.Decimal{Unscaled: 639999925, Scale: 4},
-				Ask: contract.Decimal{Unscaled: 640000075, Scale: 4},
+				Bid:    contract.Decimal{Value: "63999.9925"},
+				Ask:    contract.Decimal{Value: "64000.0075"},
 			}})
 		case "FetchOrderBook":
 			h.writeProto(w, &contract.FetchOrderBookResponse{Orderbook: &contract.OrderBook{Symbol: "BTC/USDT"}})

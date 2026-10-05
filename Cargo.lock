@@ -1797,6 +1797,7 @@ name = "longtrader-catalog"
 version = "0.2.0"
 dependencies = [
  "longtrader-contract",
+ "proptest",
 ]
 
 [[package]]
@@ -1809,6 +1810,7 @@ dependencies = [
  "futures-util",
  "longtrader-contract",
  "longtrader-proto",
+ "proptest",
  "rust_decimal",
  "serde_json",
  "tokio",
@@ -1843,6 +1845,7 @@ dependencies = [
  "hpx",
  "js-sys",
  "longtrader-contract",
+ "proptest",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -1870,6 +1873,7 @@ dependencies = [
  "hpx",
  "longtrader-contract",
  "longtrader-proto",
+ "proptest",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",

@@ -133,8 +133,6 @@ message StrategyStatusRequest {
 }
 
 message StrategyStatusResponse {
-  // 1 was briefly used and removed; never reuse.
-  reserved 1;
   SessionState state = 2;
   string strategy_id = 3;
   string name = 4;

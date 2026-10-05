@@ -17,7 +17,7 @@ Inherited from `CommonParams`: `exchange_id` (default `"mock"`), `label`
 | `poll_secs` | u64 | `30` | poll cadence (seconds) |
 | `boll_window` | usize | `21` | candles in the Bollinger window |
 | `boll_mult` | Decimal | `2` | Bollinger band multiplier (k) |
-| `grid_num` | u32 | `3` | buy/sell limit levels per side |
+| `grid_num` | u32 | `3` | buy/sell limit levels per side; must be ≤ `200` or startup fails naming the ceiling |
 | `qty` | Decimal | `0.001` | quantity per leg |
 | `profit_spread_pct` | Decimal | `0.0005` | reverse-leg spread as a fraction of price |
 
@@ -45,5 +45,6 @@ profit_spread_pct = "0.0005"
 ## Risk notes
 
 - Cancels **all** orders on the symbol every cycle, so only this ladder survives.
+- A refused ladder leg fails the cycle: the previous ladder is already cancelled, so the symbol is left bare or half-quoted until the next poll.
 - Bollinger bands need warmup and quotes appear only inside wide bands — may stay idle.
 - Grids accumulate inventory in one-sided trends; limit/market fills slip.

@@ -26,7 +26,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -271,44 +270,30 @@ func refreshGrid(ctx context.Context, sess *session.Session, opts options, liveI
 
 // fetchMid polls one ticker and computes a mid price, falling back to the last
 // trade and then to the close.
+//
+// A contract decimal is one base-10 string, so there is nothing to reconcile
+// before reading it: contract.Decimal.Float64 validates the payload and
+// reports a blank or out-of-grammar price as an error rather than answering 0.
+// Each source is tried in turn and one that does not answer is skipped, because
+// falling through to the next price is a decision -- while treating an
+// unreadable price as zero would silently price the grid at nothing.
 func fetchMid(ctx context.Context, sess *session.Session, symbol, exchangeID string) (float64, error) {
 	ticker, err := sess.FetchTicker(ctx, symbol, session.WithExchangeID(exchangeID))
 	if err != nil {
 		return 0, err
 	}
-	bid, bidOK := decimalToFloat(ticker.Bid)
-	ask, askOK := decimalToFloat(ticker.Ask)
-	if bidOK && askOK && bid > 0 && ask > 0 {
+	bid, bidErr := ticker.Bid.Float64()
+	ask, askErr := ticker.Ask.Float64()
+	if bidErr == nil && askErr == nil && bid > 0 && ask > 0 {
 		return (bid + ask) / 2, nil
 	}
-	if last, ok := decimalToFloat(ticker.Last); ok && last > 0 {
+	if last, err := ticker.Last.Float64(); err == nil && last > 0 {
 		return last, nil
 	}
-	if close, ok := decimalToFloat(ticker.Close); ok && close > 0 {
+	if close, err := ticker.Close.Float64(); err == nil && close > 0 {
 		return close, nil
 	}
-	return 0, errors.New("ticker has no usable price")
-}
-
-// decimalToFloat reads a contract decimal in *both* representations.
-//
-// The wire type carries two forms and a writer populates only one: the
-// unscaled/scale fast path, or the human-readable raw_str fallback. The mock
-// venue fills only the numeric pair, so a reader that consults raw_str alone
-// sees no price at all -- and one that consults the numeric pair alone cannot
-// read a 96-bit mantissa the host sent as text.
-func decimalToFloat(d contract.Decimal) (float64, bool) {
-	if d.RawStr != "" {
-		value, err := strconv.ParseFloat(d.RawStr, 64)
-		return value, err == nil
-	}
-	if d.Unscaled == 0 {
-		return 0, true
-	}
-	if d.Scale < 0 || d.Scale > 18 {
-		return 0, false
-	}
-	return float64(d.Unscaled) / math.Pow(10, float64(d.Scale)), true
+	return 0, fmt.Errorf("ticker for %s has no usable price: bid %v, ask %v", symbol, bidErr, askErr)
 }
 
 // formatPrice renders a price without trailing zeros, so the order message

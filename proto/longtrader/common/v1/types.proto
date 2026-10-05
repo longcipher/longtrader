@@ -12,12 +12,26 @@ package longtrader.common.v1;
 // Fallback: raw_str carries arbitrary precision (rust_decimal's mantissa is
 // 96-bit and does not always fit int64).
 //
-// Invariant: exactly one of {unscaled+scale, raw_str} is populated by writers;
-// readers MUST support both.
+// A decimal number in base 10, e.g. `-0.0025` or `1234567.891`.
+//
+// Exactly one representation, always: `value`. There is deliberately no numeric
+// fast path beside it. A second representation is what turned "which one is
+// authoritative?" into a question every reader had to answer, and it is why the
+// int64 mantissa had to under-power `rust_decimal`'s own 96-bit coefficient —
+// anything wider had to fall back to a string anyway.
+//
+// Presence lives on the *containing* field, never inside this message: an
+// `optional Decimal` that is absent reports no value, and one that is present
+// always carries a populated `value`. An empty payload is therefore a contract
+// violation, not a zero, and readers reject it rather than silently reporting 0.
+//
+// Grammar: an optional leading `-`, then digits, then optionally `.` and more
+// digits. No exponent, no digit separators, no surrounding whitespace, no
+// `+`. Precision is whatever `rust_decimal` holds — a 96-bit coefficient over 28
+// decimal places — so no value the contract can carry is rounded.
 message Decimal {
-  int64 unscaled = 1;
-  int32 scale = 2;
-  string raw_str = 3;
+  // The value in base 10. Never empty.
+  string value = 1;
 }
 
 // Identifies one registered exchange instance on a backend.

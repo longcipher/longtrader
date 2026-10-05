@@ -45,9 +45,8 @@ every PR against `main`; any incompatible change fails the build before it ships
 
 ### Can I run without a real exchange?
 
-Yes — use the **mock** venue (`exchange_id = "mock"`) with `MockAdapter`, or run
-a worker against `config.toml` with `api_endpoint` unset so the backend defaults
-to mock. No credentials required.
+Yes — use the **mock** venue (`exchange_id = "mock"`) with `MockAdapter`, or set
+`backend = "mock"` in `config.toml`. No credentials required.
 
 ### What is the session lifecycle?
 

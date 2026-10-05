@@ -104,21 +104,34 @@ watchdog → reconcile → loop { fetch mid, cancel stale rungs, batch place } �
 
 ## Decimal handling
 
-`common.v1.Decimal` is `{int64 unscaled, int32 scale, string raw_str}` and a
-writer must populate **all three**. Writing only `raw_str` leaves the numeric
-pair at zero, which every host decoder trusts, so the value silently arrives
-as `0`. Readers must accept either form, because producers pick one — the mock
-venue fills only `unscaled`/`scale`:
+`common.v1.Decimal` is one field: `string value`, the number in base 10. There
+is no numeric fast path beside it and no precedence rule, because a second
+representation is what made "which one is authoritative?" a question every
+reader had to answer.
 
 ```go
-d, err := contract.ParseDecimal("1.25") // unscaled=125 scale=2 raw_str="1.25"
-d, err := contract.ParseDecimal("0.001")
-v, err := contract.NewDecimal(639999925, 4).Float64() // 63999.9925
-v, err := contract.Decimal{RawStr: "64000.25"}.Float64()
+d, err := contract.ParseDecimal("1.25")          // d.Value == "1.25"
+d, err := contract.ParseDecimal("0.001")         // d.Value == "0.001"
+v, err := contract.Decimal{Value: "64000.25"}.Float64()
+r, err := contract.Decimal{Value: "1.100"}.Rat() // exact; Float64 rounds
 ```
 
-`ParseDecimal` errors on a non-finite, malformed, or int64-overflowing literal
-rather than wrapping the mantissa into a different number.
+`ParseDecimal` is the validated constructor and is strict on purpose: a blank
+payload, a digit separator (`1_000`), an exponent (`1e3`), a leading `+`, a
+bare `.5` or `1.`, surrounding whitespace, more than 28 fractional digits, and
+any value whose coefficient does not fit 96 bits are all errors — each one the
+host would reject too. The payload is carried **verbatim**, trailing zeros
+included, because the host's `1.100` and `1.1` are different decimals.
+
+Reading obeys the same rules: `Validate` reports why a payload is unusable, and
+`Float64`, `Rat` and `IsZero` all reject rather than answer `0`. That is what
+makes a writer that never populated a field visible instead of silent —
+presence lives on the containing field, so a blank payload is a contract
+violation and never a zero.
+
+`Rat` exists because the contract's range (a 96-bit coefficient over 28 decimal
+places) is exact in decimal and only rounded in binary. Use it where the number
+has to be exact and `Float64` where a rounded price is good enough.
 
 ## Lifecycle and the lease
 
