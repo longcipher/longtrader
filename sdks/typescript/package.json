@@ -50,13 +50,13 @@
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2",
-    "undici": "^7"
+    "undici": "^8"
   },
   "devDependencies": {
     "@bufbuild/protoc-gen-es": "^2",
-    "@types/node": "^22",
+    "@types/node": "^26",
     "prettier": "^3",
     "tsx": "^4",
-    "typescript": "^5"
+    "typescript": "^7"
   }
 }
