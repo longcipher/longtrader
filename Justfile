@@ -61,11 +61,11 @@ test-coverage:
 
 # Build every fuzz target without running it.
 fuzz-build:
-  cargo fuzz build --fuzz-dir fuzz
+  cargo fuzz build --fuzz-dir fuzz --target "$(rustc -vV | sed -n 's/^host: //p')"
 
 # Fuzz one target. Override the budget with `FUZZ_SECONDS=300 just fuzz envelope`.
 fuzz target:
-  cargo fuzz run --fuzz-dir fuzz {{target}} -- -max_total_time=${FUZZ_SECONDS:-60}
+  cargo fuzz run --fuzz-dir fuzz --target "$(rustc -vV | sed -n 's/^host: //p')" {{target}} -- -max_total_time=${FUZZ_SECONDS:-60}
 
 # Run every target briefly as a smoke test. This is the form CI should use; a long
 # fuzzing session is a local activity, not a gate.
@@ -74,9 +74,10 @@ fuzz target:
 fuzz-smoke: fuzz-build
   #!/usr/bin/env bash
   set -euo pipefail
+  fuzz_target="$(rustc -vV | sed -n 's/^host: //p')"
   for target in envelope decimal_codec; do
     echo "::group::fuzz $target"
-    cargo fuzz run --fuzz-dir fuzz "$target" -- -runs=20000 || true
+    cargo fuzz run --fuzz-dir fuzz "$target" --target "$fuzz_target" -- -runs=20000 || true
     echo "::endgroup::"
   done
 

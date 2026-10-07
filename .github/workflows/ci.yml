@@ -65,10 +65,10 @@ jobs:
         with:
           toolchain: nightly
           # cargo-fuzz rebuilds the standard library with sanitizer
-          # instrumentation, so the `rust-src` component is required; the musl
-          # target it selects needs to be installed too.
+          # instrumentation, so the `rust-src` component is required. The just
+          # recipes target the host triple (glibc on Linux) where Address
+          # Sanitizer works, rather than the musl target CI was selecting.
           components: rust-src
-          targets: x86_64-unknown-linux-musl
 
       - uses: arduino/setup-protoc@v3
         with:
