@@ -381,8 +381,9 @@ func TestCreateOrderRejectsUnparsableDecimal(t *testing.T) {
 		t.Fatal("expected an error for a malformed amount")
 	}
 	// An unrepresentable mantissa must error rather than wrap into a price in
-	// the wrong universe.
-	overflowing := "92233720368547758.08"
+	// the wrong universe. The contract's decimal holds a 96-bit coefficient, so
+	// a 29-digit mantissa (one past Decimal::MAX) is out of range.
+	overflowing := "79228162514264337593543950336"
 	if _, err := s.CreateOrder(context.Background(), OrderSpec{Symbol: "BTC/USDT", Amount: overflowing}); err == nil {
 		t.Fatal("expected an error for an overflowing amount")
 	}

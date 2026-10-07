@@ -16,7 +16,12 @@ import {
   type Message,
   type MessageShape,
 } from "@bufbuild/protobuf";
-import { fetch } from "undici";
+// Node 18+ and browsers expose a global `fetch`. Importing `undici` directly is
+// avoided: undici v8 constructs a CacheStorage at module load that calls
+// `util.markAsUncloneable`, which is absent on Node 20.20.2 and crashes the SDK
+// at import time. The platform fetch is identical for the raw-protobuf POSTs
+// this session makes.
+const fetch = globalThis.fetch;
 import {
   AttachSessionRequestSchema,
   AttachSessionResponseSchema,

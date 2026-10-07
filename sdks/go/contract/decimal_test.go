@@ -407,7 +407,7 @@ func TestDecimalRatIsExact(t *testing.T) {
 func TestDecimalValidateMatchesTheAccessors(t *testing.T) {
 	// A payload that Validate accepts is one every accessor can read, and one
 	// it rejects is one none of them will answer for.
-	for _, in := range []string{"0", "1.25", "-79228162514264337593543950335", "0." + strings.Repeat("0", 28) + "1"} {
+	for _, in := range []string{"0", "1.25", "-79228162514264337593543950335", "0." + strings.Repeat("0", 27) + "1"} {
 		d := Decimal{Value: in}
 		if err := d.Validate(); err != nil {
 			t.Errorf("Validate(%q) = %v, want nil", in, err)
