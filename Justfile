@@ -2,18 +2,18 @@
 default:
   @just --list
 
-# Format all code
+# Format all code: markdown, Cargo.toml ordering, rustfmt
 format:
   rumdl fmt .
   cargo sort -w -g
   cargo +nightly fmt --all
 
-# Auto-fix linting issues
+# Auto-fix what `format` cannot: markdown lint and clippy
 fix:
   rumdl check --fix .
   RUSTC_WRAPPER= cargo +nightly clippy --fix --all --allow-dirty
 
-# Run all lints
+# Run all lints (the CI gate; includes the buf contract lint)
 lint: proto-lint
   typos
   rumdl check .
@@ -32,12 +32,12 @@ test:
 mutation:
   cargo mutants
 
-# Run tests with coverage.
+# Run tests with coverage
 #
 # The generated protobuf code is excluded: `build.rs` emits ~29k lines of it into
 # the target dir, it is never exercised directly, and leaving it in swamps the
 # denominator until the real coverage number is unreadable. This needs
-# `cargo-tarpaulin >= 0.37` — an older vendored `llvm-profparser` cannot read the
+# `cargo-tarpaulin >= 0.37` - an older vendored `llvm-profparser` cannot read the
 # indexed-profile format the current toolchain's LLVM emits, and fails with
 # "consistency check for reading counts failed".
 # `--out Stdout` keeps the report in the terminal instead of writing a Cobertura
@@ -47,19 +47,7 @@ mutation:
 test-coverage:
   cargo tarpaulin --all-features --workspace --timeout 300 --exclude-files '*/out/*' --out Stdout
 
-# ---------------------------------------------------------------------------
-# Fuzzing
-#
-# Targets live in `fuzz/fuzz_targets/` and cover the two places where this
-# workspace parses bytes it did not produce: the Connect streaming envelope
-# decoder (`envelope`) and the contract decimal codec (`decimal_codec`), which
-# decodes the dual-representation numeric field carried by nearly every message.
-#
-# `fuzz/` is its own workspace (it needs sanitizers and a release profile), so
-# `cargo` must be invoked through `cargo fuzz` from the repository root.
-# ---------------------------------------------------------------------------
-
-# Build every fuzz target without running it.
+# Build every fuzz target without running it
 fuzz-build:
   cargo fuzz build --fuzz-dir fuzz --target "$(rustc -vV | sed -n 's/^host: //p')"
 
@@ -67,10 +55,7 @@ fuzz-build:
 fuzz target:
   cargo fuzz run --fuzz-dir fuzz --target "$(rustc -vV | sed -n 's/^host: //p')" {{target}} -- -max_total_time=${FUZZ_SECONDS:-60}
 
-# Run every target briefly as a smoke test. This is the form CI should use; a long
-# fuzzing session is a local activity, not a gate.
-#
-# fuzz-smoke: short bounded fuzz run over every target
+# Run every target briefly as a smoke test (this is the form CI uses)
 fuzz-smoke: fuzz-build
   #!/usr/bin/env bash
   set -euo pipefail
@@ -85,7 +70,7 @@ fuzz-smoke: fuzz-build
 build:
   cargo build --workspace
 
-# Check all targets compile
+# Check all targets compile (and that workspace inheritance is complete)
 check:
   cargo check --all-targets --all-features
   cargo workspace-inheritance-check
@@ -94,7 +79,7 @@ check:
 publish-check:
   cargo publish --workspace --dry-run --allow-dirty --registry crates-io
 
-# Publish all Rust crates to crates.io in dependency order.
+# Publish all Rust crates to crates.io in dependency order
 #
 # We publish per-crate (not `cargo publish --workspace`) because path-dependency
 # siblings must already be resolvable from the registry when the next crate is
@@ -126,11 +111,24 @@ publish-ts: sdk-generate
 # Publish every language package (Rust -> PyPI -> npm)
 publish-all: publish-rs publish-py publish-ts
 
-# Check for Chinese characters
-check-cn:
-  rg --line-number --column "\p{Han}"
+# Publish every language package (irreversible; prompts only on an interactive terminal)
+publish:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  if [ -t 0 ]; then
+    read -r -p "Type 'publish' to continue: " confirm
+    if [ "$confirm" != "publish" ]; then
+      echo "aborted"
+      exit 1
+    fi
+  fi
+  just publish-all
 
-# Rust gate, mirroring the `rust` CI job: lint, test and build the workspace.
+# Check for Chinese characters (bilingual READMEs and the CJK width fixtures are excluded)
+check-cn:
+  ! rg --line-number --column "\p{Han}" --glob '!**/README.zh.md' --glob '!README.md' --glob '!bin/longtrader-cli/src/output.rs'
+
+# Full CI check (mirrors the `rust` CI job)
 #
 # `lint` folds in `proto-lint`, so this needs `buf` on PATH (the `rust` CI job
 # installs it). The SDK gates live in their own recipes because each needs a
@@ -140,8 +138,10 @@ check-cn:
 # already run with the right toolchain.
 ci: lint test build
 
-# Full local gate: the Rust checks plus every SDK. Needs the Go, Python and
-# Node toolchains and generated stubs (`just sdk-generate`) on PATH.
+# Full local gate: Rust checks plus every SDK lint and test
+#
+# Needs the Go, Python and Node toolchains and generated stubs
+# (`just sdk-generate`) on PATH.
 ci-all: ci sdk-lint sdk-test
 
 # ============================================================
@@ -157,16 +157,53 @@ setup:
   cargo install cargo-mutants
   cargo install cargo-shear
   cargo install cargo-sort
+  cargo install cargo-workspace-inheritance-check
   cargo install typos-cli
   cargo install rumdl
+  cargo install cargo-tarpaulin
+  cargo install cargo-audit
+  cargo install cargo-outdated
+  cargo install cargo-nextest
+  rustup component add miri --toolchain nightly
 
 # Generate documentation for the workspace
 docs:
   cargo doc --no-deps --open
 
-# ---------------------------------------------------------------------------
+# Run security audit
+audit:
+  cargo audit
+
+# Check for outdated dependencies
+outdated:
+  cargo outdated
+
+# Run clippy with the cargo lint group on top of the workspace lints
+clippy-all:
+  RUSTC_WRAPPER= cargo +nightly clippy --all --all-targets --all-features -- -W clippy::cargo
+
+# Run tests with nextest
+test-nextest:
+  cargo nextest run --all-features
+
+# Run miri on unsafe code
+miri:
+  cargo +nightly miri test --all-features
+
+# Check for unused dependencies
+unused-deps:
+  cargo shear --check
+
+# Update all dependencies
+update-deps:
+  cargo update
+
+# Full check (lint + test + build + audit)
+full-check: lint test build audit
+
+# ============================================================
 # Proto contract & SDK toolchain (buf-managed; see proto/buf.yaml)
-# ---------------------------------------------------------------------------
+# ============================================================
 
 # Copy the canonical proto/ tree into the longtrader-contract vendored
 # fallback (published crates compile from that copy).
@@ -177,13 +214,12 @@ proto-sync:
 proto-lint:
   cd proto && buf lint
 
-# Detect wire-breaking contract changes against a git ref.
+# Detect wire-breaking contract changes against a git ref
 #
 # `ref` defaults to the local `main`. CI passes the PR base as
 # `refs/remotes/origin/<base>`; a release job can pass a published tag
 # (e.g. `refs/tags/v0.2.0`) to gate the release. A bare `just proto-breaking`
 # is the local pre-push check.
-#
 # The `--against` URL is resolved relative to the recipe's working directory,
 # which is `proto/` after the `cd`. A bare `.git#...` therefore points at
 # `proto/.git`, which does not exist, and the gate fails with "does not appear
@@ -192,9 +228,12 @@ proto-lint:
 proto-breaking ref='refs/heads/main':
   cd proto && buf breaking --against "../.git#ref={{ref}},subdir=proto"
 
-# Generate SDK stubs locally (Python -> sdks/python, TypeScript ->
-# sdks/typescript) without network buf plugins; unavailable toolchains are
-# skipped with a notice.
+# Generate SDK stubs locally (offline-safe, no network buf plugins)
+#
+# Generates TypeScript stubs (needs Node deps with @bufbuild/protoc-gen-es
+# installed under sdks/typescript) and Python stubs (needs python3 +
+# grpcio-tools). Steps whose toolchain is unavailable are skipped with a
+# notice; the script never fails the whole run because of one missing toolchain.
 sdk-generate:
   bash scripts/gen-proto.sh
 
@@ -206,15 +245,19 @@ sdk-test-py:
 sdk-test-ts:
   cd sdks/typescript && npm test
 
-# Type-check the TypeScript SDK and vet the Go SDK without emitting
+# Python SDK format + lint check (ruff), mirroring the `python` CI job
+sdk-lint-py:
+  ruff format --check sdks/python
+  ruff check --select E,F sdks/python
+
+# TypeScript SDK format check (prettier) plus type-check
 #
-# Both SDKs are checked in place: the Go SDK is hand-written and stdlib-only,
-# while the TypeScript SDK imports generated stubs from src/gen (gitignored).
-# Type-checking without those stubs yields dozens of misleading "cannot find
-# module/name" errors, so assert the prerequisites first and fail with an
-# actionable message instead.
-sdk-lint: sdk-lint-go
+# The generated stubs under `src/gen/` are gitignored, so the dependency check
+# runs first and fails with an actionable message instead of a wall of
+# "cannot find module" errors from `tsc`.
+sdk-lint-ts:
   bash scripts/check-sdk-deps.sh typescript
+  cd sdks/typescript && npx prettier --check "src/**/*.ts" "examples/**/*.ts" "tests/**/*.ts"
   cd sdks/typescript && npx tsc --noEmit -p tsconfig.json
 
 # Go SDK lint: gofmt cleanliness plus `go vet` (stdlib only, no codegen)
@@ -222,9 +265,20 @@ sdk-lint-go:
   cd sdks/go && sh -c 'unformatted=$(gofmt -l .); [ -z "$unformatted" ] || { echo "not gofmt-ed:"; echo "$unformatted"; exit 1; }'
   cd sdks/go && go vet ./...
 
+# Build the Go SDK, mirroring the `go` CI job
+sdk-build-go:
+  cd sdks/go && go build ./...
+
+# Lint every SDK (Go, Python, TypeScript)
+sdk-lint: sdk-lint-go sdk-lint-py sdk-lint-ts
+
 # All SDK tests
 sdk-test: sdk-test-py sdk-test-ts sdk-test-go
 
 # Go SDK tests (offline; the suite drives httptest servers only)
 sdk-test-go:
   cd sdks/go && go test ./...
+
+# Go SDK tests with the race detector, mirroring the `go` CI job
+sdk-test-go-race:
+  cd sdks/go && go test -race ./...
