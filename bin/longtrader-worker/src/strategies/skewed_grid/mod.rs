@@ -482,10 +482,9 @@ mod tests {
 
     #[test]
     fn config_parses_with_defaults() {
-        let table: toml::Table = toml::from_str(
-            "symbol = \"BTC/USDT\"\ngrid_tick = \"1.0\"\nqty_per_level = \"0.01\"",
-        )
-        .expect("toml");
+        let table: toml::Table =
+            toml::from_str("symbol = \"BTC/USDT\"\ngrid_tick = \"1.0\"\nqty_per_level = \"0.01\"")
+                .expect("toml");
         let cfg = SkewedGridConfig::from_params(&table).expect("parse");
         assert_eq!(cfg.grid_tick, dec!(1));
         assert_eq!(cfg.num_levels, 5);

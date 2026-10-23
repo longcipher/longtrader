@@ -11,11 +11,14 @@ use std::sync::{Arc, OnceLock};
 use color_eyre::Result;
 
 use super::{
-    Strategy, apt_mm, autoborrow, balance_align, basis_mm, boll_grid, convert, cross_depth_maker,
-    cross_fixed_maker, cross_maker, dca_scheduler, deposit_transfer, ema_cross, fixed_maker,
-    glft_mm, hedge_grid, irr, market_cap, nav_recorder, obi_mm, params::params_from_table,
-    premium_monitor, queue_mm, random_entry, rebalance, sentinel, simple_grid, simplified_glft_mm,
-    skewed_grid, supertrend, xfunding_lite,
+    Strategy, amm_arb, apt_mm, autoborrow, avellaneda_mm_v2, balance_align, basis_mm, boll_grid,
+    bollinger_v2, convert, cross_depth_maker, cross_exchange_mm, cross_fixed_maker, cross_maker,
+    dca_executor, dca_scheduler, deposit_transfer, dman_v3, ema_cross, fixed_maker, glft_mm,
+    grid_strike, hedge, hedge_grid, irr, liquidity_mining, macd_bb, market_cap, nav_recorder,
+    obi_mm, params::params_from_table, perpetual_mm, pmm_dynamic, premium_monitor,
+    pure_market_making, queue_mm, random_entry, rebalance, sentinel, simple_grid,
+    simplified_glft_mm, skewed_grid, spot_perp_arb, stat_arb, supertrend, twap_executor,
+    vwap_executor, xfunding_lite,
 };
 use crate::{
     config::Config,
@@ -372,6 +375,201 @@ pub fn registry() -> &'static [StrategyDescriptor] {
                     )))
                 },
             },
+            StrategyDescriptor {
+                name: "pure_market_making",
+                factory: |ctx| {
+                    let cfg = pure_market_making::PmmConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(pure_market_making::Pmm::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "avellaneda_mm_v2",
+                factory: |ctx| {
+                    let cfg = avellaneda_mm_v2::AvellanedaMmV2Config::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(avellaneda_mm_v2::AvellanedaMmV2::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "perpetual_mm",
+                factory: |ctx| {
+                    let cfg = perpetual_mm::PerpMmConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(perpetual_mm::PerpMm::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                        ctx.funding.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "cross_exchange_mm",
+                factory: |ctx| {
+                    let cfg = params_from_table(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(cross_exchange_mm::Xemm::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "amm_arb",
+                factory: |ctx| {
+                    let cfg =
+                        amm_arb::AmmArbConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(amm_arb::AmmArb::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                },
+            },
+            StrategyDescriptor {
+                name: "spot_perp_arb",
+                factory: |ctx| {
+                    let cfg = spot_perp_arb::SpotPerpArbConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(spot_perp_arb::SpotPerpArb::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "hedge",
+                factory: |ctx| {
+                    let cfg = hedge::HedgeConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(hedge::Hedge::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                },
+            },
+            StrategyDescriptor {
+                name: "liquidity_mining",
+                factory: |ctx| {
+                    let cfg = liquidity_mining::LiqMiningConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(liquidity_mining::LiqMining::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "bollinger_v2",
+                factory: |ctx| {
+                    let cfg = bollinger_v2::BollingerV2Config::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(bollinger_v2::BollingerV2::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "dman_v3",
+                factory: |ctx| {
+                    let cfg =
+                        dman_v3::DmanV3Config::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(dman_v3::DmanV3::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                },
+            },
+            StrategyDescriptor {
+                name: "macd_bb",
+                factory: |ctx| {
+                    let cfg =
+                        macd_bb::MacdBbConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(macd_bb::MacdBb::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                },
+            },
+            StrategyDescriptor {
+                name: "grid_strike",
+                factory: |ctx| {
+                    let cfg = grid_strike::GridStrikeConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(grid_strike::GridStrike::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "stat_arb",
+                factory: |ctx| {
+                    let cfg =
+                        stat_arb::StatArbConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(stat_arb::StatArb::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "pmm_dynamic",
+                factory: |ctx| {
+                    let cfg = pmm_dynamic::PmmDynamicConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(pmm_dynamic::PmmDynamic::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "twap_executor",
+                factory: |ctx| {
+                    let cfg =
+                        twap_executor::TwapConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(twap_executor::TwapExecutor::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "dca_executor",
+                factory: |ctx| {
+                    let cfg =
+                        dca_executor::DcaConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(dca_executor::DcaExecutor::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "vwap_executor",
+                factory: |ctx| {
+                    let cfg =
+                        vwap_executor::VwapConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(vwap_executor::VwapExecutor::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
         ]
     })
 }
@@ -433,6 +631,12 @@ alert_threshold = \"0.01\"
 targets = { BTC = \"1\" }
 weights = { BTC = \"0.6\" }
 signal_file = \"/tmp/longtrader-registry-irr-signal\"
+spot_symbol = \"BTC/USDT\"
+total_amount = \"1\"
+prices = [\"99\", \"98\", \"97\"]
+amounts_quote = [\"100\", \"100\", \"100\"]
+symbol_a = \"BTC/USDT\"
+symbol_b = \"ETH/USDT\"
 ";
 
     /// Only `simple_grid` quotes this table immediately: every other registered
