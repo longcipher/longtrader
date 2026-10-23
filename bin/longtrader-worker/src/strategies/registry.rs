@@ -11,12 +11,13 @@ use std::sync::{Arc, OnceLock};
 use color_eyre::Result;
 
 use super::{
-    Strategy, amm_arb, apt_mm, autoborrow, avellaneda_mm_v2, balance_align, basis_mm, boll_grid,
-    bollinger_v2, convert, cross_depth_maker, cross_exchange_mm, cross_fixed_maker, cross_maker,
-    dca_executor, dca_scheduler, deposit_transfer, dman_v3, ema_cross, fixed_maker, glft_mm,
-    grid_strike, hedge, hedge_grid, irr, liquidity_mining, macd_bb, market_cap, nav_recorder,
-    obi_mm, params::params_from_table, perpetual_mm, pmm_dynamic, premium_monitor,
-    pure_market_making, queue_mm, random_entry, rebalance, sentinel, simple_grid,
+    Strategy, adx_trend, amm_arb, apt_mm, autoborrow, avellaneda_mm_v2, balance_align, basis_mm,
+    bb_keltner_squeeze, boll_grid, bollinger_v2, convert, cross_depth_maker, cross_exchange_mm,
+    cross_fixed_maker, cross_maker, cvd_divergence, darvas_box, dca_executor, dca_scheduler,
+    deposit_transfer, dman_v3, dual_thrust, ema_cross, fixed_maker, glft_mm, grid_strike, hedge,
+    hedge_grid, ichimoku, irr, liquidity_mining, macd_bb, market_cap, mean_reversion,
+    momentum_factor, nav_recorder, obi_mm, params::params_from_table, perpetual_mm, pmm_dynamic,
+    premium_monitor, pure_market_making, queue_mm, random_entry, rebalance, sentinel, simple_grid,
     simplified_glft_mm, skewed_grid, spot_perp_arb, stat_arb, supertrend, twap_executor,
     vwap_executor, xfunding_lite,
 };
@@ -60,6 +61,108 @@ pub fn registry() -> &'static [StrategyDescriptor] {
                 factory: |ctx| {
                     let cfg = simple_grid::SimpleGridConfig::from_config(&ctx.config)?;
                     Ok(Box::new(simple_grid::SimpleGrid::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "adx_trend",
+                factory: |ctx| {
+                    let cfg =
+                        adx_trend::AdxTrendConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(adx_trend::AdxTrend::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "bb_keltner_squeeze",
+                factory: |ctx| {
+                    let cfg = bb_keltner_squeeze::BbKeltnerSqueezeConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(bb_keltner_squeeze::BbKeltnerSqueeze::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "cvd_divergence",
+                factory: |ctx| {
+                    let cfg = cvd_divergence::CvdDivergenceConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(cvd_divergence::CvdDivergence::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "darvas_box",
+                factory: |ctx| {
+                    let cfg = darvas_box::DarvasBoxConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(darvas_box::DarvasBox::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "dual_thrust",
+                factory: |ctx| {
+                    let cfg = dual_thrust::DualThrustConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(dual_thrust::DualThrust::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "ichimoku",
+                factory: |ctx| {
+                    let cfg =
+                        ichimoku::IchimokuConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(ichimoku::Ichimoku::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "mean_reversion",
+                factory: |ctx| {
+                    let cfg = mean_reversion::MeanReversionConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(mean_reversion::MeanReversion::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "momentum_factor",
+                factory: |ctx| {
+                    let cfg = momentum_factor::MomentumFactorConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(momentum_factor::MomentumFactor::new(
                         cfg,
                         ctx.gateway.clone(),
                         ctx.market.clone(),

@@ -6,12 +6,14 @@
 //! trades through [`TradingGateway`](crate::ports::TradingGateway).
 //! Every strategy ships its own `README.md` alongside the module.
 
+pub mod adx_trend;
 pub mod amm_arb;
 pub mod apt_mm;
 pub mod autoborrow;
 pub mod avellaneda_mm_v2;
 pub mod balance_align;
 pub mod basis_mm;
+pub mod bb_keltner_squeeze;
 pub mod boll_grid;
 pub mod bollinger_v2;
 pub mod convert;
@@ -19,20 +21,26 @@ pub mod cross_depth_maker;
 pub mod cross_exchange_mm;
 pub mod cross_fixed_maker;
 pub mod cross_maker;
+pub mod cvd_divergence;
+pub mod darvas_box;
 pub mod dca_executor;
 pub mod dca_scheduler;
 pub mod deposit_transfer;
 pub mod dman_v3;
+pub mod dual_thrust;
 pub mod ema_cross;
 pub mod fixed_maker;
 pub mod glft_mm;
 pub mod grid_strike;
 pub mod hedge;
 pub mod hedge_grid;
+pub mod ichimoku;
 pub mod irr;
 pub mod liquidity_mining;
 pub mod macd_bb;
 pub mod market_cap;
+pub mod mean_reversion;
+pub mod momentum_factor;
 pub mod nav_recorder;
 pub mod obi_mm;
 pub mod params;

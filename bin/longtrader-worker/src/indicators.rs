@@ -404,6 +404,235 @@ impl Supertrend {
     }
 }
 
+/// Donchian channel: rolling highest-high / lowest-low over a window.
+#[derive(Debug, Clone)]
+pub struct DonchianChannel {
+    window: usize,
+    buf: VecDeque<(Decimal, Decimal)>,
+}
+
+impl DonchianChannel {
+    #[must_use]
+    pub fn new(window: usize) -> Self {
+        Self { window, buf: VecDeque::with_capacity(window) }
+    }
+
+    pub fn push(&mut self, high: Decimal, low: Decimal) {
+        self.buf.push_back((high, low));
+        if self.buf.len() > self.window {
+            self.buf.pop_front();
+        }
+    }
+
+    #[must_use]
+    pub fn upper(&self) -> Option<Decimal> {
+        self.buf.iter().map(|(h, _)| *h).max()
+    }
+
+    #[must_use]
+    pub fn lower(&self) -> Option<Decimal> {
+        self.buf.iter().map(|(_, l)| *l).min()
+    }
+
+    #[must_use]
+    pub fn middle(&self) -> Option<Decimal> {
+        let u = self.upper()?;
+        let l = self.lower()?;
+        Some((u + l) / Decimal::from(2))
+    }
+}
+
+/// Keltner channel: EMA ± ATR * multiplier.
+#[derive(Debug, Clone)]
+pub struct KeltnerChannel {
+    mid: Ema,
+    atr: Atr,
+    multiplier: Decimal,
+}
+
+impl KeltnerChannel {
+    #[must_use]
+    pub fn new(ema_window: usize, atr_period: usize, multiplier: Decimal) -> Self {
+        Self { mid: Ema::new(ema_window), atr: Atr::new(atr_period), multiplier }
+    }
+
+    pub fn push(&mut self, high: Decimal, low: Decimal, close: Decimal) {
+        self.mid.push(close);
+        self.atr.push(high, low, close);
+    }
+
+    #[must_use]
+    pub fn middle(&self) -> Option<Decimal> {
+        self.mid.value()
+    }
+
+    #[must_use]
+    pub fn upper(&self) -> Option<Decimal> {
+        let mid = self.mid.value()?;
+        let atr = self.atr.value()?;
+        Some(mid + atr * self.multiplier)
+    }
+
+    #[must_use]
+    pub fn lower(&self) -> Option<Decimal> {
+        let mid = self.mid.value()?;
+        let atr = self.atr.value()?;
+        Some(mid - atr * self.multiplier)
+    }
+}
+
+/// Average Directional Index with +DI / -DI.
+#[derive(Debug, Clone)]
+pub struct Adx {
+    period: usize,
+    prev_high: Option<Decimal>,
+    prev_low: Option<Decimal>,
+    prev_close: Option<Decimal>,
+    smooth_plus_dm: Option<Decimal>,
+    smooth_minus_dm: Option<Decimal>,
+    smooth_tr: Option<Decimal>,
+    samples: usize,
+    sum_plus_dm: Decimal,
+    sum_minus_dm: Decimal,
+    sum_tr: Decimal,
+}
+
+impl Adx {
+    #[must_use]
+    pub fn new(period: usize) -> Self {
+        let period = period.max(1);
+        Self {
+            period,
+            prev_high: None,
+            prev_low: None,
+            prev_close: None,
+            smooth_plus_dm: None,
+            smooth_minus_dm: None,
+            smooth_tr: None,
+            samples: 0,
+            sum_plus_dm: Decimal::ZERO,
+            sum_minus_dm: Decimal::ZERO,
+            sum_tr: Decimal::ZERO,
+        }
+    }
+
+    pub fn push(&mut self, high: Decimal, low: Decimal, close: Decimal) {
+        let (Some(ph), Some(pl)) = (self.prev_high, self.prev_low) else {
+            self.prev_high = Some(high);
+            self.prev_low = Some(low);
+            self.prev_close = Some(close);
+            return;
+        };
+        let up = high - ph;
+        let down = pl - low;
+        let plus_dm = if up > down && up > Decimal::ZERO { up } else { Decimal::ZERO };
+        let minus_dm = if down > up && down > Decimal::ZERO { down } else { Decimal::ZERO };
+        let tr = (high - low)
+            .max((high - self.prev_close.expect("prev_close set after first push")).abs())
+            .max((low - self.prev_close.expect("prev_close set after first push")).abs());
+        let n = Decimal::from(self.period);
+
+        if let (Some(sp), Some(sm), Some(st)) =
+            (self.smooth_plus_dm, self.smooth_minus_dm, self.smooth_tr)
+        {
+            self.smooth_plus_dm = Some(sp - sp / n + plus_dm);
+            self.smooth_minus_dm = Some(sm - sm / n + minus_dm);
+            self.smooth_tr = Some(st - st / n + tr);
+        } else {
+            self.sum_plus_dm += plus_dm;
+            self.sum_minus_dm += minus_dm;
+            self.sum_tr += tr;
+            self.samples += 1;
+            if self.samples >= self.period {
+                self.smooth_plus_dm = Some(self.sum_plus_dm / n);
+                self.smooth_minus_dm = Some(self.sum_minus_dm / n);
+                self.smooth_tr = Some(self.sum_tr / n);
+            }
+        }
+        self.prev_high = Some(high);
+        self.prev_low = Some(low);
+        self.prev_close = Some(close);
+    }
+
+    #[must_use]
+    pub fn value(&self) -> Option<Decimal> {
+        let tr = self.smooth_tr?;
+        if tr.is_zero() {
+            return Some(Decimal::ZERO);
+        }
+        let plus_di = self.smooth_plus_dm? / tr * Decimal::from(100);
+        let minus_di = self.smooth_minus_dm? / tr * Decimal::from(100);
+        let denom = plus_di + minus_di;
+        if denom.is_zero() {
+            return Some(Decimal::ZERO);
+        }
+        Some((plus_di - minus_di).abs() / denom * Decimal::from(100))
+    }
+
+    #[must_use]
+    pub fn plus_di(&self) -> Option<Decimal> {
+        let tr = self.smooth_tr?;
+        if tr.is_zero() {
+            return Some(Decimal::ZERO);
+        }
+        Some(self.smooth_plus_dm? / tr * Decimal::from(100))
+    }
+
+    #[must_use]
+    pub fn minus_di(&self) -> Option<Decimal> {
+        let tr = self.smooth_tr?;
+        if tr.is_zero() {
+            return Some(Decimal::ZERO);
+        }
+        Some(self.smooth_minus_dm? / tr * Decimal::from(100))
+    }
+}
+
+/// Z-score for mean-reversion detection over a rolling window.
+#[derive(Debug, Clone)]
+pub struct ZScore {
+    window: usize,
+    buf: VecDeque<Decimal>,
+}
+
+impl ZScore {
+    #[must_use]
+    pub fn new(window: usize) -> Self {
+        Self { window, buf: VecDeque::with_capacity(window) }
+    }
+
+    pub fn push(&mut self, value: Decimal) {
+        self.buf.push_back(value);
+        if self.buf.len() > self.window {
+            self.buf.pop_front();
+        }
+    }
+
+    #[must_use]
+    pub fn value(&self) -> Option<Decimal> {
+        let n = self.buf.len();
+        if n < 2 {
+            return None;
+        }
+        let count = Decimal::from(n);
+        let mean = self.buf.iter().copied().sum::<Decimal>() / count;
+        let variance = self
+            .buf
+            .iter()
+            .try_fold(Decimal::ZERO, |acc, &x| {
+                let d = x.checked_sub(mean)?;
+                acc.checked_add(d.checked_mul(d)?)
+            })?
+            .checked_div(count)?;
+        let std = decimal_sqrt(variance);
+        if std.is_zero() {
+            return None;
+        }
+        let last = *self.buf.back()?;
+        last.checked_sub(mean)?.checked_div(std)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -1003,6 +1232,73 @@ mod tests {
             prop_assert_eq!(actual.middle, expected.middle);
             prop_assert_eq!(actual.upper, expected.upper);
             prop_assert_eq!(actual.lower, expected.lower);
+        }
+
+        /// Donchian channel reflects the rolling highest-high / lowest-low.
+        #[test]
+        fn donchian_tracks_extremes(
+            window in 1usize..12,
+            bars in prop::collection::vec((0i64..200, 0i64..200), 2..30),
+        ) {
+            let bars: Vec<(Decimal, Decimal)> =
+                bars.into_iter().map(|(h, l)| (Decimal::from(h), Decimal::from(l))).collect();
+            let mut dc = DonchianChannel::new(window);
+            for (h, l) in &bars {
+                dc.push(*h, *l);
+            }
+            let start = bars.len().saturating_sub(window);
+            let expected_upper = bars[start..].iter().map(|(h, _)| *h).max().expect("non-empty");
+            let expected_lower = bars[start..].iter().map(|(_, l)| *l).min().expect("non-empty");
+            prop_assert_eq!(dc.upper(), Some(expected_upper));
+            prop_assert_eq!(dc.lower(), Some(expected_lower));
+            prop_assert_eq!(dc.middle(), Some((expected_upper + expected_lower) / Decimal::from(2)));
+        }
+
+        /// ADX non-negative once warmed.
+        #[test]
+        fn adx_is_non_negative(
+            period in 1usize..12,
+            bars in prop::collection::vec((0i64..200, 0i64..200, 0i64..200), 2..40),
+        ) {
+            let mut adx = Adx::new(period);
+            for (h, l, c) in bars {
+                adx.push(Decimal::from(h), Decimal::from(l), Decimal::from(c));
+                if let Some(value) = adx.value() {
+                    prop_assert!(value >= Decimal::ZERO, "adx {value} was negative");
+                }
+            }
+        }
+
+        /// Z-score is zero when all values are equal and sign agrees with the
+        /// last value versus the rolling window mean.
+        #[test]
+        fn zscore_detects_deviation(
+            window in 2usize..12,
+            values in prop::collection::vec(1i64..100, 2..20),
+        ) {
+            let mut zs = ZScore::new(window);
+            let last = Decimal::from(*values.last().expect("non-empty"));
+            for v in &values {
+                zs.push(Decimal::from(*v));
+            }
+            let z = zs.value();
+            if values.iter().all(|v| *v == values[0]) {
+                prop_assert!(z.is_none() || z == Some(Decimal::ZERO));
+                return Ok(());
+            }
+            // The indicator reads only the last `window` values.
+            let tail: Vec<i64> = values.iter().rev().take(window).copied().collect();
+            if tail.iter().all(|v| *v == tail[0]) {
+                // Constant sub-window → std==0, z is None / zero.
+                prop_assert!(z.is_none() || z == Some(Decimal::ZERO));
+            } else {
+                let tail_mean = Decimal::from(tail.iter().sum::<i64>()) / Decimal::from(tail.len() as i64);
+                if last > tail_mean {
+                    prop_assert!(z.expect("warmed") > Decimal::ZERO);
+                } else if last < tail_mean {
+                    prop_assert!(z.expect("warmed") < Decimal::ZERO);
+                }
+            }
         }
 
         /// ATR is non-negative for any OHLC triple, including inverted bars.
