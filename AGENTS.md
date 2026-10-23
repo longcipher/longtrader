@@ -47,6 +47,7 @@ just mutation
 - Sub-crates inherit `version`/`edition`/`license`/`authors`/`repository` via `workspace = true` and must set `[lints] workspace = true`. `cargo workspace-inheritance-check` enforces this in `just lint` and `just check`.
 - There is no `rust-toolchain.toml`; CI installs a nightly toolchain, so use `cargo +nightly fmt` and `cargo +nightly clippy` exactly as the Justfile does.
 - `.cargo/config.toml` sets `rustc-wrapper = "kache"`, which breaks clippy's lints and `--fix`: prefix clippy with `RUSTC_WRAPPER=` (the Justfile does).
+- When a native link fails with undefined symbols that survive `cargo clean -p <crate>`, always suspect a poisoned kache `build_script_run` entry: confirm the dep's static lib in `target/debug/build/` is truncated (`ar t`), match it by sha256 to a blob under the kache store, evict that entry, then rebuild.
 - Clippy is `pedantic` plus a curated nursery set; `unwrap_used` and `print_stdout`/`print_stderr` are denied, `expect_used` is allowed, `allow_attributes` is allowed at priority -10.
 - `cargo shear` is told to ignore the crates that only exist for the generated contract (`[package.metadata.cargo-shear] ignored` in `longtrader-contract` and `longtrader-proto`).
 
