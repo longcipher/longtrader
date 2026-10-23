@@ -6,8 +6,10 @@
 //! trades through [`TradingGateway`](crate::ports::TradingGateway).
 //! Every strategy ships its own `README.md` alongside the module.
 
+pub mod apt_mm;
 pub mod autoborrow;
 pub mod balance_align;
+pub mod basis_mm;
 pub mod boll_grid;
 pub mod convert;
 pub mod cross_depth_maker;
@@ -17,17 +19,22 @@ pub mod dca_scheduler;
 pub mod deposit_transfer;
 pub mod ema_cross;
 pub mod fixed_maker;
+pub mod glft_mm;
 pub mod hedge_grid;
 pub mod irr;
 pub mod market_cap;
 pub mod nav_recorder;
+pub mod obi_mm;
 pub mod params;
 pub mod premium_monitor;
+pub mod queue_mm;
 pub mod random_entry;
 pub mod rebalance;
 pub mod registry;
 pub mod sentinel;
 pub mod simple_grid;
+pub mod simplified_glft_mm;
+pub mod skewed_grid;
 pub mod supertrend;
 pub mod xfunding_lite;
 

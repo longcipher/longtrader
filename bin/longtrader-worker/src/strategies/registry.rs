@@ -11,10 +11,11 @@ use std::sync::{Arc, OnceLock};
 use color_eyre::Result;
 
 use super::{
-    Strategy, autoborrow, balance_align, boll_grid, convert, cross_depth_maker, cross_fixed_maker,
-    cross_maker, dca_scheduler, deposit_transfer, ema_cross, fixed_maker, hedge_grid, irr,
-    market_cap, nav_recorder, params::params_from_table, premium_monitor, random_entry, rebalance,
-    sentinel, simple_grid, supertrend, xfunding_lite,
+    Strategy, apt_mm, autoborrow, balance_align, basis_mm, boll_grid, convert, cross_depth_maker,
+    cross_fixed_maker, cross_maker, dca_scheduler, deposit_transfer, ema_cross, fixed_maker,
+    glft_mm, hedge_grid, irr, market_cap, nav_recorder, obi_mm, params::params_from_table,
+    premium_monitor, queue_mm, random_entry, rebalance, sentinel, simple_grid, simplified_glft_mm,
+    skewed_grid, supertrend, xfunding_lite,
 };
 use crate::{
     config::Config,
@@ -299,6 +300,78 @@ pub fn registry() -> &'static [StrategyDescriptor] {
                     Ok(Box::new(irr::Irr::new(cfg, ctx.gateway.clone())))
                 },
             },
+            StrategyDescriptor {
+                name: "skewed_grid",
+                factory: |ctx| {
+                    let cfg = skewed_grid::SkewedGridConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(skewed_grid::SkewedGrid::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "obi_mm",
+                factory: |ctx| {
+                    let cfg = obi_mm::ObiMmConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(obi_mm::ObiMm::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                },
+            },
+            StrategyDescriptor {
+                name: "basis_mm",
+                factory: |ctx| {
+                    let cfg =
+                        basis_mm::BasisMmConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(basis_mm::BasisMm::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "apt_mm",
+                factory: |ctx| {
+                    let cfg = apt_mm::AptMmConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(apt_mm::AptMm::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                },
+            },
+            StrategyDescriptor {
+                name: "queue_mm",
+                factory: |ctx| {
+                    let cfg =
+                        queue_mm::QueueMmConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(queue_mm::QueueMm::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
+            StrategyDescriptor {
+                name: "glft_mm",
+                factory: |ctx| {
+                    let cfg =
+                        glft_mm::GlftMmConfig::from_params(ctx.config.strategy.params.table())?;
+                    Ok(Box::new(glft_mm::GlftMm::new(cfg, ctx.gateway.clone(), ctx.market.clone())))
+                },
+            },
+            StrategyDescriptor {
+                name: "simplified_glft_mm",
+                factory: |ctx| {
+                    let cfg = simplified_glft_mm::SimplifiedGlftMmConfig::from_params(
+                        ctx.config.strategy.params.table(),
+                    )?;
+                    Ok(Box::new(simplified_glft_mm::SimplifiedGlftMm::new(
+                        cfg,
+                        ctx.gateway.clone(),
+                        ctx.market.clone(),
+                    )))
+                },
+            },
         ]
     })
 }
@@ -341,6 +414,10 @@ lower_price = \"90\"
 upper_price = \"110\"
 num_levels = 4
 qty_per_level = \"0.1\"
+grid_tick = \"1\"
+perp_symbol = \"BTC/USDT:USDT\"
+lead_symbol = \"BTC/USDT:USDT\"
+lag_symbol = \"BTC/USDT\"
 primary = { exchange_id = \"mock\", label = \"\" }
 hedge = { exchange_id = \"mock\", label = \"\" }
 asset = \"USDT\"
