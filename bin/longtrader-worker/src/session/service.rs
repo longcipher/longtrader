@@ -36,8 +36,8 @@ fn now_ts() -> buffa_types::google::protobuf::Timestamp {
     buffa_types::google::protobuf::Timestamp {
         // saturate (not zero) on far-future overflow
         seconds: i64::try_from(dur.as_secs()).unwrap_or(i64::MAX),
-        // subsec_nanos() < 1e9 always fits i32
-        nanos: i32::try_from(dur.subsec_nanos()).expect("subsec_nanos fits i32"),
+        // subsec_nanos() < 1e9 always fits i32; panic-free conversion.
+        nanos: i32::try_from(dur.subsec_nanos()).unwrap_or(0),
         ..Default::default()
     }
 }

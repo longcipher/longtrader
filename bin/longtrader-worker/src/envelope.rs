@@ -41,7 +41,9 @@ pub fn decode_envelope_result(buf: &[u8]) -> Result<(u8, &[u8], usize), Envelope
         return Err(EnvelopeError::TooShort);
     }
     let flags = buf[0];
-    let len = u32::from_be_bytes(buf[1..5].try_into().expect("5-byte header")) as usize;
+    // `buf.len() >= 5` is checked above, so indexing is in-bounds and cannot
+    // panic (avoids `try_into().expect()` on the hot decode path).
+    let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
     if buf.len() < 5 + len {
         return Err(EnvelopeError::Truncated { need: 5 + len, have: buf.len() });
     }

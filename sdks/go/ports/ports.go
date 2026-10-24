@@ -67,22 +67,32 @@ var DefaultOverflow = map[string]OverflowPolicy{
 }
 
 // OverflowPolicyForChannel returns the default policy for a stream channel
-// name ("TICKER", "ORDERBOOK", ...). An unknown name falls back to
-// DropOldest, the safe choice for market data.
+// name ("TICKER", "ORDERBOOK", ...). Fail-closed: unknown / future channels
+// (including private order / balance / position streams) resolve to Block,
+// never to a dropping policy.
 func OverflowPolicyForChannel(channel string) OverflowPolicy {
 	if p, ok := DefaultOverflow[strings.ToLower(strings.TrimSpace(channel))]; ok {
 		return p
 	}
-	return DropOldest
+	return Block
 }
 
 // IsSequenceGap reports whether next does not immediately follow prev, which
 // means the stream dropped events and the consumer must resync.
 //
-// A zero on either side means "no sequence yet", which is not a gap: the first
-// event of a subscription has no predecessor to compare against.
+// next == 0 is the unset proto default (never emitted; worker sequences start
+// at 1), so it is never a gap. prev == 0 is a *valid* watermark meaning
+// "before the first sequence": 0 -> 1 is contiguous, 0 -> 2 missed event 1.
+// `math.MaxUint64 -> 0` is contiguous, mirroring the worker's
+// `ports::is_sequence_gap` + `has_sequence_gap` pair.
 func IsSequenceGap(prev, next uint64) bool {
-	return next > 0 && prev > 0 && next != prev+1
+	if next == 0 {
+		return false
+	}
+	if prev == ^uint64(0) {
+		return next != 0
+	}
+	return next != prev+1
 }
 
 // TradingPort is the order management surface, mirroring the Rust

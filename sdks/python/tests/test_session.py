@@ -277,6 +277,30 @@ class TestEnvelope:
         with pytest.raises(ValueError, match="truncated"):
             sdk._decode_envelope(b"\x00\x00\x00")
 
+    def test_truncated_payload_raises(self):
+        """A header declaring more bytes than follow is truncated, not empty."""
+        frame = sdk._envelope(b"ab")
+        with pytest.raises(ValueError, match=r"need 7 bytes.*have 6"):
+            sdk._decode_envelope(frame[:-1])
+
+    def test_market_stream_decodes_market_events(self):
+        """Market streams carry ``MarketDataEvent``, not ``StrategyEvent``.
+
+        Regression test: the shared stream helper hardcoded the strategy
+        message type, so iterating a market stream raised ``AttributeError``.
+        """
+        pb_market = sdk._market_pb()
+        events = [
+            pb_market.MarketDataEvent(
+                header=pb_common().EventHeader(sequence=n),
+                resume_token=str(n),
+            )
+            for n in (1, 2)
+        ]
+        wire = b"".join(sdk._envelope(e.SerializeToString()) for e in events)
+        got = list(sdk._iter_stream_events([wire], pb_market.MarketDataEvent))
+        assert [m.header.sequence for m in got] == [1, 2]
+
     def test_first_message_payload_skips_trailing_end_of_stream(self):
         """A streaming RPC replies with data frame + end-of-stream JSON frame.
 
@@ -637,7 +661,7 @@ class TestPorts:
         assert overflow_policy_for_channel("TICKER") is OverflowPolicy.DROP_OLDEST
         assert overflow_policy_for_channel("ORDERBOOK") is OverflowPolicy.COALESCE
         assert overflow_policy_for_channel("ORDERS") is OverflowPolicy.BLOCK
-        assert overflow_policy_for_channel("nonsense") is OverflowPolicy.DROP_OLDEST
+        assert overflow_policy_for_channel("nonsense") is OverflowPolicy.BLOCK
         assert set(DEFAULT_OVERFLOW) >= {"ticker", "orderbook", "orders", "positions"}
 
     def test_sequence_gap_helper_matches_the_host_rule(self):
@@ -645,8 +669,16 @@ class TestPorts:
 
         assert is_sequence_gap(1, 2) is False
         assert is_sequence_gap(1, 5) is True
-        assert is_sequence_gap(0, 5) is False
+        # Watermark 0 is "before the first sequence": 0 -> 1 is contiguous,
+        # 0 -> 5 missed events 1-4. A live stream's first event is never a gap
+        # because the pump holds prev=None until it sees a sequence.
+        assert is_sequence_gap(0, 1) is False
+        assert is_sequence_gap(0, 5) is True
         assert is_sequence_gap(5, 0) is False
+        max_u64 = 2**64 - 1
+        assert is_sequence_gap(max_u64, 0) is False, "wrap to zero is contiguous"
+        assert is_sequence_gap(max_u64, 1) is True, "wrapped past zero"
+        assert is_sequence_gap(max_u64 - 1, max_u64) is False
 
 
 class TestPublicSurface:

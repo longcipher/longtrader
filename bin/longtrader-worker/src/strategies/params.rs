@@ -110,8 +110,13 @@ pub fn params_from_table<T: serde::de::DeserializeOwned>(table: &toml::Table) ->
 /// does not serve would otherwise trade on the wrong bars.
 pub(crate) fn timeframe_from_str(tf: &str) -> Result<market::Timeframe, PortError> {
     let normalized = tf.trim().to_ascii_uppercase();
+    if normalized.is_empty() {
+        return Err(PortError::InvalidArgument(
+            "unsupported timeframe \"\" (supported: S1/S100/M1/M5/M15/M30/H1/H4/D1/W1)".to_string(),
+        ));
+    }
     Ok(match normalized.as_str() {
-        "" | "1M" | "M1" => market::Timeframe::M1,
+        "1M" | "M1" => market::Timeframe::M1,
         "5M" | "M5" => market::Timeframe::M5,
         "15M" | "M15" => market::Timeframe::M15,
         "30M" | "M30" => market::Timeframe::M30,
@@ -186,10 +191,11 @@ mod tests {
 
     /// Every spelling in the config alphabet must map to its contract enum, in
     /// both the short (`"5m"`) and the enum-suffixed (`"M5"`) form.
+    /// An empty string is never a default: it means the caller did not supply
+    /// a timeframe, and trading on an assumed `M1` would be wrong bars.
     #[test]
     fn every_documented_timeframe_spelling_is_accepted() {
         let cases = [
-            ("", market::Timeframe::M1),
             ("1m", market::Timeframe::M1),
             ("M1", market::Timeframe::M1),
             ("5m", market::Timeframe::M5),
@@ -238,7 +244,7 @@ mod tests {
     /// timeframe.
     #[test]
     fn an_unsupported_timeframe_is_an_error_not_a_default() {
-        for input in ["2m", "M2", "1x", "hourly", "5", "m", "-5m", "M0", "S2", "999m"] {
+        for input in ["", "  ", "2m", "M2", "1x", "hourly", "5", "m", "-5m", "M0", "S2", "999m"] {
             let err = timeframe_from_str(input).expect_err("must not silently default");
             assert!(matches!(err, PortError::InvalidArgument(_)), "{input:?} produced {err:?}");
             let message = err.to_string();

@@ -115,10 +115,24 @@ pub fn optimal_spreads(
     // GLFT closed form requires ln(1 ± γ/k); Decimal has no native ln, so we
     // compute in f64 and convert back. The model is robust to the precision
     // loss because the log term is only one component of the spread.
-    let gamma_f: f64 = gamma.to_f64()?;
-    let decay_f: f64 = decay.to_f64()?;
-    let log_term = Decimal::try_from((gamma_f / decay_f).ln_1p() / gamma_f).ok()?;
-    let ask_log_term = Decimal::try_from(-((-gamma_f / decay_f).ln_1p()) / gamma_f).ok()?;
+    // Fail-closed with a debug log: a silent `None` is indistinguishable from
+    // "parameters illegal" on a live venue.
+    let Some(gamma_f) = gamma.to_f64() else {
+        tracing::debug!(%gamma, %decay, "glft spread skipped: gamma not representable as f64");
+        return None;
+    };
+    let Some(decay_f) = decay.to_f64() else {
+        tracing::debug!(%gamma, %decay, "glft spread skipped: decay not representable as f64");
+        return None;
+    };
+    let Ok(log_term) = Decimal::try_from((gamma_f / decay_f).ln_1p() / gamma_f) else {
+        tracing::debug!(%gamma, %decay, "glft spread skipped: bid log term out of Decimal range");
+        return None;
+    };
+    let Ok(ask_log_term) = Decimal::try_from(-((-gamma_f / decay_f).ln_1p()) / gamma_f) else {
+        tracing::debug!(%gamma, %decay, "glft spread skipped: ask log term out of Decimal range");
+        return None;
+    };
     let bid = inventory_term + log_term;
     let ask = inventory_term + ask_log_term;
     Some((bid, ask))

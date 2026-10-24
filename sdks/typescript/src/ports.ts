@@ -47,19 +47,36 @@ export const DEFAULT_OVERFLOW: Readonly<Record<string, OverflowPolicy>> =
     positions: OverflowPolicy.Block,
   });
 
-/** Default policy for a stream channel name (`TICKER`, `ORDERBOOK`, ...). */
+/** Default policy for a stream channel name (`TICKER`, `ORDERBOOK`, ...). Fail-closed. */
 export function overflowPolicyForChannel(channel: string): OverflowPolicy {
-  return (
-    DEFAULT_OVERFLOW[channel.trim().toLowerCase()] ?? OverflowPolicy.DropOldest
-  );
+  const key = channel.trim().toLowerCase();
+  const found = (DEFAULT_OVERFLOW as Record<string, OverflowPolicy>)[key];
+  if (found !== undefined) return found;
+  return OverflowPolicy.Block;
 }
 
-/** True when `next` does not immediately follow `prev`; triggers a resync. */
-export function isSequenceGap(prev: number, next: number): boolean {
-  return next > 0 && prev > 0 && next !== prev + 1;
+/**
+ * True when `next` does not immediately follow `prev`; triggers a resync.
+ * `next == 0` is the unset proto default (never emitted; worker sequences
+ * start at `1`), so it is never a gap. `prev == 0` is a *valid* watermark
+ * meaning "before the first sequence": `0 -> 1` is contiguous, `0 -> 5`
+ * missed events `1-4`. `u64::MAX -> 0` is contiguous. Inputs are `u64`
+ * sequences; the rule mirrors the worker's `has_sequence_gap(Some(prev),
+ * header{sequence: next})` exactly.
+ */
+export function isSequenceGap(
+  prev: number | bigint,
+  next: number | bigint,
+): boolean {
+  const p = typeof prev === "bigint" ? prev : BigInt(prev);
+  const n = typeof next === "bigint" ? next : BigInt(next);
+  if (n === 0n) return false;
+  const MAX_U64 = (1n << 64n) - 1n;
+  if (p === MAX_U64) return n !== 0n;
+  return n !== p + 1n;
 }
 
-/** Order management surface (mirrors longtrader.trading.v1). */
+/** Order management surface (mirrors longtrader.trading.v1, 13 methods). */
 export abstract class TradingPort {
   /** Submit one OrderRequest; backend dedupes on client_order_id. */
   abstract createOrder(request: OrderRequest | OrderSpec): Promise<Order>;
@@ -73,7 +90,25 @@ export abstract class TradingPort {
   abstract cancelAllOrders(symbol?: string): Promise<Order[]>;
   /** List currently open orders, optionally filtered by symbol. */
   abstract fetchOpenOrders(symbol?: string): Promise<Order[]>;
-  /** ReconcileState: authoritative atomic snapshot for recovery. */
+  /** Account margin summary. */
+  abstract getAccount(): Promise<unknown>;
+  /** Open positions; empty means every symbol. */
+  abstract getPositions(symbols?: string[]): Promise<unknown>;
+  /** Historical orders. */
+  abstract getOrderHistory(limit?: number, since?: number): Promise<unknown>;
+  /** Closed positions. */
+  abstract getClosedPositions(limit?: number): Promise<unknown>;
+  /** Close one position by id. */
+  abstract closePosition(positionId: string): Promise<unknown>;
+  /** Close every open position. */
+  abstract closeAllPositions(): Promise<unknown>;
+  /** Attach or replace a position's bracket orders. */
+  abstract modifyPosition(
+    positionId: string,
+    takeProfit?: unknown,
+    stopLoss?: unknown,
+  ): Promise<unknown>;
+  /** ReconcileState: best-effort snapshot for recovery (replay deltas after). */
   abstract syncState(): Promise<ReconcileStateResponse>;
 }
 
@@ -128,6 +163,43 @@ export class SessionTradingPort extends TradingPort {
 
   override async fetchOpenOrders(symbol = ""): Promise<Order[]> {
     return this.session.fetchOpenOrders(symbol);
+  }
+
+  override async getAccount(): Promise<unknown> {
+    return this.session.getAccount();
+  }
+
+  override async getPositions(symbols: string[] = []): Promise<unknown> {
+    return this.session.getPositions(symbols);
+  }
+
+  override async getOrderHistory(limit = 100, since = 0): Promise<unknown> {
+    return this.session.getOrderHistory(limit, since);
+  }
+
+  override async getClosedPositions(limit = 100): Promise<unknown> {
+    return this.session.getClosedPositions(limit);
+  }
+
+  override async closePosition(positionId: string): Promise<unknown> {
+    return this.session.closePosition(positionId);
+  }
+
+  override async closeAllPositions(): Promise<unknown> {
+    return this.session.closeAllPositions();
+  }
+
+  override async modifyPosition(
+    positionId: string,
+    takeProfit?: unknown,
+    stopLoss?: unknown,
+  ): Promise<unknown> {
+    return this.session.modifyPosition(positionId, {
+      ...(takeProfit !== undefined
+        ? { takeProfit: takeProfit as never }
+        : {}),
+      ...(stopLoss !== undefined ? { stopLoss: stopLoss as never } : {}),
+    });
   }
 
   override async syncState(): Promise<ReconcileStateResponse> {

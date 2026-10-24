@@ -18,7 +18,8 @@ pub mod strategies;
 /// Shared aliases for the generated contract modules.
 pub mod proto {
     pub use longtrader_contract::proto::longtrader::{
-        account::v1 as account, common::v1 as common, market::v1 as market, ops::v1 as ops,
+        account::v1 as account, backtest::v1 as backtest, common::v1 as common, data::v1 as data,
+        market::v1 as market, ops::v1 as ops, stream::v1 as stream, terminal::v1 as terminal,
         trading::v1 as trading, worker::v1 as worker,
     };
 }

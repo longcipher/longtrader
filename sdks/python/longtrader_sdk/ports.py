@@ -49,20 +49,36 @@ DEFAULT_OVERFLOW: dict[str, OverflowPolicy] = {
 
 
 def overflow_policy_for_channel(channel: str) -> OverflowPolicy:
-    """Default policy for a stream channel name (``TICKER``, ``ORDERBOOK``, ...)."""
-    return DEFAULT_OVERFLOW.get(channel.strip().lower(), OverflowPolicy.DROP_OLDEST)
+    """Default policy for a stream channel name (``TICKER``, ``ORDERBOOK``, ...).
+
+    Fail-closed: unknown / future channels (including private order / balance /
+    position streams) resolve to ``BLOCK``, never to a dropping policy.
+    """
+    key = channel.strip().lower()
+    if key in DEFAULT_OVERFLOW:
+        return DEFAULT_OVERFLOW[key]
+    return OverflowPolicy.BLOCK
 
 
 def is_sequence_gap(prev: int, next_: int) -> bool:
     """True when ``next_`` does not immediately follow ``prev``; triggers resync.
 
-    A zero on either side means "no sequence yet", which is not a gap.
+    ``next_ == 0`` is the unset proto default (never emitted by the worker,
+    whose sequences start at ``1``), so it is never a gap. ``prev == 0`` is a
+    *valid* watermark meaning "before the first sequence": ``0 -> 1`` is
+    contiguous, ``0 -> 2`` missed event ``1``. This mirrors
+    ``bin/longtrader-worker/src/ports.rs::is_sequence_gap`` (wrapping
+    arithmetic); the worker's ``has_sequence_gap`` additionally ignores unset
+    headers, which is what the stream iterators below do inline (``prev is
+    not None`` + ``seq != 0``).
     """
-    return next_ > 0 and prev > 0 and next_ != prev + 1
+    if next_ == 0:
+        return False
+    return next_ != (prev + 1) % 2**64
 
 
 class TradingPort(ABC):
-    """Order management surface (mirrors longtrader.trading.v1)."""
+    """Order management surface (mirrors longtrader.trading.v1, 13 methods)."""
 
     @abstractmethod
     def create_order(self, request: Any) -> Any:
@@ -87,8 +103,46 @@ class TradingPort(ABC):
         """List currently open orders, optionally filtered by symbol."""
 
     @abstractmethod
+    def get_account(self, exchange_id: str = "") -> Any:
+        """Account margin summary."""
+
+    @abstractmethod
+    def get_positions(
+        self, symbols: list[str] | None = None, exchange_id: str = ""
+    ) -> Any:
+        """Open positions; None means every symbol."""
+
+    @abstractmethod
+    def get_order_history(
+        self, limit: int = 100, since: int = 0, exchange_id: str = ""
+    ) -> Any:
+        """Historical orders."""
+
+    @abstractmethod
+    def get_closed_positions(self, limit: int = 100, exchange_id: str = "") -> Any:
+        """Closed positions."""
+
+    @abstractmethod
+    def close_position(self, position_id: str, exchange_id: str = "") -> Any:
+        """Close one position by id."""
+
+    @abstractmethod
+    def close_all_positions(self, exchange_id: str = "") -> Any:
+        """Close every open position."""
+
+    @abstractmethod
+    def modify_position(
+        self,
+        position_id: str,
+        take_profit: Any = None,
+        stop_loss: Any = None,
+        exchange_id: str = "",
+    ) -> Any:
+        """Attach or replace a position's bracket orders."""
+
+    @abstractmethod
     def sync_state(self) -> Any:
-        """ReconcileState: authoritative atomic snapshot for recovery."""
+        """ReconcileState: best-effort snapshot for recovery (replay deltas after)."""
 
 
 class MarketPort(ABC):
@@ -142,6 +196,42 @@ class SessionTradingPort(TradingPort):
         self, symbol: str | None = None, limit: int | None = None
     ) -> Any:
         return self._session.fetch_open_orders(symbol or "", limit or 0)
+
+    def get_account(self, exchange_id: str = "") -> Any:
+        return self._session.get_account(exchange_id)
+
+    def get_positions(
+        self, symbols: list[str] | None = None, exchange_id: str = ""
+    ) -> Any:
+        return self._session.get_positions(symbols, exchange_id)
+
+    def get_order_history(
+        self, limit: int = 100, since: int = 0, exchange_id: str = ""
+    ) -> Any:
+        return self._session.get_order_history(limit, since, exchange_id)
+
+    def get_closed_positions(self, limit: int = 100, exchange_id: str = "") -> Any:
+        return self._session.get_closed_positions(limit, exchange_id)
+
+    def close_position(self, position_id: str, exchange_id: str = "") -> Any:
+        return self._session.close_position(position_id, exchange_id)
+
+    def close_all_positions(self, exchange_id: str = "") -> Any:
+        return self._session.close_all_positions(exchange_id)
+
+    def modify_position(
+        self,
+        position_id: str,
+        take_profit: Any = None,
+        stop_loss: Any = None,
+        exchange_id: str = "",
+    ) -> Any:
+        return self._session.modify_position(
+            position_id,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            exchange_id=exchange_id,
+        )
 
     def sync_state(self) -> Any:
         return self._session.reconcile_state()

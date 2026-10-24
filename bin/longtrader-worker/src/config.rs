@@ -12,6 +12,10 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Legacy sibling-repo key, intentionally ignored by this worker.
+    /// Kept optional for backward compatibility: old configs still parse,
+    /// new configs should omit it.
+    #[serde(default)]
     pub daemon_endpoint: String,
     /// Endpoint the remote backend talks to. Only consulted when `backend` is
     /// the remote one; `backend = "mock"` ignores it.
@@ -20,7 +24,9 @@ pub struct Config {
     /// Optional path to a file containing the terminal API token.
     #[serde(default)]
     pub api_token_file: Option<String>,
-    /// Whether to cancel active orders when the session lease expires.
+    /// Deprecated: the real kill-switch is `worker.v1.KillSwitchPolicy`
+    /// (see `SessionPolicy` / `apply_policy`). This boolean is parsed for
+    /// backward compatibility but never read; setting it has no effect.
     #[serde(default)]
     pub kill_switch_on_disconnect: Option<bool>,
     /// Backend selection: `"api"` (the unified `longtrader.{market,trading}.v1`
@@ -173,6 +179,17 @@ impl Config {
         self.backend.as_deref().map(str::trim).filter(|b| !b.is_empty()).unwrap_or("api")
     }
 
+    /// Backend after whitelist validation (`"api"` or `"mock"` only).
+    /// Rejects typos at config-load time instead of at runtime dispatch.
+    pub fn validated_backend(&self) -> Result<&str> {
+        match self.backend() {
+            backend @ ("api" | "mock") => Ok(backend),
+            other => {
+                Err(color_eyre::eyre::eyre!("unknown backend: {other} (expected 'mock' or 'api')"))
+            }
+        }
+    }
+
     /// The endpoint the remote backend should use.
     pub fn endpoint_or_default(&self, default: &str) -> String {
         self.endpoint.clone().unwrap_or_else(|| default.to_string())
@@ -200,6 +217,17 @@ impl Config {
             .wrap_err_with(|| format!("failed to read config file: {}", path.display()))?;
         let config: Self = toml::from_str(&contents)
             .wrap_err_with(|| format!("failed to parse config file: {}", path.display()))?;
+        // Fail fast on typos: an unknown backend can never run, so reject it
+        // here rather than at runtime dispatch in `main`.
+        config
+            .validated_backend()
+            .wrap_err_with(|| format!("invalid config file: {}", path.display()))?;
+        if config.kill_switch_on_disconnect.is_some() {
+            tracing::warn!(
+                "config `kill_switch_on_disconnect` is deprecated and ignored; \
+                 configure `worker.v1.KillSwitchPolicy` instead"
+            );
+        }
         Ok(config)
     }
 }
@@ -302,13 +330,29 @@ mod tests {
         toml::from_str(&body).expect("config parses")
     }
 
-    /// The configured backend is used verbatim. There is no second selector that
-    /// can override it, so there is nothing to resolve.
+    /// The configured backend is used verbatim for the two supported names.
+    /// Unknown names are rejected by `validated_backend()` at load time.
     #[test]
     fn an_explicit_backend_is_used_verbatim() {
         assert_eq!(full_config("backend = \"api\"\n").backend(), "api");
         assert_eq!(full_config("backend = \"mock\"\n").backend(), "mock");
-        assert_eq!(full_config("backend = \"custom\"\n").backend(), "custom");
+        assert!(full_config("backend = \"api\"\n").validated_backend().is_ok());
+        assert!(full_config("backend = \"mock\"\n").validated_backend().is_ok());
+    }
+
+    /// Unknown backends fail fast at load time instead of at runtime dispatch.
+    #[test]
+    fn an_unknown_backend_is_rejected_by_validation() {
+        // Only the exact lowercase names pass: the whitelist is case-sensitive
+        // so a typo like "API" cannot silently select a backend.
+        for backend in ["custom", "daemon", "API", "Mock ", ""] {
+            let config = full_config(&format!("backend = \"{backend}\"\n"));
+            if backend.trim().is_empty() {
+                assert!(config.validated_backend().is_ok(), "blank falls back to api");
+            } else {
+                assert!(config.validated_backend().is_err(), "{backend} must be rejected");
+            }
+        }
     }
 
     /// An empty or blank value is a config mistake, not a backend. Falling back
@@ -449,23 +493,34 @@ mod tests {
         assert!(message.contains("bad.toml"), "{message}");
     }
 
-    /// `daemon_endpoint` and `strategy.type` are required: a config missing
-    /// either cannot start a worker, and the error must say which.
+    /// `daemon_endpoint` is legacy and optional; only `strategy.type` is
+    /// required. A config missing the strategy still fails naming it.
     #[test]
     fn load_rejects_a_config_missing_a_required_field() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("partial.toml");
+        // Legacy key omitted entirely: loads fine with an empty default.
         std::fs::write(&path, "[strategy]\ntype = \"ema_cross\"\n").expect("write");
-        // `color_eyre`'s `Display` renders only the outermost wrap, so the field
-        // detail lives in the source chain; `{:?}` prints the whole chain.
-        let err = Config::load(&path).expect_err("missing daemon_endpoint");
-        let chain = format!("{err:?}");
-        assert!(chain.contains("daemon_endpoint"), "{chain}");
+        let config = Config::load(&path).expect("daemon_endpoint is optional legacy");
+        assert!(config.daemon_endpoint.is_empty());
+        assert_eq!(config.strategy.strategy_type, "ema_cross");
 
         std::fs::write(&path, "daemon_endpoint = \"http://x\"\n").expect("write");
         let err = Config::load(&path).expect_err("missing strategy");
         let chain = format!("{err:?}");
         assert!(chain.contains("strategy"), "{chain}");
+    }
+
+    /// An unknown backend is rejected at load time with its name in the error.
+    #[test]
+    fn load_rejects_an_unknown_backend() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bad-backend.toml");
+        std::fs::write(&path, "backend = \"custom\"\n[strategy]\ntype = \"simple_grid\"\n")
+            .expect("write");
+        let err = Config::load(&path).expect_err("unknown backend must fail load");
+        let chain = format!("{err:?}");
+        assert!(chain.contains("custom"), "{chain}");
     }
 
     // -----------------------------------------------------------------------
@@ -569,7 +624,7 @@ mod tests {
         /// override left to trigger.
         #[test]
         fn an_endpoint_never_selects_a_backend(
-            backend in prop::sample::select(&["api", "mock", "", "daemon", "custom"]),
+            backend in prop::sample::select(&["api", "mock", ""]),
         ) {
             let config =
                 full_config(&format!("endpoint = \"http://api:9000\"\nbackend = \"{backend}\"\n"));
@@ -578,19 +633,19 @@ mod tests {
                 other => other.trim(),
             };
             prop_assert_eq!(config.backend(), if expected.is_empty() { "api" } else { expected });
+            prop_assert!(config.validated_backend().is_ok());
         }
 
-        /// Only a blank value falls back to `"api"`; every other name — including
-        /// ones with no adapter, such as the historical `"daemon"` — passes
-        /// through so `main` can reject it by name instead of silently running a
-        /// different backend than the config asked for.
+        /// Only a blank value falls back to `"api"`; anything else must be one
+        /// of the two supported backends to pass validation.
         #[test]
         fn only_a_blank_backend_falls_back(
-            backend in prop::sample::select(&["api", "", "  ", "mock", "daemon", "custom"]),
+            backend in prop::sample::select(&["api", "", "  ", "mock"]),
         ) {
             let config = full_config(&format!("backend = \"{backend}\"\n"));
             let trimmed = backend.trim();
             prop_assert_eq!(config.backend(), if trimmed.is_empty() { "api" } else { trimmed });
+            prop_assert!(config.validated_backend().is_ok());
         }
     }
 }

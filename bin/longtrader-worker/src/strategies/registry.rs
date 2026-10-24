@@ -3,8 +3,10 @@
 //! Extracted from `strategies::mod`: adding a strategy means appending one
 //! entry here — no string dispatch elsewhere (open/closed).
 //!
-//! Uses `OnceLock` for lazy initialization, allowing strategies to be
-//! registered from other crates or modules without modifying this file.
+//! The registry is the single owner: it is a `OnceLock`-initialized static
+//! table built once on first access. Adding a strategy means appending one
+//! entry to the `vec!` below; there is intentionally no dynamic `register()`
+//! API so construction stays auditable in one place.
 
 use std::sync::{Arc, OnceLock};
 
@@ -23,7 +25,10 @@ use super::{
 };
 use crate::{
     config::Config,
-    ports::{FundingRateSource, MarketDataSource, TradingGateway, VenueOpInvoker, WalletGateway},
+    ports::{
+        FundingRateSource, MarketDataSource, TradingGateway, TriggerOrderGateway, VenueOpInvoker,
+        WalletGateway,
+    },
 };
 
 /// Ports a strategy may consume. All are sourced from one backend adapter,
@@ -33,6 +38,7 @@ pub struct StrategyContext {
     pub gateway: Arc<dyn TradingGateway>,
     pub market: Arc<dyn MarketDataSource>,
     pub funding: Arc<dyn FundingRateSource>,
+    pub triggers: Arc<dyn TriggerOrderGateway>,
     pub ops: Arc<dyn VenueOpInvoker>,
     pub wallet: Arc<dyn WalletGateway>,
 }
@@ -215,6 +221,10 @@ pub fn registry() -> &'static [StrategyDescriptor] {
                     Ok(Box::new(dca_scheduler::DcaScheduler::new(cfg, ctx.gateway.clone())))
                 },
             },
+            // `dca` is the historical alias of `dca_scheduler`: same factory,
+            // kept so existing configs keep working. The behavioral test
+            // `the_dca_alias_behaves_identically_to_dca_scheduler` pins the
+            // equivalence; do not give the alias its own factory.
             StrategyDescriptor {
                 name: "dca",
                 factory: |ctx| {
@@ -773,6 +783,7 @@ qty_per_level = \"0.1\"
             gateway: Arc::clone(&adapter) as Arc<dyn TradingGateway>,
             market: Arc::clone(&adapter) as Arc<dyn MarketDataSource>,
             funding: Arc::clone(&adapter) as Arc<dyn FundingRateSource>,
+            triggers: Arc::clone(&adapter) as Arc<dyn TriggerOrderGateway>,
             ops: Arc::clone(&adapter) as Arc<dyn VenueOpInvoker>,
             wallet: Arc::clone(&adapter) as Arc<dyn WalletGateway>,
         }
@@ -857,6 +868,27 @@ qty_per_level = \"0.1\"
             seen.contains("dca") && seen.contains("dca_scheduler"),
             "both DCA spellings must stay registered"
         );
+    }
+
+    /// Every executable strategy must be visible to the terminal UI: the catalog
+    /// is the only way a strategy gains a configuration form. A registry entry
+    /// without a catalog descriptor can only be configured by hand-written TOML.
+    #[test]
+    fn every_registered_strategy_is_visible_in_the_catalog() {
+        let catalog = longtrader_catalog::builtin_descriptors();
+        let catalog_ids: HashSet<&str> = catalog.iter().map(|d| d.id.as_str()).collect();
+        // `WORKER_STRATEGY_IDS` is the catalog's copy of this registry; both
+        // must agree so neither drifts.
+        let worker_ids: HashSet<&str> =
+            longtrader_catalog::WORKER_STRATEGY_IDS.into_iter().collect();
+        let registry_ids: HashSet<&str> = registry().iter().map(|d| d.name).collect();
+        assert_eq!(registry_ids, worker_ids, "registry and catalog WORKER_STRATEGY_IDS drifted");
+        for name in registry_ids {
+            assert!(
+                catalog_ids.contains(name),
+                "registry strategy {name:?} has no catalog descriptor"
+            );
+        }
     }
 
     /// Drive a built strategy's `run()` until the mock has an open order, then stop

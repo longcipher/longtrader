@@ -7,10 +7,11 @@
 //! and `GRACEFUL_SHUTDOWN` on explicit stop. Orders before ACTIVE are
 //! rejected `SYNC_IN_PROGRESS`.
 //!
-//! ReconcileState is an atomic snapshot stamped with `snapshot_sequence` /
-//! `snapshot_time` (balances/positions/open_orders at one watermark), avoiding
-//! multi-RPC watermark races. Buffered deltas after `snapshot_sequence` are
-//! replayed to converge.
+//! ReconcileState is a best-effort snapshot stamped with `snapshot_sequence` /
+//! `snapshot_time` (balances/positions/open_orders near one watermark). The
+//! open backend has no server-side atomic snapshot yet, so the three reads can
+//! tear across millis (see `RemoteAdapter::sync_state`); buffered deltas after
+//! `snapshot_sequence` must be replayed to converge.
 //!
 //! Lease: `lease_timeout` defaults to `3x heartbeat` interval
 //! (`LEASE_HEARTBEAT_BUDGET = 3`). Missed-heartbeat budget exhausted while
@@ -43,7 +44,11 @@
 //! successful `KeepAlive`; on lease timeout they locally cancel and stop
 //! trading (see `spawn_strategy_lease_guard` helper below).
 
+pub mod events;
+pub mod gate;
+pub mod health;
 pub mod lease;
+pub mod lifecycle;
 pub mod proxy;
 pub mod server;
 pub mod service;
@@ -55,9 +60,10 @@ use std::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
+pub use health::{CodProvider, NullCodProvider, spawn_strategy_lease_guard};
 use lease::{default_lease, lease_timeout_from_proto};
 pub use state::SessionState;
 use tokio::sync::{Mutex, broadcast};
@@ -67,7 +73,7 @@ use crate::{
         FundingRateSource, MarketDataSource, TradingGateway, TriggerOrderGateway, VenueOpInvoker,
         WalletGateway,
     },
-    proto::{common, trading, worker},
+    proto::{common, worker},
 };
 
 /// Default heartbeat interval negotiated at attach.
@@ -142,18 +148,6 @@ pub struct StrategyInfo {
     pub log_events: u64,
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
-        // saturate on overflow (far future) rather than silently returning epoch
-        i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
-    })
-}
-
-/// Millis remainder (<1000) scaled to nanos always fits i32 (<1e9).
-fn nanos_from_ms_rem(ms: i64) -> i32 {
-    i32::try_from(ms.rem_euclid(1000) * 1_000_000).expect("ms remainder fits i32")
-}
-
 /// The client identity presented at `AttachSession`.
 ///
 /// Recorded with the session so a later reconnect has to present the same one:
@@ -206,8 +200,15 @@ impl SessionHandle {
         SessionState::from_u8(self.state.load(Ordering::Acquire))
     }
 
-    fn swap_state(&self, next: SessionState) -> Option<SessionState> {
-        SessionState::from_u8(self.state.swap(next as u8, Ordering::AcqRel))
+    /// CAS transition `expected -> next`. Returns the previous state on
+    /// success, `None` when the current state is corrupt or is not `expected`.
+    /// Concurrent `begin/complete/trip` calls can no longer silently overwrite
+    /// each other.
+    fn transition(&self, expected: SessionState, next: SessionState) -> Option<SessionState> {
+        self.state
+            .compare_exchange(expected as u8, next as u8, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .and_then(SessionState::from_u8)
     }
 
     pub async fn touch(&self) {
@@ -473,41 +474,6 @@ impl SessionManager {
         self
     }
 
-    async fn gateway_health_check(&self) -> Result<(), crate::ports::PortError> {
-        // L2 analogue: lightweight probe via `sync_state` with short timeout.
-        // Propagate timeout / transport errors so watchdog can trigger L2 logic.
-        let res = tokio::time::timeout(
-            HEALTH_PROBE_TIMEOUT,
-            self.gateway.sync_state(&self.default_exchange),
-        )
-        .await
-        .map_err(|_| {
-            crate::ports::PortError::Transport("gateway health check timeout".to_string())
-        })?;
-        res?;
-        Ok(())
-    }
-
-    /// Fold one L2 probe outcome into the consecutive-failure counter and return
-    /// the number of consecutive misses it makes (0 when the probe succeeded).
-    ///
-    /// Consecutive, not per-tick. A single miss is not evidence that the venue is
-    /// down: the probe is a wall-clock budget over `sync_state`, whose own
-    /// contract says its reads are not atomic, so on a saturated host a
-    /// slow-but-healthy backend misses it — and the consequence of believing that
-    /// is a host-wide mass cancel of every ACTIVE session. Two back-to-back
-    /// misses is the first real evidence of a partition, and the gap is still
-    /// covered by L1 (per-session lease) and L3 (venue cancel-on-disconnect).
-    fn note_health_probe(&self, probe: &Result<(), crate::ports::PortError>) -> u32 {
-        if probe.is_ok() {
-            self.health_failures.store(0, Ordering::Release);
-            return 0;
-        }
-        // `fetch_add` wraps silently, so saturate: a long outage must keep
-        // reporting "at threshold" instead of eventually reporting a fresh 0.
-        self.health_failures.fetch_add(1, Ordering::AcqRel).saturating_add(1)
-    }
-
     /// Bind the manager's own `Arc` so the watchdog task can reach it.
     /// Call once after wrapping the manager in `Arc`.
     pub async fn install_self(self: &Arc<Self>) {
@@ -531,644 +497,6 @@ impl SessionManager {
     pub fn default_exchange(&self) -> &common::ExchangeId {
         &self.default_exchange
     }
-
-    /// Validate the terminal token and create a new session.
-    ///
-    /// Token validation reuses the same `api_token` logic as `longtrader-api`
-    /// and `longtrader-terminal` (constant-time comparison via `subtle`);
-    /// `expected_token` is populated from `Config::api_token()` (file
-    /// `api_token_file`). When `expected_token` is `None`/empty the server
-    /// runs unauthenticated (local dev). On success the returned `session_id`
-    /// binds all subsequent requests (`KeepAlive`, `ReconcileState`, ...).
-    /// If `reconnect_session_id` is non-empty and a session with that id
-    /// already exists, the call reuses it (after token validation) and
-    /// refreshes its lease — enabling reconnect with the previous `session_id`.
-    /// A reconnect must also present the same `client` identity the session was
-    /// attached with (see [`ClientIdentity`]).
-    pub async fn attach(
-        &self,
-        token: &str,
-        policy: Option<worker::KillSwitchPolicy>,
-        client: &ClientIdentity,
-    ) -> Result<(String, u32), ManagerError> {
-        self.attach_with_reconnect(token, policy, "", client).await
-    }
-
-    /// Same as [`Self::attach`] but supports reconnect via `reconnect_session_id`.
-    ///
-    /// The reuse branch additionally checks the client identity, so holding a
-    /// live `session_id` is not enough to take a session over: it has to be the
-    /// client that attached it.
-    pub async fn attach_with_reconnect(
-        &self,
-        token: &str,
-        policy: Option<worker::KillSwitchPolicy>,
-        reconnect_session_id: &str,
-        client: &ClientIdentity,
-    ) -> Result<(String, u32), ManagerError> {
-        if let Some(expected) = &self.expected_token {
-            let ok =
-                !expected.is_empty() && constant_time_eq(expected.as_bytes(), token.as_bytes());
-            if !ok {
-                return Err(ManagerError::Unauthenticated);
-            }
-        }
-        // Reconnect path: reuse existing session if the caller supplied a
-        // previously issued session_id and it still exists and is not terminal.
-        #[allow(clippy::collapsible_if)]
-        if !reconnect_session_id.is_empty() {
-            if let Some(handle) = self.sessions.lock().await.get(reconnect_session_id).cloned() {
-                match handle.state() {
-                    Some(SessionState::KillSwitchTripped | SessionState::GracefulShutdown) => {
-                        // Terminal sessions are not resurrectable; the caller must attach
-                        // fresh. Silently falling through here would leak the old session.
-                        return Err(ManagerError::InvalidArgument(format!(
-                            "session {reconnect_session_id} is terminal; attach a new session"
-                        )));
-                    }
-                    Some(SessionState::Attached | SessionState::Syncing | SessionState::Active) => {
-                        // Identity before anything else the reconnect mutates: a refused
-                        // reconnect must not have refreshed the lease.
-                        handle.assert_reconnect_client(client)?;
-                        handle.touch().await;
-                        if let Some(policy) = policy.clone() {
-                            let mut new_policy = handle.policy().await;
-                            apply_policy(&mut new_policy, &policy)?;
-                            handle.set_policy(new_policy).await;
-                        }
-                        return Ok((reconnect_session_id.to_string(), handle.heartbeat_interval_ms));
-                    }
-                    None => {
-                        // Corrupt session state byte; refuse rather than guess.
-                        return Err(ManagerError::InvalidArgument(format!(
-                            "session {reconnect_session_id} has an invalid state"
-                        )));
-                    }
-                }
-            }
-        }
-        let id = ulid::Ulid::generate().to_string();
-        let mut session_policy = SessionPolicy::default();
-        if let Some(policy) = policy.as_ref() {
-            apply_policy(&mut session_policy, policy)?;
-        }
-        let (events_tx, _) = broadcast::channel(256);
-        let handle = Arc::new(SessionHandle {
-            id: id.clone(),
-            state: AtomicU8::new(SessionState::Attached as u8),
-            policy: Mutex::new(session_policy),
-            last_seen: Mutex::new(tokio::time::Instant::now()),
-            heartbeat_interval_ms: DEFAULT_HEARTBEAT_MS,
-            client: client.clone(),
-            events_tx,
-            ring: Mutex::new(VecDeque::new()),
-            tracked_coids: Mutex::new(HashSet::new()),
-            strategy: Mutex::new(None),
-            orders_submitted: AtomicU64::new(0),
-            log_events: AtomicU64::new(0),
-            seq: AtomicU64::new(0),
-            snapshot_seq: AtomicU64::new(0),
-        });
-        self.sessions.lock().await.insert(id.clone(), Arc::clone(&handle));
-        self.ensure_watchdog().await;
-        Ok((id, DEFAULT_HEARTBEAT_MS))
-    }
-
-    pub async fn get(&self, session_id: &str) -> Result<Arc<SessionHandle>, ManagerError> {
-        self.sessions
-            .lock()
-            .await
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| ManagerError::NotFound(session_id.to_string()))
-    }
-
-    /// Transition ATTACHED → SYNCING before the snapshot fetch.
-    pub async fn begin_reconcile(&self, session_id: &str) -> Result<(), ManagerError> {
-        let handle = self.get(session_id).await?;
-        if let Some(prev) = handle.swap_state(SessionState::Syncing) {
-            self.publish_state_change(&handle, prev, SessionState::Syncing, "reconcile started")
-                .await;
-        }
-        Ok(())
-    }
-
-    /// Complete reconciliation: transition to ACTIVE. Orders submitted before
-    /// this point would be rejected by session-scoped trading paths.
-    /// `snapshot_sequence` is the watermark at snapshot time (§7) — buffered
-    /// deltas with `header.sequence <= snapshot_sequence` must be discarded,
-    /// remainder applied in order before trading.
-    pub async fn complete_reconcile(
-        &self,
-        session_id: &str,
-        snapshot_sequence: u64,
-    ) -> Result<(), ManagerError> {
-        let handle = self.get(session_id).await?;
-        handle.snapshot_seq.store(snapshot_sequence, Ordering::Release);
-        if let Some(prev) = handle.swap_state(SessionState::Active) {
-            self.publish_state_change(&handle, prev, SessionState::Active, "reconcile complete")
-                .await;
-        }
-        Ok(())
-    }
-
-    /// Current snapshot watermark for this session (0 if never reconciled).
-    pub async fn snapshot_sequence(&self, session_id: &str) -> Result<u64, ManagerError> {
-        let handle = self.get(session_id).await?;
-        Ok(handle.snapshot_seq.load(Ordering::Acquire))
-    }
-
-    /// Gate a session-scoped order submission.
-    ///
-    /// This is the enforcement point behind `worker.proto`'s
-    /// "Orders submitted before ACTIVE are rejected with reason
-    /// SYNC_IN_PROGRESS". A session may only trade once it has reconciled, so
-    /// it cannot act on stale state after a reconnect or a restart.
-    ///
-    /// `Ok(None)` means the caller passed an empty `session_id`: an unscoped
-    /// operator action (the CLI) that is neither gated nor tracked. `Ok(Some)`
-    /// carries the handle that callers must pass to
-    /// [`Self::record_submitted_orders`].
-    pub async fn authorize_order_submission(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<Arc<SessionHandle>>, ManagerError> {
-        if session_id.is_empty() {
-            return Ok(None);
-        }
-        let handle = self.get(session_id).await?;
-        // A corrupt state byte is never treated as "active" — fail closed.
-        if handle.state() != Some(SessionState::Active) {
-            return Err(ManagerError::SyncInProgress {
-                session_id: session_id.to_string(),
-                state: handle.state(),
-            });
-        }
-        Ok(Some(handle))
-    }
-
-    /// Attribute freshly submitted orders to a session so that
-    /// `KillSwitchPolicy.SCOPE_SESSION_ORDERS` and
-    /// `StopStrategy.cancel_open_orders` cancel exactly these orders.
-    ///
-    /// Orders with an empty venue-assigned id are skipped rather than tracked
-    /// as an empty string, which would otherwise cancel an unrelated order.
-    pub async fn record_submitted_orders(&self, handle: &SessionHandle, orders: &[trading::Order]) {
-        let mut tracked = handle.tracked_coids.lock().await;
-        // Count what was actually tracked, not what was handed over: an order
-        // with no venue id is credited to the session but can never be cancelled
-        // by the kill-switch, so counting it would make `StrategyStatus` report
-        // more orders than the session is actually able to unwind.
-        let mut attributed = 0u64;
-        for order in orders {
-            if order.id.is_empty() {
-                continue;
-            }
-            tracked.insert(order.id.clone());
-            attributed += 1;
-        }
-        drop(tracked);
-        if attributed > 0 {
-            handle.orders_submitted.fetch_add(attributed, Ordering::Relaxed);
-        }
-    }
-
-    /// Cancel every order this session tracked, returning one `"<id>: <error>"`
-    /// entry per order the venue refused.
-    ///
-    /// Best-effort by design: one refused cancel must not stop the others from
-    /// being attempted, or a venue that rejects a single id leaves the rest of the
-    /// session's orders resting. Every failure is reported to the caller, so
-    /// neither `StopStrategy` nor the kill-switch can report success over a
-    /// partially unwound session.
-    async fn cancel_session_orders(&self, handle: &SessionHandle) -> Vec<String> {
-        let mut failures = Vec::new();
-        for coid in handle.tracked_orders().await {
-            let req = trading::CancelOrderRequest {
-                exchange_id: buffa::MessageField::some(self.default_exchange.clone()),
-                order_id: coid.clone(),
-                symbol: String::new(),
-                ..Default::default()
-            };
-            if let Err(err) = self.gateway.cancel_order(req).await {
-                tracing::error!(
-                    session = %handle.id,
-                    coid = %coid,
-                    error = %err,
-                    "session order cancel failed; it may still be resting on the venue"
-                );
-                failures.push(format!("{coid}: {err}"));
-            }
-        }
-        failures
-    }
-
-    /// Stop a session: optionally cancel its tracked orders, then transition
-    /// to `GRACEFUL_SHUTDOWN`. Returns the state actually reached.
-    ///
-    /// Idempotent: a session that already reached a terminal state is returned as
-    /// it is. Re-running the cancels would address orders the kill switch (or a
-    /// previous stop) already unwound, and publishing
-    /// `GRACEFUL_SHUTDOWN -> GRACEFUL_SHUTDOWN` would make a consumer that
-    /// treats every state change as an action act twice.
-    ///
-    /// The state transition is unconditional — a refused cancel never leaves a
-    /// session trading — but a refused cancel is *not* hidden: the caller gets
-    /// [`ManagerError::CancelsFailed`] carrying the state that was reached, so
-    /// `StopStrategy` cannot answer `final_state: GRACEFUL_SHUTDOWN` while
-    /// orders are still resting.
-    ///
-    /// Shared by the `StopStrategy` RPC and by embedders; the previous
-    /// inline copy in the service layer is replaced by this.
-    pub async fn stop_session(
-        &self,
-        session_id: &str,
-        cancel_open_orders: bool,
-    ) -> Result<Option<SessionState>, ManagerError> {
-        let handle = self.get(session_id).await?;
-        let state = handle.state();
-        if state.is_some_and(SessionState::is_terminal) {
-            return Ok(state);
-        }
-        let failures =
-            if cancel_open_orders { self.cancel_session_orders(&handle).await } else { Vec::new() };
-        let Some(prev) = handle.swap_state(SessionState::GracefulShutdown) else {
-            return Err(ManagerError::InvalidArgument(format!(
-                "session {session_id} has an invalid state"
-            )));
-        };
-        self.publish_state_change(&handle, prev, SessionState::GracefulShutdown, "stop requested")
-            .await;
-        if !failures.is_empty() {
-            return Err(ManagerError::CancelsFailed {
-                session_id: session_id.to_string(),
-                state: handle.state(),
-                failures,
-            });
-        }
-        Ok(handle.state())
-    }
-
-    /// Record a strategy log event into the ring/broadcast bus.
-    pub async fn report_log(
-        &self,
-        session_id: &str,
-        level: worker::LogLevel,
-        message: String,
-        fields: HashMap<String, String>,
-    ) -> Result<(), ManagerError> {
-        let handle = self.get(session_id).await?;
-        let now = now_ms();
-        let event = worker::LogEvent {
-            session_id: session_id.to_string(),
-            level: buffa::EnumValue::Known(level),
-            message: message.clone(),
-            timestamp: buffa::MessageField::some(buffa_types::google::protobuf::Timestamp {
-                seconds: now.div_euclid(1000),
-                nanos: nanos_from_ms_rem(now),
-                ..Default::default()
-            }),
-            fields: fields.into_iter().collect(),
-            ..Default::default()
-        };
-        // The session-scoped counter is the only one: it moves for every accepted
-        // event, so logs reported before `RegisterStrategy` are counted once the
-        // record appears instead of being reported as zero forever. The record's
-        // own field is overwritten on read (`SessionHandle::strategy_info`).
-        handle.log_events.fetch_add(1, Ordering::Relaxed);
-        match level {
-            worker::LogLevel::Error => {
-                tracing::error!(session = %session_id, "{message}");
-            }
-            worker::LogLevel::Warn => {
-                tracing::warn!(session = %session_id, "{message}");
-            }
-            worker::LogLevel::Debug => {
-                tracing::debug!(session = %session_id, "{message}");
-            }
-            _ => {
-                tracing::info!(session = %session_id, "{message}");
-            }
-        }
-        handle
-            .publish(worker::StrategyEvent {
-                header: buffa::MessageField::some(common::EventHeader::default()),
-                event: Some(worker::strategy_event::Event::Log(Box::new(event))),
-                resume_token: String::new(),
-                ..Default::default()
-            })
-            .await;
-        Ok(())
-    }
-
-    /// Publish an order update attributed to this session.
-    pub async fn publish_order_update(
-        &self,
-        session_id: &str,
-        order: trading::Order,
-        update_type: String,
-    ) -> Result<(), ManagerError> {
-        let handle = self.get(session_id).await?;
-        handle
-            .publish(worker::StrategyEvent {
-                header: buffa::MessageField::some(common::EventHeader::default()),
-                event: Some(worker::strategy_event::Event::OrderUpdate(Box::new(
-                    worker::OrderUpdate {
-                        order: buffa::MessageField::some(order),
-                        update_type,
-                        ..Default::default()
-                    },
-                ))),
-                resume_token: String::new(),
-                ..Default::default()
-            })
-            .await;
-        Ok(())
-    }
-
-    pub async fn publish_state_change(
-        &self,
-        handle: &SessionHandle,
-        from: SessionState,
-        to: SessionState,
-        reason: &str,
-    ) {
-        handle
-            .publish(worker::StrategyEvent {
-                header: buffa::MessageField::some(common::EventHeader::default()),
-                event: Some(worker::strategy_event::Event::StateChange(Box::new(
-                    worker::StateChange {
-                        from: buffa::EnumValue::Known(from.to_proto()),
-                        to: buffa::EnumValue::Known(to.to_proto()),
-                        reason: reason.to_string(),
-                        ..Default::default()
-                    },
-                ))),
-                resume_token: String::new(),
-                ..Default::default()
-            })
-            .await;
-    }
-
-    /// Check one session's lease and trip the kill-switch when expired.
-    /// Used by the watchdog tick and available to ops tooling/tests.
-    pub async fn check_lease_expiry(&self, session_id: &str) -> Result<bool, ManagerError> {
-        let handle = self.get(session_id).await?;
-        let policy = handle.policy().await;
-        let expired = handle.state() == Some(SessionState::Active) &&
-            u128::from(handle.last_seen_elapsed_ms().await) > policy.lease_timeout.as_millis();
-        if expired {
-            self.trip_kill_switch(&handle, policy.lease_timeout).await;
-        }
-        Ok(expired)
-    }
-
-    /// Spawn the lease watchdog once; subsequent calls are no-ops.
-    ///
-    /// Only the `Weak` is handed to the task. Upgrading it into a strong `Arc`
-    /// that the loop holds would make the manager immortal — its session map, its
-    /// adapter and its sockets could never be dropped, so a worker that stopped
-    /// accepting connections would still keep every one of them alive.
-    async fn ensure_watchdog(&self) {
-        if self.watchdog_started.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        if let Some(weak) = self.self_weak.lock().await.clone() {
-            tokio::spawn(watchdog_loop(weak));
-        }
-    }
-
-    /// Lease expiry tripwire for one session: flip state and execute the
-    /// configured kill-switch scope.
-    ///
-    /// Returns nothing on purpose: this runs on the watchdog's own path, which
-    /// must not abort on a venue that refuses a cancel, and the scope's outcome
-    /// is logged (`error` for a refused cancel, because the order may still be
-    /// resting) rather than propagated.
-    async fn trip_kill_switch(&self, handle: &SessionHandle, timeout: Duration) {
-        let Some(prev) = handle.swap_state(SessionState::KillSwitchTripped) else {
-            // Corrupt state byte: refuse to publish a guessed transition.
-            tracing::error!(session = %handle.id, "corrupt session state; refusing kill-switch");
-            return;
-        };
-        tracing::error!(
-            session = %handle.id,
-            lease_timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-            "session lease expired; tripping kill-switch"
-        );
-        self.publish_state_change(handle, prev, SessionState::KillSwitchTripped, "lease expired")
-            .await;
-        let policy = handle.policy().await;
-        match policy.scope {
-            worker::kill_switch_policy::Scope::SessionOrders => {
-                let failures = self.cancel_session_orders(handle).await;
-                if !failures.is_empty() {
-                    tracing::error!(
-                        session = %handle.id,
-                        failures = ?failures,
-                        "kill-switch scope SESSION_ORDERS left orders resting on the venue"
-                    );
-                }
-            }
-            worker::kill_switch_policy::Scope::AllOrders => {
-                let req = trading::CancelAllOrdersRequest {
-                    exchange_id: buffa::MessageField::some(self.default_exchange.clone()),
-                    symbol: String::new(),
-                    ..Default::default()
-                };
-                if let Err(err) = self.gateway.cancel_all_orders(req).await {
-                    tracing::error!(
-                        session = %handle.id,
-                        error = %err,
-                        "kill-switch cancel-all failed"
-                    );
-                }
-            }
-            _ => {
-                tracing::warn!(session = %handle.id, "kill-switch scope NONE; no cancellations");
-            }
-        }
-    }
-}
-
-/// Venue-native Cancel-On-Disconnect provider (L3). Implemented by venues
-/// that support `countdownCancelAll` / `cancel-on-disconnect`. When present,
-/// the watchdog renews the COD countdown each tick while healthy; on silence
-/// the venue auto-cancels. Capability-gated — venues without COD fall back to
-/// L1+L2 only.
-#[async_trait::async_trait]
-pub trait CodProvider: Send + Sync {
-    async fn keepalive(&self, session_id: &str) -> Result<(), crate::ports::PortError>;
-    fn supports_cod(&self) -> bool {
-        true
-    }
-}
-
-/// Honest no-op COD provider used when no venue-native cancel-on-disconnect is
-/// configured. `supports_cod` returns `false` so the watchdog never relies on
-/// it; venues that expose COD inject a real provider via
-/// [`SessionManager::with_cod_provider`].
-pub struct NullCodProvider;
-
-#[async_trait::async_trait]
-impl CodProvider for NullCodProvider {
-    async fn keepalive(&self, _session_id: &str) -> Result<(), crate::ports::PortError> {
-        Ok(())
-    }
-    fn supports_cod(&self) -> bool {
-        false
-    }
-}
-
-#[allow(clippy::cognitive_complexity, clippy::collapsible_if)]
-async fn watchdog_loop(weak: Weak<SessionManager>) {
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
-    loop {
-        tick.tick().await;
-        // Upgraded per pass and dropped at the end of it, so the task itself never
-        // keeps the manager alive; a dropped manager ends the loop on the next
-        // pass instead of spinning against a registry nobody can reach.
-        let Some(manager) = weak.upgrade() else {
-            return;
-        };
-        // Snapshot session handles to avoid holding the lock during processing.
-        let handles: Vec<Arc<SessionHandle>> = {
-            let sessions = manager.sessions.lock().await;
-            sessions.values().map(Arc::clone).collect()
-        };
-        // Process each session's L1 lease check in parallel with bounded concurrency.
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
-        let mut futures = Vec::with_capacity(handles.len());
-        for handle in handles {
-            let manager = Arc::clone(&manager);
-            let sem = Arc::clone(&semaphore);
-            futures.push(tokio::spawn(async move {
-                let _permit = sem.acquire().await;
-                // L3: renew venue COD while session is Active (best-effort, capability-gated).
-                if handle.state() == Some(SessionState::Active) &&
-                    let Some(cod) = manager.cod_provider.as_ref() &&
-                    cod.supports_cod() &&
-                    let Err(e) = cod.keepalive(&handle.id).await
-                {
-                    tracing::debug!(session = %handle.id, error = %e, "COD keepalive failed — will rely on L1/L2");
-                }
-                // `check_lease_expiry` owns the expiry predicate so the loop and
-                // the ops-facing check can never disagree about what "expired"
-                // means; the loop only observes the outcome.
-                match manager.check_lease_expiry(&handle.id).await {
-                    Ok(true) => {
-                        tracing::warn!(
-                            session = %handle.id,
-                            "L1 lease expired — kill-switch executed (L2/L3 as fallback)"
-                        );
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            session = %handle.id,
-                            error = %error,
-                            "L1 lease check failed; leaving the session alone"
-                        );
-                    }
-                }
-            }));
-        }
-        // Wait for all L1 checks to complete before L2.
-        for f in futures {
-            let _ = f.await;
-        }
-        // L2: detect gateway gRPC loss via health probe (daemon watchdog analogue).
-        // On failure, proactively trip every Active session so stale orders cannot
-        // survive a partition — the final backstop beyond the L1 lease. Only after
-        // `HEALTH_PROBE_FAILURE_THRESHOLD` *consecutive* misses, because a single
-        // probe timeout is not evidence the venue is down.
-        let probe = manager.gateway_health_check().await;
-        let misses = manager.note_health_probe(&probe);
-        // `misses` only reaches the threshold through failures, so a healthy probe
-        // can never trip.
-        let tripped = misses >= HEALTH_PROBE_FAILURE_THRESHOLD;
-        if let Err(error) = &probe {
-            if tripped {
-                tracing::error!(
-                    error = %error,
-                    consecutive_misses = misses,
-                    "L2 daemon watchdog tripping all active sessions"
-                );
-            } else {
-                tracing::warn!(
-                    error = %error,
-                    consecutive_misses = misses,
-                    "gateway health probe failed; below the L2 trip threshold"
-                );
-            }
-        }
-        if tripped {
-            let active: Vec<Arc<SessionHandle>> = {
-                let sessions = manager.sessions.lock().await;
-                sessions
-                    .values()
-                    .filter(|h| h.state() == Some(SessionState::Active))
-                    .cloned()
-                    .collect()
-            };
-            for handle in active {
-                manager.trip_kill_switch(&handle, handle.policy().await.lease_timeout).await;
-            }
-        }
-    }
-}
-
-/// Strategy-side lease timeout simulation (design doc §6.6 multi-level watchdog).
-///
-/// External strategies SHOULD spawn this guard after `AttachSession`. It wakes
-/// every `heartbeat_interval` (the negotiated `heartbeat_interval_ms`) and
-/// checks whether the local lease has timed out since the last successful
-/// `KeepAlive`. On timeout it logs and asks the manager to cancel via the
-/// configured `KillSwitchPolicy` scope — a stub that mirrors what a real
-/// sidecar SDK does over Connect RPC.
-///
-/// The decision uses the session's own policy lease, the same number
-/// `check_lease_expiry` uses. There is deliberately no caller-supplied budget to
-/// override it with: when the guard was handed one, it decided on *its* value
-/// and tripped on the session's, so a guard configured with a longer budget than
-/// the session held never fired at all.
-///
-/// Ponytail stub: uses the manager's `check_lease_expiry` internally so the
-/// same scope-routing logic (SESSION_ORDERS / ALL_ORDERS / NONE) is exercised
-/// without duplicating cancel code. Spawn via `tokio::spawn`.
-pub fn spawn_strategy_lease_guard(
-    manager: Arc<SessionManager>,
-    session_id: String,
-    heartbeat_interval: Duration,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(heartbeat_interval);
-        // Strategy-side watchdog: spawn a timer that checks the lease every
-        // `heartbeat_interval` and trips the cancel path on timeout.
-        loop {
-            tick.tick().await;
-            let Ok(handle) = manager.get(&session_id).await else {
-                break; // session gone
-            };
-            let lease_timeout = handle.policy().await.lease_timeout;
-            let elapsed = Duration::from_millis(handle.last_seen_elapsed_ms().await);
-            if elapsed > lease_timeout {
-                tracing::warn!(
-                    session = %session_id,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    lease_timeout_ms = lease_timeout.as_millis() as u64,
-                    "strategy-side lease timeout detected; triggering kill-switch cancel"
-                );
-                let _ = manager.check_lease_expiry(&session_id).await;
-                break;
-            }
-        }
-    })
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    use subtle::ConstantTimeEq;
-    a.ct_eq(b).into()
 }
 
 #[cfg(test)]
@@ -1178,7 +506,7 @@ mod tests {
     use buffa::{EnumValue, MessageField};
 
     use super::*;
-    use crate::{adapters::MockAdapter, ports::PortError};
+    use crate::{adapters::MockAdapter, ports::PortError, proto::trading};
 
     fn test_manager(price: rust_decimal::Decimal) -> Arc<SessionManager> {
         let adapter = StdArc::new(MockAdapter::new(price));
@@ -2234,6 +1562,157 @@ mod tests {
         assert!(open.is_empty(), "no open order may survive the account-wide scope: {open:?}");
     }
 
+    /// A kill-switch trip with `SCOPE_ALL_ORDERS` cancels on the bound venue
+    /// with no symbol filter: the recorded request must carry the session's
+    /// exchange id and an empty symbol, not a defaulted or narrowed one. The
+    /// venue is deliberately non-empty here — an empty exchange id would make
+    /// a dropped field indistinguishable from the real request.
+    #[tokio::test(start_paused = true)]
+    async fn an_all_orders_trip_targets_the_bound_venue_unfiltered() {
+        let adapter = StdArc::new(MockAdapter::new(rust_decimal_macros::dec!(100)));
+        let gateway: StdArc<dyn TradingGateway> = adapter.clone();
+        let market: StdArc<dyn MarketDataSource> = adapter.clone();
+        let manager = Arc::new(SessionManager::new(
+            None,
+            crate::adapters::exchange_id("mock", ""),
+            gateway,
+            market,
+        ));
+        let mut policy = kill_switch_policy(600);
+        policy.scope = EnumValue::Known(worker::kill_switch_policy::Scope::AllOrders);
+        let (session_id, _) = attach_anonymous(&manager, Some(policy)).await.expect("attach");
+        let handle = manager.get(&session_id).await.expect("test setup");
+        manager.begin_reconcile(&session_id).await.expect("test setup");
+        manager.complete_reconcile(&session_id, 0).await.expect("test setup");
+        backdate_lease(&handle, Duration::from_secs(3600)).await;
+
+        assert!(manager.check_lease_expiry(&session_id).await.expect("test setup"));
+        assert_eq!(handle.state(), Some(SessionState::KillSwitchTripped));
+        assert_eq!(
+            adapter.cancel_all_seen().await,
+            vec![("mock".to_string(), String::new())],
+            "the trip must cancel on the bound venue with no symbol filter"
+        );
+    }
+
+    /// A kill-switch trip targets the bound venue with no symbol filter: the
+    /// request the venue sees must carry the session's exchange id and an
+    /// empty symbol, not a defaulted or narrowed one.
+    #[tokio::test(start_paused = true)]
+    async fn a_kill_switch_cancel_all_targets_the_bound_venue_unfiltered() {
+        let adapter = StdArc::new(MockAdapter::new(rust_decimal_macros::dec!(100)));
+        let gateway: StdArc<dyn TradingGateway> = adapter.clone();
+        let market: StdArc<dyn MarketDataSource> = adapter.clone();
+        let manager = Arc::new(SessionManager::new(
+            None,
+            crate::adapters::exchange_id("mock", ""),
+            gateway,
+            market,
+        ));
+        let mut policy = kill_switch_policy(600);
+        policy.scope = EnumValue::Known(worker::kill_switch_policy::Scope::AllOrders);
+        let (session_id, _) = attach_anonymous(&manager, Some(policy)).await.expect("attach");
+        let handle = manager.get(&session_id).await.expect("test setup");
+        manager.begin_reconcile(&session_id).await.expect("test setup");
+        manager.complete_reconcile(&session_id, 0).await.expect("test setup");
+        backdate_lease(&handle, Duration::from_secs(3600)).await;
+
+        assert!(manager.check_lease_expiry(&session_id).await.expect("test setup"));
+        assert_eq!(
+            adapter.cancel_all_seen().await,
+            vec![("mock".to_string(), String::new())],
+            "the trip must cancel on the bound venue with no symbol filter"
+        );
+    }
+
+    /// Layer that records `(level, message)` pairs so tests can assert the
+    /// worker stays loud on failure paths instead of silently swallowing them.
+    /// Installed with thread-local `set_default`, which is restored on drop:
+    /// no global subscriber, so parallel tests cannot interfere with each
+    /// other. The future under test is polled inline on the current-thread
+    /// runtime, so the thread-local default always applies.
+    struct CaptureLayer {
+        events: StdArc<std::sync::Mutex<Vec<(tracing::Level, String)>>>,
+    }
+
+    struct CapturedMessage(Option<String>);
+
+    impl tracing::field::Visit for CapturedMessage {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = Some(format!("{value:?}"));
+            }
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "message" {
+                self.0 = Some(value.to_string());
+            }
+        }
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = CapturedMessage(None);
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("log capture")
+                .push((event.metadata().level().clone(), visitor.0.unwrap_or_default()));
+        }
+    }
+
+    /// A venue that refuses a kill-switch cancel must surface as an error log,
+    /// not a silent unwind: operators page on this line.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_kill_switch_cancel_is_logged_as_an_error() {
+        use tracing_subscriber::prelude::*;
+
+        let adapter = StdArc::new(MockAdapter::new(rust_decimal_macros::dec!(100)));
+        let gateway: StdArc<dyn TradingGateway> = adapter.clone();
+        let market: StdArc<dyn MarketDataSource> = adapter.clone();
+        let manager =
+            Arc::new(SessionManager::new(None, common::ExchangeId::default(), gateway, market));
+        let (session_id, _) = attach_anonymous(&manager, None).await.expect("attach");
+        let handle = manager.get(&session_id).await.expect("test setup");
+        manager.begin_reconcile(&session_id).await.expect("test setup");
+        manager.complete_reconcile(&session_id, 0).await.expect("test setup");
+
+        let order = manager
+            .gateway()
+            .create_order(limit_order_req(&manager, "doomed"))
+            .await
+            .expect("order placed");
+        manager.record_submitted_orders(&handle, std::slice::from_ref(&order)).await;
+        handle.touch().await;
+
+        // The only failure injection: the venue refuses the cancel the
+        // kill-switch is about to send.
+        adapter.fail_next_cancels(1).await;
+        backdate_lease(&handle, Duration::from_secs(3600)).await;
+
+        let events: StdArc<std::sync::Mutex<Vec<(tracing::Level, String)>>> = StdArc::default();
+        let subscriber = tracing_subscriber::registry::Registry::default()
+            .with(CaptureLayer { events: StdArc::clone(&events) });
+        let _guard = tracing_subscriber::util::SubscriberInitExt::set_default(subscriber);
+        assert!(manager.check_lease_expiry(&session_id).await.expect("test setup"));
+        assert_eq!(handle.state(), Some(SessionState::KillSwitchTripped));
+
+        let events = events.lock().expect("log capture");
+        assert!(
+            events.iter().any(|(level, message)| *level == tracing::Level::ERROR &&
+                message.contains("left orders resting")),
+            "a refused kill-switch cancel must be loud, got: {events:?}"
+        );
+    }
+
     /// `SCOPE_NONE` is a deliberate "log only": the session still trips, so the
     /// state machine stays honest, but the venue's orders are left resting. A
     /// scope that cancelled anything here would make the setting a lie.
@@ -2441,6 +1920,68 @@ mod tests {
         assert!(manager.note_health_probe(&miss()) >= HEALTH_PROBE_FAILURE_THRESHOLD);
     }
 
+    /// A venue with native cancel-on-disconnect keeps the trait default
+    /// (`supports_cod() == true`); the null provider used when no venue
+    /// supports it reports `false` so the watchdog never relies on it.
+    struct NativeCod;
+
+    #[async_trait::async_trait]
+    impl crate::session::CodProvider for NativeCod {
+        async fn keepalive(&self, _session_id: &str) -> Result<(), crate::ports::PortError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cod_support_is_opt_in_not_assumed() {
+        assert!(
+            !crate::session::NullCodProvider.supports_cod(),
+            "the null provider must not claim native cancel-on-disconnect"
+        );
+        assert!(
+            NativeCod.supports_cod(),
+            "the trait default opts providers in; only an explicit false opts out"
+        );
+    }
+
+    #[test]
+    fn cod_renewal_is_gated_on_active_sessions_with_native_support() {
+        let cod: StdArc<dyn crate::session::CodProvider> = StdArc::new(NativeCod);
+        let null: StdArc<dyn crate::session::CodProvider> =
+            StdArc::new(crate::session::NullCodProvider);
+        assert!(SessionManager::should_renew_cod(Some(SessionState::Active), Some(&cod)));
+        assert!(!SessionManager::should_renew_cod(Some(SessionState::Attached), Some(&cod)));
+        assert!(!SessionManager::should_renew_cod(Some(SessionState::Syncing), Some(&cod)));
+        assert!(!SessionManager::should_renew_cod(
+            Some(SessionState::KillSwitchTripped),
+            Some(&cod)
+        ));
+        assert!(!SessionManager::should_renew_cod(None, Some(&cod)));
+        assert!(!SessionManager::should_renew_cod(Some(SessionState::Active), None));
+        assert!(
+            !SessionManager::should_renew_cod(Some(SessionState::Active), Some(&null)),
+            "a venue without native COD must fall back to lease + probe tiers"
+        );
+    }
+
+    /// The miss counter saturates instead of wrapping: an outage long enough to
+    /// reach `u32::MAX` must keep reporting "at threshold", never a fresh run
+    /// that looks like recovery followed by a brand-new single miss.
+    #[test]
+    fn a_health_probe_miss_counter_saturates_at_the_maximum() {
+        use std::sync::atomic::Ordering;
+
+        let manager = test_manager(rust_decimal_macros::dec!(100));
+        let miss = || Err(crate::ports::PortError::Transport("daemon unreachable".to_string()));
+        manager.health_failures.store(u32::MAX - 1, Ordering::Release);
+        assert_eq!(manager.note_health_probe(&miss()), u32::MAX);
+        assert_eq!(
+            manager.note_health_probe(&miss()),
+            u32::MAX,
+            "a saturated counter must not wrap back to the trip threshold"
+        );
+    }
+
     // ---- The strategy-side lease guard --------------------------------------
 
     /// The guard runs for the life of the worker, so a session that disappears
@@ -2515,6 +2056,92 @@ mod tests {
             handle.state(),
             Some(SessionState::KillSwitchTripped),
             "the session's policy lease is the only budget the guard knows"
+        );
+    }
+
+    /// The lease boundary is exclusive: an elapsed time exactly equal to the
+    /// lease has not lapsed it. `tokio::time::sleep` rounds up to the next
+    /// millisecond and can never land on the boundary, so the lease clock is
+    /// backdated to it instead.
+    #[tokio::test(start_paused = true)]
+    async fn the_strategy_lease_guard_respects_the_exact_lease_boundary() {
+        let manager = test_manager(rust_decimal_macros::dec!(100));
+        let (session_id, _) =
+            attach_anonymous(&manager, Some(kill_switch_policy(600))).await.expect("attach");
+        let handle = manager.get(&session_id).await.expect("test setup");
+        manager.begin_reconcile(&session_id).await.expect("test setup");
+        manager.complete_reconcile(&session_id, 0).await.expect("test setup");
+        handle.touch().await;
+        backdate_lease(&handle, Duration::from_millis(100)).await;
+
+        let guard = spawn_strategy_lease_guard(
+            StdArc::clone(&manager),
+            session_id.clone(),
+            Duration::from_millis(500),
+        );
+        // Ticks land at 500ms (elapsed 600ms == lease: no trip) and 1000ms
+        // (elapsed 1100ms: trip). Let the first tick run, then assert the
+        // session is still trading before allowing the second.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            handle.state(),
+            Some(SessionState::Active),
+            "an elapsed time exactly equal to the lease is not a lapse"
+        );
+        tokio::time::timeout(Duration::from_secs(30), guard)
+            .await
+            .expect("the guard must fire once the lease truly lapses")
+            .expect("the guard must not panic");
+        assert_eq!(
+            handle.state(),
+            Some(SessionState::KillSwitchTripped),
+            "the guard must still trip past the boundary"
+        );
+    }
+
+    /// The mock's `sync_state` must hand back a usable recovery snapshot: a
+    /// strictly increasing watermark starting at 1 (not the old constant 0,
+    /// which made resume-token paths untestable), a real snapshot timestamp,
+    /// the seeded USD balance, and exactly the open orders.
+    #[tokio::test(start_paused = true)]
+    async fn mock_sync_state_hands_out_monotonic_watermarks() {
+        let manager = test_manager(rust_decimal_macros::dec!(100));
+        let gateway = manager.gateway();
+        let order =
+            gateway.create_order(limit_order_req(&manager, "mine")).await.expect("order placed");
+
+        let before = std::time::SystemTime::now();
+        let first =
+            gateway.sync_state(&manager.default_exchange().clone()).await.expect("sync_state");
+        let after = std::time::SystemTime::now();
+        let second =
+            gateway.sync_state(&manager.default_exchange().clone()).await.expect("sync_state");
+
+        // Watermarks start at 1 and increase by exactly one per snapshot.
+        assert_eq!(first.snapshot_sequence, 1, "the first snapshot stamps 1, not 0");
+        assert_eq!(second.snapshot_sequence, 2, "watermarks must be monotonic");
+        // A real snapshot time, not a defaulted zero timestamp: it must fall
+        // inside the wall-clock window bracketing the call.
+        let stamped = first.snapshot_time.as_option().expect("snapshots carry their snapshot time");
+        let stamped_ms = i128::from(stamped.seconds) * 1000 + i128::from(stamped.nanos) / 1_000_000;
+        let ms_since_epoch = |t: std::time::SystemTime| {
+            t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i128).unwrap_or(0)
+        };
+        assert!(
+            (ms_since_epoch(before)..=ms_since_epoch(after).max(ms_since_epoch(before)))
+                .contains(&stamped_ms),
+            "snapshot_time must bracket the call, got {stamped_ms}"
+        );
+        // The seeded USD balance and exactly the open orders.
+        assert_eq!(first.balances.len(), 1);
+        assert_eq!(first.balances[0].currency, "USD");
+        assert_eq!(
+            first.open_orders.iter().map(|o| o.id.clone()).collect::<Vec<_>>(),
+            vec![order.id.clone()],
+            "only open orders are reported"
         );
     }
 

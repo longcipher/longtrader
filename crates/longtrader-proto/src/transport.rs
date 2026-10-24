@@ -27,12 +27,20 @@ pub const CONNECT_PROTO_UNARY: &str = "application/proto";
 /// Connect content-type for server-streaming (`application/connect+proto`).
 pub const CONNECT_PROTO_STREAM: &str = "application/connect+proto";
 
+/// Default deadline for one unary call (mirrors the Go SDK `unaryTimeout = 10s`).
+/// Prevents a hung venue from stalling a strategy tick and the L1 watchdog.
+pub const UNARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Perform one Connect unary call: POST `base_url/{service}/{method}` with
 /// `application/proto` and an optional bearer token, then decode the response.
 ///
 /// The URL is composed by the crate's shared `service_url` helper, which owns
 /// the trailing-slash and `://` invariants — the caller may pass a base exactly
 /// as it was configured.
+///
+/// Every network wait is bounded by [`UNARY_TIMEOUT`]: a hung backend surfaces
+/// as `TransportError::Http("deadline exceeded …")` instead of stalling the
+/// caller forever.
 pub async fn unary<Q: Message, R: Message + Default>(
     http: &hpx::Client,
     base_url: &str,
@@ -47,15 +55,27 @@ pub async fn unary<Q: Message, R: Message + Default>(
     if let Some(token) = token.filter(|t| !t.is_empty()) {
         builder = builder.header("authorization", format!("Bearer {token}"));
     }
-    let resp = builder.send().await.map_err(|e| TransportError::Http(e.to_string()))?;
+    let resp = tokio::time::timeout(UNARY_TIMEOUT, builder.send())
+        .await
+        .map_err(|_| {
+            TransportError::Http(format!("deadline exceeded {service}/{method} after 10s"))
+        })
+        .and_then(|r| r.map_err(|e| TransportError::Http(e.to_string())))?;
     let status = resp.status();
     if !status.is_success() {
-        let bytes =
-            resp.bytes().await.map_err(|e| TransportError::Http(format!("read error: {e}")))?;
+        let bytes = tokio::time::timeout(UNARY_TIMEOUT, resp.bytes())
+            .await
+            .map_err(|_| {
+                TransportError::Http(format!("deadline exceeded reading {service}/{method}"))
+            })?
+            .map_err(|e| TransportError::Http(format!("read error: {e}")))?;
         let text = String::from_utf8_lossy(&bytes).to_string();
         return Err(TransportError::Rpc { code: u32::from(status.as_u16()), message: text });
     }
-    let bytes = resp.bytes().await.map_err(|e| TransportError::Http(format!("read error: {e}")))?;
+    let bytes = tokio::time::timeout(UNARY_TIMEOUT, resp.bytes())
+        .await
+        .map_err(|_| TransportError::Http(format!("deadline exceeded reading {service}/{method}")))?
+        .map_err(|e| TransportError::Http(format!("read error: {e}")))?;
     R::decode_from_slice(&bytes)
         .map_err(|e| TransportError::Decode(format!("decode {method}: {e}")))
 }

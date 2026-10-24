@@ -28,6 +28,9 @@ struct State {
     price: Decimal,
     orders: Vec<trading::Order>,
     fail_next_creates: u32,
+    /// Fail the next `n` `cancel_order` calls with a venue refusal, so the
+    /// kill-switch unwind path can be exercised against a hostile venue.
+    fail_next_cancels: u32,
     /// Every `create_order` seen so far, so a script can target one by position.
     creates_seen: u32,
     /// Fail every `create_order` at or after this 0-based index. `None` disables
@@ -37,6 +40,10 @@ struct State {
     op_balance: Decimal,
     deposits: Vec<LedgerEntry>,
     transfers: Vec<(String, Decimal, String)>,
+    /// Every `cancel_all_orders` request seen, as `(exchange_id, symbol)`: the
+    /// kill-switch scope test pins that a trip targets the bound venue with no
+    /// symbol filter, rather than a defaulted or narrowed request.
+    cancel_all_seen: Vec<(String, String)>,
     /// id -> (request, status, created_at_ms).
     trigger_orders: Vec<(String, TriggerOrderRequest, TriggerOrderStatus, i64)>,
     /// client_transfer_id -> receipt, for idempotent retries.
@@ -155,6 +162,7 @@ fn now_ts() -> buffa_types::google::protobuf::Timestamp {
 pub struct MockAdapter {
     state: Arc<Mutex<State>>,
     ids: Arc<AtomicU64>,
+    snapshot_seq: Arc<AtomicU64>,
 }
 
 impl MockAdapter {
@@ -163,6 +171,7 @@ impl MockAdapter {
         Self {
             state: Arc::new(Mutex::new(State { price: initial_price, ..State::default() })),
             ids: Arc::new(AtomicU64::new(1)),
+            snapshot_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -171,6 +180,16 @@ impl MockAdapter {
         let mut state = self.state.lock().await;
         state.fail_next_creates = n;
         state.fail_creates_from = None;
+    }
+
+    /// Fail the next `n` `cancel_order` calls with a venue refusal.
+    pub async fn fail_next_cancels(&self, n: u32) {
+        self.state.lock().await.fail_next_cancels = n;
+    }
+
+    /// Every `cancel_all_orders` request the mock has served, oldest first.
+    pub async fn cancel_all_seen(&self) -> Vec<(String, String)> {
+        self.state.lock().await.cancel_all_seen.clone()
     }
 
     /// Script a failure *in the middle* of a batch: every creation from the
@@ -263,6 +282,10 @@ impl TradingGateway for MockAdapter {
         req: trading::CancelOrderRequest,
     ) -> Result<trading::Order, PortError> {
         let mut state = self.state.lock().await;
+        if state.fail_next_cancels > 0 {
+            state.fail_next_cancels -= 1;
+            return Err(PortError::Transport("venue refused cancel".to_string()));
+        }
         let order =
             state.orders.iter_mut().find(|o| o.id == req.order_id).ok_or_else(|| {
                 PortError::InvalidArgument(format!("unknown order {}", req.order_id))
@@ -276,6 +299,10 @@ impl TradingGateway for MockAdapter {
         req: trading::CancelAllOrdersRequest,
     ) -> Result<Vec<trading::Order>, PortError> {
         let mut state = self.state.lock().await;
+        state.cancel_all_seen.push((
+            req.exchange_id.as_option().map_or_default(|e| e.id.clone()),
+            req.symbol.clone(),
+        ));
         let mut canceled = Vec::new();
         for order in &mut state.orders {
             let is_open = order.status == EnumValue::Known(trading::OrderStatus::Open);
@@ -307,7 +334,9 @@ impl TradingGateway for MockAdapter {
     ) -> Result<worker::ReconcileStateResponse, PortError> {
         let state = self.state.lock().await;
         Ok(worker::ReconcileStateResponse {
-            snapshot_sequence: 0,
+            // Monotonic local watermark so resume-token / recovery paths are
+            // exercisable under mock; the open backend has no server watermark.
+            snapshot_sequence: self.snapshot_seq.fetch_add(1, Ordering::AcqRel) + 1,
             snapshot_time: MessageField::some(now_ts()),
             balances: vec![account::Balance {
                 currency: "USD".to_string(),

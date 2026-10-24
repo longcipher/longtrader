@@ -420,13 +420,21 @@ test("an order request survives a protobuf round trip", () => {
 test("sequence gap detection matches the host rule", () => {
   assert.equal(isSequenceGap(1, 2), false);
   assert.equal(isSequenceGap(1, 5), true);
-  assert.equal(isSequenceGap(0, 5), false, "the first event is never a gap");
+  // Watermark 0 is "before the first sequence": 0 -> 1 contiguous, 0 -> 5
+  // missed 1-4. A live stream's first event is never a gap because the pump
+  // holds prev=null until it sees a sequence.
+  assert.equal(isSequenceGap(0, 1), false);
+  assert.equal(isSequenceGap(0, 5), true);
   assert.equal(isSequenceGap(5, 0), false, "an absent sequence is not a gap");
+  const maxU64 = (1n << 64n) - 1n;
+  assert.equal(isSequenceGap(maxU64, 0n), false, "wrap to zero is contiguous");
+  assert.equal(isSequenceGap(maxU64, 1n), true, "wrapped past zero");
+  assert.equal(isSequenceGap(maxU64 - 1n, maxU64), false);
 });
 
 test("overflow policy defaults match the worker's per-channel choice", () => {
   assert.equal(overflowPolicyForChannel("TICKER"), OverflowPolicy.DropOldest);
   assert.equal(overflowPolicyForChannel("ORDERBOOK"), OverflowPolicy.Coalesce);
   assert.equal(overflowPolicyForChannel("ORDERS"), OverflowPolicy.Block);
-  assert.equal(overflowPolicyForChannel("unknown"), OverflowPolicy.DropOldest);
+  assert.equal(overflowPolicyForChannel("unknown"), OverflowPolicy.Block);
 });

@@ -18,7 +18,7 @@ ignored = ["serde"]
 [features]
 default = []
 # Native (non-WASM) HTTP/1.1 client backed by hpx.
-client-native = ["dep:hpx", "dep:futures-util"]
+client-native = ["dep:hpx", "dep:futures-util", "dep:tokio"]
 # WASM-compatible client backed by gloo-net / web-sys (browser).
 client-wasm = [
     "dep:futures-util",
@@ -41,6 +41,7 @@ rust_decimal.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["time"], optional = true }
 tracing.workspace = true
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }

@@ -98,14 +98,25 @@ def _envelope(payload: bytes, flags: int = FLAG_MESSAGE) -> bytes:
 
 
 def _decode_envelope(buf: bytes) -> bytes:
-    """Return the payload of a single message frame, or raise ``ValueError``."""
+    """Return the payload of a single message frame, or raise ``ValueError``.
+
+    Validates the 5-byte header's declared ``u32`` length exactly like
+    ``bin/longtrader-worker/src/envelope.rs``: short buffers raise, trailing
+    bytes are left to the caller (advance by ``5 + length``).
+    """
     if len(buf) < 5:
         raise ValueError(f"truncated connect envelope: {len(buf)} bytes")
     if buf[0] & 0x02:
         # End-of-stream frame: its payload is a JSON end-stream message, which
         # carries no protobuf for the caller.
         raise ValueError("unexpected end-of-stream frame")
-    return buf[5:]
+    length = int.from_bytes(buf[1:5], "big")
+    if len(buf) < 5 + length:
+        raise ValueError(
+            f"truncated connect envelope payload: need {5 + length} bytes, "
+            f"have {len(buf)} bytes"
+        )
+    return bytes(buf[5 : 5 + length])
 
 
 def _first_message_payload(buf: bytes) -> bytes:
@@ -163,9 +174,17 @@ def _iter_events(chunks, resp_type, event_attr: str | None = "event"):
             yield msg
 
 
-def _iter_stream_events(chunks, pb, event_attr: str | None = None):
-    """Stream strategy events (gap-aware) from a `StreamStrategyEvents` reply."""
-    return _iter_events(chunks, pb.StrategyEvent, event_attr="event")
+def _iter_stream_events(
+    chunks, resp_type: Type[Any], event_attr: str | None = "event"
+) -> Any:
+    """Decode one Connect protobuf event stream, yielding ``None`` on gap.
+
+    ``resp_type`` is the generated message class for the stream at hand
+    (``StrategyEvent`` for strategy streams, ``MarketDataEvent`` for market
+    streams): it must come from the caller because no single pb module
+    defines every stream's event type.
+    """
+    return _iter_events(chunks, resp_type, event_attr=event_attr)
 
 
 def _log_event(pb, session_id: str, level: int, message: str, fields: dict | None):
@@ -814,9 +833,15 @@ class Session:
 
         Server-streaming Connect: the response is a sequence of 5-byte-framed
         protobuf messages terminated by an end-of-stream frame. A yielded
-        ``None`` marks a sequence gap, meaning the ring buffer overflowed and
-        the caller must re-run :meth:`reconcile_state` instead of assuming the
-        stream is continuous.
+        ``None`` marks a mid-stream sequence gap, meaning the ring buffer
+        overflowed and the caller must re-run :meth:`reconcile_state` instead
+        of assuming the stream is continuous.
+
+        Resume contract (worker ``replay_after``): the pump cannot know the
+        caller's watermark, so after resuming compare the first replayed
+        event's ``header.sequence`` against the token with
+        :func:`is_sequence_gap` — a gap means events were evicted while
+        disconnected and a full :meth:`reconcile_state` is required.
         """
         pb = _pb()
         req = pb.StreamStrategyEventsRequest(
@@ -835,7 +860,7 @@ class Session:
         ) as resp:
             if resp.status_code != 200:
                 raise _error_from_response(resp.read())
-            yield from _iter_stream_events(resp.iter_bytes(), pb)
+            yield from _iter_stream_events(resp.iter_bytes(), pb.StrategyEvent)
 
     # -- trading ------------------------------------------------------------
 
@@ -1170,4 +1195,6 @@ class Session:
         ) as resp:
             if resp.status_code != 200:
                 raise _error_from_response(resp.read())
-            yield from _iter_stream_events(resp.iter_bytes(), pb, event_attr=None)
+            yield from _iter_stream_events(
+                resp.iter_bytes(), pb.MarketDataEvent, event_attr=None
+            )

@@ -101,8 +101,11 @@ message ReconcileStateRequest {
   string session_id = 1;
 }
 
-// One atomic snapshot stamped with the stream watermark at snapshot time,
-// avoiding multi-RPC watermark races during recovery.
+// Best-effort snapshot stamped with the stream watermark at snapshot time.
+// The open backend has no server-side atomic snapshot yet: the worker builds
+// this from sequential reads and stamps a local monotonic `snapshot_sequence`.
+// Callers must replay deltas after `snapshot_sequence` to converge; do not treat
+// the three reads as a single point-in-time view.
 message ReconcileStateResponse {
   uint64 snapshot_sequence = 1;
   google.protobuf.Timestamp snapshot_time = 2;

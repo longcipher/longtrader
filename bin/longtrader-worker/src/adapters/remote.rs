@@ -23,7 +23,10 @@ use buffa::{Message, MessageField};
 use rust_decimal::Decimal;
 
 use crate::{
-    ports::{MarketDataSource, MarketEventStream, OverflowPolicy, PortError, TradingGateway},
+    ports::{
+        MarketDataSource, MarketEventStream, OverflowPolicy, PortError, TradingGateway,
+        page_limit_or_default,
+    },
     proto::{account, common, market, ops, trading, worker},
 };
 
@@ -33,8 +36,8 @@ const SERVICE_MARKET: &str = "longtrader.market.v1.MarketDataService";
 fn ts_from_ms(ms: i64) -> buffa_types::google::protobuf::Timestamp {
     buffa_types::google::protobuf::Timestamp {
         seconds: ms.div_euclid(1000),
-        // remainder <1000 so nanos <1e9 always fits i32
-        nanos: i32::try_from(ms.rem_euclid(1000) * 1_000_000).expect("ms remainder fits i32"),
+        // remainder <1000 so nanos <1e9 always fits i32; panic-free conversion.
+        nanos: i32::try_from(ms.rem_euclid(1000) * 1_000_000).unwrap_or(0),
         ..Default::default()
     }
 }
@@ -94,12 +97,14 @@ impl RemoteAdapter {
         )
         .await
         .map_err(|e| match e {
-            longtrader_proto::transport::TransportError::Http(m) => PortError::Transport(m),
+            longtrader_proto::transport::TransportError::Http(m) => {
+                PortError::Transport(format!("{service}/{method}: {m}"))
+            }
             longtrader_proto::transport::TransportError::Rpc { code, message } => {
                 PortError::Rpc { code, message }
             }
             longtrader_proto::transport::TransportError::Decode(m) => {
-                PortError::Transport(format!("decode {method}: {m}"))
+                PortError::Transport(format!("decode {service}/{method}: {m}"))
             }
         })
     }
@@ -228,7 +233,8 @@ impl TradingGateway for RemoteAdapter {
         // between the three RPCs where the backend state may change. The
         // `snapshot_sequence` is a local monotonic counter, not a server-side
         // watermark. Strategies MUST replay deltas after `snapshot_sequence`
-        // to converge to the correct state.
+        // to converge to the correct state. Do NOT treat the three reads as
+        // a single point-in-time view.
         let started_ms = ms_now();
         let account_resp: trading::GetAccountResponse = self
             .unary(
@@ -240,7 +246,12 @@ impl TradingGateway for RemoteAdapter {
                 },
             )
             .await?;
-        let account = account_resp.account.into_option().unwrap_or_default();
+        // An absent account is a backend contract violation, not an empty
+        // portfolio: projecting it to zero balances would read as "busted".
+        let account = account_resp
+            .account
+            .into_option()
+            .ok_or_else(|| PortError::MissingField("GetAccountResponse.account".to_string()))?;
         // Project aggregate `trading::Account` onto a single `account::Balance` (USD) – matches
         // the old terminal adapter's projection, preserving strategy expectations until a
         // proper `AccountService` is exposed.
@@ -282,7 +293,7 @@ impl TradingGateway for RemoteAdapter {
         Ok(worker::ReconcileStateResponse {
             // Local monotonic watermark (NOT server-atomic). Session discards
             // deltas at/below this point and replays the remainder.
-            snapshot_sequence: self.snapshot_seq.fetch_add(1, Ordering::Relaxed) + 1,
+            snapshot_sequence: self.snapshot_seq.fetch_add(1, Ordering::AcqRel) + 1,
             snapshot_time: MessageField::some(ts_from_ms(started_ms)),
             balances,
             positions: positions_resp.positions,
@@ -438,9 +449,6 @@ use crate::ports::{
 const OPS_SERVICE: &str = "longtrader.ops.v1.VenueOpService";
 const MARKET_SERVICE: &str = "longtrader.market.v1.MarketDataService";
 const TRADING_SERVICE: &str = "longtrader.trading.v1.TradingService";
-
-/// The default page size when a request does not set one.
-const DEFAULT_LIMIT: u32 = 100;
 
 /// Build a `google.protobuf.Timestamp` from Unix milliseconds.
 ///
@@ -678,7 +686,7 @@ impl FundingRateSource for RemoteAdapter {
                 market::FetchFundingRateHistoryRequest {
                     exchange_id: exchange_id.clone().into(),
                     symbol: symbol.to_string(),
-                    limit: if limit == 0 { DEFAULT_LIMIT } else { limit },
+                    limit: page_limit_or_default(limit),
                     ..Default::default()
                 },
             )
@@ -924,7 +932,7 @@ impl WalletGateway for RemoteAdapter {
                     currency: currency.to_string(),
                     r#type: entry_type.to_string(),
                     pagination: common::Pagination {
-                        limit: u64::from(if limit == 0 { DEFAULT_LIMIT } else { limit }),
+                        limit: u64::from(page_limit_or_default(limit)),
                         ..Default::default()
                     }
                     .into(),

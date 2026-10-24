@@ -26,6 +26,14 @@ use std::{
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use crate::ports::OverflowPolicy;
+// Re-export the port-level defaults so `crate::overflow::OVERFLOW_*` and
+// `crate::ports::OVERFLOW_*` resolve to one owner (`crate::ports`): the policy
+// values are port semantics (§6.5 table), `policy_channel` is the plumbing that
+// enforces them. Either path compiles; neither drifts.
+pub use crate::ports::{
+    DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, OVERFLOW_BALANCES, OVERFLOW_OHLCV, OVERFLOW_ORDERBOOK,
+    OVERFLOW_ORDERS, OVERFLOW_POSITIONS, OVERFLOW_TICKER, OVERFLOW_TRADES, page_limit_or_default,
+};
 
 struct PipeState<T, K> {
     tx: mpsc::Sender<T>,
@@ -48,13 +56,19 @@ where
     /// Uses `tokio::select!` to avoid the race between checking `source_closed`
     /// and waiting on `notify.notified()`. This ensures that if `close()` is
     /// called between the check and the wait, the notification is not lost.
+    ///
+    /// Exits when the downstream receiver is dropped: `mpsc::Sender::send`
+    /// returns `Err` only in that case, and looping on a dead receiver would
+    /// leak this task.
     async fn forward_loop(self: Arc<Self>) {
         loop {
             // Check for source closure first.
             if self.source_closed.load(Ordering::Acquire) {
                 let drained: VecDeque<(K, T)> = std::mem::take(&mut *self.buf.lock().await);
                 for (_, item) in drained {
-                    let _ = self.tx.send(item).await;
+                    if self.tx.send(item).await.is_err() {
+                        return;
+                    }
                 }
                 return;
             }
@@ -67,8 +81,10 @@ where
                 for (_, item) in items {
                     // Downstream is bounded; this backpressures draining, which is
                     // fine because the buffer already applies the drop/coalesce
-                    // policy on push.
-                    let _ = self.tx.send(item).await;
+                    // policy on push. A closed receiver ends the loop (see above).
+                    if self.tx.send(item).await.is_err() {
+                        return;
+                    }
                 }
                 continue;
             }
@@ -103,13 +119,21 @@ where
     /// Push one item through the configured overflow policy.
     /// ponytail: Coalesce uses an O(n) key scan; cap is small (<=64 in practice).
     /// Upgrade to HashMap<index> if cap grows or profiling shows hotspot.
-    pub async fn send(&self, item: T) {
+    ///
+    /// Returns `false` when the downstream receiver is already dropped: the
+    /// caller must not keep producing into a dead channel.
+    pub async fn send(&self, item: T) -> bool {
         match self.state.policy {
             OverflowPolicy::Block => {
                 // Direct bounded send: never drops, backpressures upstream.
-                let _ = self.state.tx.send(item).await;
+                // A closed receiver is the only `Err`; report it so the pump
+                // can stop instead of spinning on a dead channel.
+                self.state.tx.send(item).await.is_ok()
             }
             OverflowPolicy::DropOldest | OverflowPolicy::Coalesce => {
+                if self.state.tx.is_closed() {
+                    return false;
+                }
                 let key = (self.state.key_fn)(&item);
                 {
                     let mut buf = self.state.buf.lock().await;
@@ -132,6 +156,7 @@ where
                     }
                 }
                 self.state.notify.notify_one();
+                true
             }
         }
     }

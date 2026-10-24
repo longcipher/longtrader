@@ -161,7 +161,9 @@ async function* iterEvents<S extends DescMessage>(
   if (body === null) return;
   const reader = body.getReader();
   let buf = new Uint8Array(0);
-  let prev = 0;
+  // `u64` watermarks stay `bigint`: `Number` loses integer precision past 2^53,
+  // which would silently disable gap detection on very long streams.
+  let prev = 0n;
   for (;;) {
     const { done, value } = await reader.read();
     if (value) {
@@ -188,9 +190,9 @@ async function* iterEvents<S extends DescMessage>(
       const msg = fromBinary(schema, payload);
       if (gapAware) {
         const header = (msg as { header?: { sequence?: bigint } }).header;
-        const seq = Number(header?.sequence ?? 0n);
-        if (seq > 0) {
-          if (prev > 0 && seq !== prev + 1) yield null;
+        const seq = header?.sequence ?? 0n;
+        if (seq > 0n) {
+          if (prev > 0n && seq !== prev + 1n) yield null;
           prev = seq;
         }
       }
@@ -710,8 +712,12 @@ export class Session {
   /**
    * Yield `StrategyEvent` messages, resuming after `resumeToken`.
    *
-   * A yielded `null` marks a sequence gap: the host's ring overflowed and the
-   * caller must re-run `reconcileState()` instead of assuming continuity.
+   * A yielded `null` marks a mid-stream sequence gap: the host's ring
+   * overflowed and the caller must re-run `reconcileState()` instead of
+   * assuming continuity. Resume contract (worker `replay_after`): the pump
+   * cannot know the caller's watermark, so after resuming compare the first
+   * replayed event's `header.sequence` against the token with
+   * `isSequenceGap` — a gap means events were evicted while disconnected.
    */
   async *streamEvents(resumeToken = ""): AsyncGenerator<StrategyEvent | null> {
     const req = create(StreamStrategyEventsRequestSchema, {
@@ -1049,7 +1055,11 @@ export class Session {
   /**
    * Open a server-streaming market data subscription.
    *
-   * `channel` is TICKER / ORDERBOOK / TRADES / OHLCV.
+   * `channel` is TICKER / ORDERBOOK / TRADES / OHLCV. Market streams carry no
+   * gap markers by design (worker `replay_after` contract): a consumer
+   * detects a discontinuity from `header.sequence` itself — orderbook streams
+   * re-fetch a fresh snapshot, exactly like the worker's `is_sequence_gap`
+   * resync rule.
    */
   async *streamMarketData(
     symbols: string[],

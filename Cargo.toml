@@ -27,6 +27,7 @@ hpx = { version = "2.5.32", default-features = false, features = ["rustls-tls", 
 http-body = "1.1.0"
 js-sys = "0.3.105"
 # in-repo
+longtrader-catalog = { path = "crates/longtrader-catalog", version = "0.2.0" }
 longtrader-contract = { path = "crates/longtrader-contract", version = "0.2.0" }
 longtrader-proto = { path = "crates/longtrader-proto", version = "0.2.0" }
 proptest = "1.12.0"

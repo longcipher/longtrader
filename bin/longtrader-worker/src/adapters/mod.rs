@@ -144,7 +144,9 @@ where
                 match fetcher(channel, exchange_id.clone(), symbol.clone(), Arc::clone(&seq)).await
                 {
                     Ok(Some(event)) => {
-                        tx.send(event).await;
+                        if !tx.send(event).await {
+                            break;
+                        }
                     }
                     Ok(None) => {}
                     Err(err) => {

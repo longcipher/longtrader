@@ -37,7 +37,9 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let config = Config::load(&cli.config)?;
-    let backend = config.backend();
+    // `Config::load` already whitelisted the backend; re-validate here so a
+    // programmatically constructed `Config` gets the same fail-fast.
+    let backend = config.validated_backend()?.to_string();
     tracing::info!(
         backend = %backend,
         strategy = %config.strategy.strategy_type,
@@ -45,15 +47,17 @@ async fn main() -> Result<()> {
     );
 
     // Fail-fast on badly mounted secrets: a configured token file that yields
-    // an empty token would otherwise run unauthenticated.
-    if config.api_token_file.is_some() && config.api_token().is_empty() {
+    // an empty token would otherwise run unauthenticated. Read once and reuse
+    // (see `start_with_ports`): two reads could observe two files.
+    let token = config.api_token();
+    if config.api_token_file.is_some() && token.is_empty() {
         bail!(
             "api_token_file {:?} unreadable or empty; refusing to start unauthenticated",
             config.api_token_file
         );
     }
 
-    match backend {
+    match backend.as_str() {
         "mock" => {
             // Offline dry-run: deterministic in-process venue, no network.
             let mock = Arc::new(MockAdapter::new(rust_decimal::Decimal::from(95_000)));
@@ -66,6 +70,7 @@ async fn main() -> Result<()> {
                 mock.clone(),
                 mock.clone(),
                 &config,
+                token.as_str(),
             )
             .await
         }
@@ -74,23 +79,25 @@ async fn main() -> Result<()> {
         // `longtrader-terminal` or a standalone `longtrader-api`.
         "api" => {
             let endpoint = config.endpoint_or_default(DEFAULT_ENDPOINT);
-            let adapter = Arc::new(RemoteAdapter::new(&endpoint, &config.api_token()));
+            let adapter = Arc::new(RemoteAdapter::new(&endpoint, token.as_str()));
             tracing::info!(endpoint = %endpoint, "connected to backend");
-            start_with(adapter, &config).await
+            start_with(adapter, &config, token.as_str()).await
         }
+        // Unreachable via `Config::load` (whitelisted), kept as defense for
+        // programmatically constructed configs.
         other => bail!("unknown backend: {other} (expected 'mock' or 'api')"),
     }
 }
 
 /// Start the optional control plane and then run the strategy loop.
-async fn start_with(adapter: Arc<RemoteAdapter>, config: &Config) -> Result<()> {
+async fn start_with(adapter: Arc<RemoteAdapter>, config: &Config, token: &str) -> Result<()> {
     let gateway: Arc<dyn TradingGateway> = adapter.clone();
     let market: Arc<dyn MarketDataSource> = adapter.clone();
     let funding: Arc<dyn FundingRateSource> = adapter.clone();
     let triggers: Arc<dyn TriggerOrderGateway> = adapter.clone();
     let ops: Arc<dyn VenueOpInvoker> = adapter.clone();
     let wallet: Arc<dyn WalletGateway> = adapter.clone();
-    start_with_ports(gateway, market, funding, triggers, ops, wallet, config).await
+    start_with_ports(gateway, market, funding, triggers, ops, wallet, config, token).await
 }
 
 /// Report the capabilities the selected backend will actually serve.
@@ -145,12 +152,14 @@ async fn start_with_ports(
     ops: Arc<dyn VenueOpInvoker>,
     wallet: Arc<dyn WalletGateway>,
     config: &Config,
+    token: &str,
 ) -> Result<()> {
     let ctx = StrategyContext {
         config: config.clone(),
         gateway: gateway.clone(),
         market: market.clone(),
         funding: funding.clone(),
+        triggers: triggers.clone(),
         ops: ops.clone(),
         wallet: wallet.clone(),
     };
@@ -167,7 +176,10 @@ async fn start_with_ports(
     report_capabilities(&config.strategy.strategy_type, &capabilities);
 
     if let Some(bind) = &config.listen_endpoint {
-        let token = config.api_token();
+        // `token` was read once in `main`: re-reading the file here could
+        // observe a rotated secret (TOCTOU) and leave the adapter and the
+        // control plane holding different credentials.
+        let token = token.to_string();
         let exchange_id = longtrader_worker::adapters::exchange_id(
             config.strategy.params.venue(),
             config.strategy.params.venue_label(),
@@ -182,13 +194,26 @@ async fn start_with_ports(
         let manager = Arc::new(manager);
         manager.install_self().await;
         let bind = bind.clone();
-        tokio::spawn(async move {
+        let server_handle = tokio::spawn(async move {
             if let Err(err) = longtrader_worker::session::server::run(bind, manager).await {
                 tracing::error!(error = %err, "control plane server exited");
             }
         });
-    }
 
+        // Control plane is scoped to this run: stop it on every exit path, not
+        // just the happy one, so a failed `stop()` hook cannot leak it.
+        let outcome = drive_strategy(strategy.as_ref()).await;
+        server_handle.abort();
+        outcome
+    } else {
+        drive_strategy(strategy.as_ref()).await
+    }
+}
+
+/// Run one strategy through its lifecycle: `start()`, then `run()` to
+/// completion, then `stop()` exactly once. A `stop()` failure takes precedence
+/// over the `run()` outcome, matching the inline order it replaces.
+async fn drive_strategy(strategy: &dyn strategies::Strategy) -> Result<()> {
     // Call start() lifecycle hook before running the strategy.
     strategy.start().await?;
     // Run the strategy and ensure stop() is called when it exits.

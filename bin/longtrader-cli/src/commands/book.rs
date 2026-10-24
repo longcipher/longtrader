@@ -42,7 +42,10 @@ pub(crate) async fn run(
     match client.fetch_order_book(exchange, symbol, depth).await {
         Ok(book) => {
             if let Renderer { format: crate::output::OutputFormat::Json, .. } = output {
-                println!("{}", serde_json::to_string_pretty(&book).unwrap_or_default());
+                let pretty = serde_json::to_string_pretty(&book).map_err(|e| {
+                    color_eyre::eyre::eyre!("failed to render order book as JSON: {e}")
+                })?;
+                println!("{pretty}");
             } else {
                 println!("Symbol: {}", book.symbol);
                 if let Some(ts) = book.timestamp.as_option() {

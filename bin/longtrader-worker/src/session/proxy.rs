@@ -103,14 +103,13 @@ fn map_port(err: crate::ports::PortError) -> connectrpc::ConnectError {
     }
 }
 
-/// The default page size when a request does not set one.
-const DEFAULT_PAGE_LIMIT: u32 = 100;
-
 /// Page size from an optional `common.v1.Pagination`, bounded and defaulted.
+/// Delegates to `crate::ports::page_limit_or_default` so the worker, the proxy,
+/// and the CLI share one `0 -> 100, cap 1000` rule.
 fn pagination_limit(pagination: Option<&common::Pagination>) -> u32 {
     let requested = pagination.map_or(0, |p| p.limit);
     let requested = u32::try_from(requested).unwrap_or(u32::MAX);
-    if requested == 0 { DEFAULT_PAGE_LIMIT } else { requested.min(1000) }
+    crate::ports::page_limit_or_default(requested)
 }
 
 /// Map a port ledger record onto the unified `account.v1.LedgerEntry`.
@@ -1249,8 +1248,8 @@ mod tests {
     /// would return an empty page and read as "no rows exist".
     #[test]
     fn an_absent_or_zero_limit_gives_the_default_page_size() {
-        assert_eq!(pagination_limit(None), DEFAULT_PAGE_LIMIT);
-        assert_eq!(pagination_limit(Some(&pagination(0))), DEFAULT_PAGE_LIMIT);
+        assert_eq!(pagination_limit(None), crate::ports::DEFAULT_PAGE_LIMIT);
+        assert_eq!(pagination_limit(Some(&pagination(0))), crate::ports::DEFAULT_PAGE_LIMIT);
     }
 
     /// A requested size is honoured as-is below the cap, so a client asking for
@@ -1959,7 +1958,7 @@ mod tests {
             prop_assert_eq!(
                 page,
                 if limit == 0 {
-                    DEFAULT_PAGE_LIMIT
+                    crate::ports::DEFAULT_PAGE_LIMIT
                 } else {
                     u32::try_from(limit).unwrap_or(u32::MAX).min(1000)
                 },

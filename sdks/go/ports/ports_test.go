@@ -62,10 +62,10 @@ func TestOverflowPolicyForChannel(t *testing.T) {
 		"TICKER":    DropOldest,
 		"ORDERBOOK": Coalesce,
 		"  Orders ": Block,
-		// An unknown channel is market data by assumption, which is the safe
-		// direction to drop in.
-		"unknown": DropOldest,
-		"":        DropOldest,
+		// An unknown channel fails closed to Block (private-stream semantics),
+		// never to a dropping policy.
+		"unknown": Block,
+		"":        Block,
 	}
 	for channel, want := range cases {
 		if got := OverflowPolicyForChannel(channel); got != want {
@@ -79,14 +79,18 @@ func TestIsSequenceGap(t *testing.T) {
 		prev, next uint64
 		want       bool
 	}{
-		{0, 0, false},
-		{0, 1, false}, // no previous watermark yet
+		{0, 0, false}, // unset event against the before-start watermark
+		{0, 1, false}, // watermark before the first sequence
+		{0, 2, true},  // missed event 1 after resuming from scratch
 		{1, 0, false}, // a producer that stopped numbering
 		{1, 2, false}, // contiguous
 		{1, 3, true},  // one dropped
 		{1, 1, true},  // a repeat is still a discontinuity
 		{7, 6, true},  // going backwards
 		{99, 100, false},
+		{^uint64(0), 0, false},     // wrap to zero is contiguous, not a gap
+		{^uint64(0), 1, true},      // wrapped past zero
+		{^uint64(0) - 1, ^uint64(0), false}, // contiguous into the wrap point
 	}
 	for _, tc := range cases {
 		if got := IsSequenceGap(tc.prev, tc.next); got != tc.want {

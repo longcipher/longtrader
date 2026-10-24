@@ -157,10 +157,21 @@ pub fn optimal_spread_v2(
     if gamma >= k_eff {
         return None;
     }
-    // ln(1 + γ/k_eff) / γ via f64.
-    let gamma_f = gamma.to_f64()?;
-    let k_f = k_eff.to_f64()?;
-    let log_term = Decimal::try_from((gamma_f / k_f).ln_1p() / gamma_f).ok()?;
+    // ln(1 + γ/k_eff) / γ via f64. Decimal has no native ln; the model is
+    // robust to the precision loss, but a conversion failure must be visible
+    // (fail-closed, no quote) rather than a silent skip.
+    let Some(gamma_f) = gamma.to_f64() else {
+        tracing::debug!(%gamma, %k_eff, "avellaneda spread skipped: gamma not representable as f64");
+        return None;
+    };
+    let Some(k_f) = k_eff.to_f64() else {
+        tracing::debug!(%gamma, %k_eff, "avellaneda spread skipped: k_eff not representable as f64");
+        return None;
+    };
+    let Ok(log_term) = Decimal::try_from((gamma_f / k_f).ln_1p() / gamma_f) else {
+        tracing::debug!(%gamma, %k_eff, "avellaneda spread skipped: f64 log term out of Decimal range");
+        return None;
+    };
     Some(inventory_term + log_term)
 }
 

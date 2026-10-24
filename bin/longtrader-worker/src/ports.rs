@@ -27,15 +27,26 @@ use crate::proto::{common, market, trading, worker};
 /// Returns `true` when `next` does NOT follow `prev` by exactly one.
 /// Consumers MUST treat a gap as a trigger for resync: orderbook streams
 /// re-fetch a fresh snapshot, private streams re-run `ReconcileState`.
+///
+/// `prev` is a watermark: `0` means "before the first sequence" (e.g. a client
+/// resuming from scratch against [`SessionHandle::replay_after`]), so it is a
+/// *valid* predecessor — `0 -> 1` is contiguous, `0 -> 2` missed event `1`.
+/// `u64::MAX -> 0` is contiguous via `wrapping_add`.
 #[inline]
 pub fn is_sequence_gap(prev: u64, next: u64) -> bool {
     next != prev.wrapping_add(1)
 }
 
 /// Sequence gap helper on top of raw headers; `None` means no previous
-/// watermark (e.g. first event), so no gap.
+/// watermark (e.g. first event), so no gap. A header carrying sequence `0`
+/// is an unset proto default (never emitted by `publish` / `poll_snapshot`,
+/// which start at `1`), so it is ignored rather than reported as a gap —
+/// use this helper (not the raw [`is_sequence_gap`]) for stream headers.
 #[inline]
 pub fn has_sequence_gap(prev: Option<u64>, header: &common::EventHeader) -> bool {
+    if header.sequence == 0 {
+        return false;
+    }
     prev.is_some_and(|p| is_sequence_gap(p, header.sequence))
 }
 
@@ -74,7 +85,26 @@ pub const OVERFLOW_OHLCV: OverflowPolicy = OverflowPolicy::DropOldest;
 pub const OVERFLOW_BALANCES: OverflowPolicy = OverflowPolicy::Block;
 pub const OVERFLOW_POSITIONS: OverflowPolicy = OverflowPolicy::Block;
 
+/// Default page size when a request leaves `Pagination.limit` unset (0).
+pub const DEFAULT_PAGE_LIMIT: u32 = 100;
+/// Hard cap for any paged list; mirrors `session::proxy::pagination_limit`.
+pub const MAX_PAGE_LIMIT: u32 = 1000;
+
+/// Page size from a bare `limit`: `0` means "unset" and resolves to
+/// [`DEFAULT_PAGE_LIMIT`]; larger values are capped at [`MAX_PAGE_LIMIT`].
+/// Single owner so `RemoteAdapter`, the proxy, and the CLI cannot drift.
+#[inline]
+#[must_use]
+pub fn page_limit_or_default(limit: u32) -> u32 {
+    if limit == 0 { DEFAULT_PAGE_LIMIT } else { limit.min(MAX_PAGE_LIMIT) }
+}
+
 /// Resolve the OverflowPolicy for a market `StreamChannel`.
+///
+/// Fail-closed: unknown / future channels (including private streams such as
+/// orders/balances/positions/my-trades) resolve to `Block`, never to a
+/// dropping policy. A new channel must be mapped explicitly if dropping is
+/// ever intended.
 #[inline]
 pub fn overflow_policy_for_channel(channel: market::StreamChannel) -> OverflowPolicy {
     match channel {
@@ -82,7 +112,7 @@ pub fn overflow_policy_for_channel(channel: market::StreamChannel) -> OverflowPo
         market::StreamChannel::Ticker |
         market::StreamChannel::Trades |
         market::StreamChannel::Ohlcv => OVERFLOW_TICKER,
-        _ => OVERFLOW_TICKER,
+        _ => OVERFLOW_ORDERS,
     }
 }
 
@@ -582,6 +612,8 @@ mod tests {
 
     #[test]
     fn skipped_duplicate_and_regressed_sequences_are_gaps() {
+        // `0` is the "before the first sequence" watermark: `0 -> 0` is a
+        // duplicate, `0 -> 2` skipped event `1`, and `1 -> 0` regressed.
         assert!(is_sequence_gap(0, 0), "a duplicate is not an increment");
         assert!(is_sequence_gap(0, 2), "a skip is a gap");
         assert!(is_sequence_gap(5, 1), "a regression is a gap");
@@ -592,6 +624,18 @@ mod tests {
     fn a_missing_watermark_is_never_a_gap() {
         let header = common::EventHeader { sequence: 4_242, ..Default::default() };
         assert!(!has_sequence_gap(None, &header), "the first event cannot gap");
+    }
+
+    #[test]
+    fn an_unset_header_sequence_is_never_a_gap() {
+        // Sequence `0` is the proto default, never emitted by `publish` /
+        // `poll_snapshot` (which start at `1`): it means "no sequence", not
+        // "the zeroth event", so even a stale watermark must not resync on it.
+        let header = common::EventHeader::default();
+        assert!(!has_sequence_gap(None, &header));
+        assert!(!has_sequence_gap(Some(0), &header));
+        assert!(!has_sequence_gap(Some(5), &header));
+        assert!(!has_sequence_gap(Some(u64::MAX), &header));
     }
 
     #[test]
@@ -607,7 +651,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn orderbook_channels_coalesce_and_everything_else_drops_the_oldest() {
+    fn orderbook_coalesces_ticker_drops_and_unknown_blocks() {
         assert_eq!(
             overflow_policy_for_channel(market::StreamChannel::Orderbook),
             OverflowPolicy::Coalesce
@@ -616,7 +660,6 @@ mod tests {
             market::StreamChannel::Ticker,
             market::StreamChannel::Trades,
             market::StreamChannel::Ohlcv,
-            market::StreamChannel::Unspecified,
         ] {
             assert_eq!(
                 overflow_policy_for_channel(channel),
@@ -624,6 +667,13 @@ mod tests {
                 "{channel:?} must drop the oldest"
             );
         }
+        // Fail-closed: unknown / future channels (including private streams)
+        // never resolve to a dropping policy.
+        assert_eq!(
+            overflow_policy_for_channel(market::StreamChannel::Unspecified),
+            OverflowPolicy::Block,
+            "Unspecified must fail closed to Block"
+        );
     }
 
     /// The policy constants are the documented §6.5 table; pin every one so a
@@ -890,6 +940,16 @@ mod tests {
     // Properties
     // -----------------------------------------------------------------------
 
+    /// Unknown / future channels fail closed to `Block` (private-stream
+    /// semantics), never to a dropping policy.
+    #[test]
+    fn unknown_channels_fail_closed_to_block() {
+        assert_eq!(
+            overflow_policy_for_channel(market::StreamChannel::Unspecified),
+            OverflowPolicy::Block
+        );
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
 
@@ -914,16 +974,20 @@ mod tests {
             prop_assert!(!has_sequence_gap(Some(prev), &header));
         }
 
-        /// Presenting the same sequence twice always reports a gap.
+        /// Presenting the same sequence twice always reports a gap at the raw
+        /// level; the `has_sequence_gap` half additionally ignores an unset
+        /// (`0`) header, so sequence `0` is excluded here (covered by
+        /// `an_unset_header_sequence_is_never_a_gap`).
         #[test]
         fn repeating_a_sequence_is_always_a_gap(sequence in any::<u64>()) {
+            prop_assume!(sequence != 0);
             let header = common::EventHeader { sequence, ..Default::default() };
             prop_assert!(is_sequence_gap(sequence, sequence));
             prop_assert!(has_sequence_gap(Some(sequence), &header));
         }
 
         /// Orderbook is the only channel that coalesces — the §6.5 table. Any
-        /// other channel, present or future, must drop the oldest instead.
+        /// other channel, present or future, must never coalesce.
         #[test]
         fn only_the_orderbook_channel_coalesces(
             channel in prop::sample::select(&[

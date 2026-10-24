@@ -11,7 +11,9 @@ use rust_decimal::Decimal;
 use crate::output::Renderer;
 
 /// The money-literal grammar [`parse_dec`] accepts, as a diagnostic spells it.
-const GRAMMAR: &str = "[+-]?digits[.digits]";
+/// Matches `longtrader-contract::ext` exactly: an optional leading `-` only
+/// (no `+`), then digits, then optionally a decimal point and more digits.
+const GRAMMAR: &str = "[-]?digits[.digits]";
 
 /// `true` for a non-empty run of ASCII digits.
 fn is_digits(text: &str) -> bool {
@@ -35,7 +37,13 @@ fn grammar_violation(s: &str) -> Option<&'static str> {
     if s.contains(['e', 'E']) {
         return Some("exponents are not accepted");
     }
-    let body = s.strip_prefix(['+', '-']).unwrap_or(s);
+    // The contract grammar (`longtrader-contract::ext`) rejects a leading `+`:
+    // `+1` is a shell-quoting habit, not an intent, and accepting it here while
+    // the host rejects it would turn a typo into a wire rejection.
+    if s.starts_with('+') {
+        return Some("a leading `+` is not accepted");
+    }
+    let body = s.strip_prefix('-').unwrap_or(s);
     let (whole, fraction) = body.split_once('.').unwrap_or((body, ""));
     if !is_digits(whole) {
         return Some("expected one or more digits before the decimal point");
@@ -57,14 +65,17 @@ const MAX_FRACTION_DIGITS: usize = 28;
 
 /// Parse a money literal for `field`, whose name is a CLI flag echoed verbatim.
 ///
-/// The accepted grammar is exactly [`GRAMMAR`]: an optional sign, then digits,
-/// then optionally a decimal point and at least one more digit. The lenient
+/// The accepted grammar is exactly [`GRAMMAR`] and exactly the contract's
+/// (`longtrader-contract::ext`): an optional leading `-`, then digits, then
+/// optionally a decimal point and at least one more digit. The lenient
 /// spellings `rust_decimal` would also take are refused on purpose, because each
 /// one turns a plausible typo into a valid order instead of an error:
 ///
 /// * `_` digit separators — `1_000` would send 1000.
 /// * any exponent — `1e3` and `1e+3` would both send 1000, and a scale the operator never typed is
 ///   exactly the guess a money field must not make.
+/// * a leading `+` — accepted by `rust_decimal` but rejected by the contract, so accepting it here
+///   would only move the rejection to the wire.
 /// * a leading or trailing decimal point (`.5`, `1.`) — a shell-quoting habit, not an intent.
 ///
 /// An in-grammar literal can still fail, because `rust_decimal` caps the
@@ -406,8 +417,13 @@ mod tests {
     }
 
     #[test]
-    fn a_leading_plus_is_accepted_because_the_grammar_allows_a_sign() {
-        assert_eq!(super::parse_dec("+1", "quantity").expect("valid"), Decimal::from(1));
+    fn a_leading_plus_is_rejected_like_the_contract() {
+        // The contract (`longtrader-contract::ext`) rejects `+1`; the CLI must
+        // reject it too, otherwise the typo only surfaces as a wire rejection.
+        let message = super::parse_dec("+1", "quantity")
+            .expect_err("a leading `+` is not a money literal")
+            .to_string();
+        assert_eq!(message, shape_error("quantity", "+1", "a leading `+` is not accepted"));
     }
 
     #[test]
@@ -415,6 +431,7 @@ mod tests {
         assert!(super::parse_dec("+-1", "quantity").is_err());
         assert!(super::parse_dec("1-", "quantity").is_err());
         assert!(super::parse_dec("--1", "quantity").is_err());
+        assert!(super::parse_dec("+1", "quantity").is_err());
     }
 
     // ---- parse_dec: a trailing or leading decimal point is refused ----
@@ -1017,13 +1034,14 @@ mod tests {
         }
 
         /// Every literal the documented grammar admits really is accepted: an
-        /// optional sign, at least one whole digit, and an optional point with at
-        /// least one more digit. This is the constructive half of the contract;
-        /// the examples and `no_digit_separator_or_exponent_ever_reaches_the_parser`
-        /// cover the refusals.
+        /// optional leading `-` (no `+`, matching the contract), at least one
+        /// whole digit, and an optional point with at least one more digit.
+        /// This is the constructive half of the contract; the examples and
+        /// `no_digit_separator_or_exponent_ever_reaches_the_parser` cover the
+        /// refusals.
         #[test]
         fn the_grammar_is_exactly_the_documented_shape(
-            sign in proptest::sample::select(&["", "+", "-"][..]),
+            sign in proptest::sample::select(&["", "-"][..]),
             whole in "[0-9]{1,9}",
             dot in proptest::sample::select(&["", "."][..]),
             frac in "[0-9]{1,9}",

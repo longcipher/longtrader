@@ -218,7 +218,7 @@ mod tests {
     use crate::{
         adapters::MockAdapter,
         ports::{MarketDataSource, MarketEventStream, OverflowPolicy, PortError, TradingGateway},
-        proto::{common, market, trading},
+        proto::{market, trading},
     };
 
     #[test]

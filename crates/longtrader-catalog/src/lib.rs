@@ -19,10 +19,126 @@ pub mod ids {
     pub const CMDNC_ARB: &str = "cmdnc_arb";
 }
 
-/// Returns every built-in strategy descriptor.
+/// Every strategy the worker registry can build (`bin/longtrader-worker/src/
+/// strategies/registry.rs`). Kept here so the terminal UI can list every
+/// executable strategy even before it gains a fully specified numeric schema.
+/// A stub has no numeric `params` (string-only strategies such as `symbol`
+/// cannot be expressed as `ParamSlot` doubles); the UI renders a TOML editor
+/// for those until a detailed schema lands. Detailed entries above (`grid_maker`,
+/// `cmdnc_arb`) keep their numeric slots.
+pub const WORKER_STRATEGY_IDS: [&str; 55] = [
+    "adx_trend",
+    "amm_arb",
+    "apt_mm",
+    "autoborrow",
+    "avellaneda_mm_v2",
+    "balance_align",
+    "basis_mm",
+    "bb_keltner_squeeze",
+    "boll_grid",
+    "bollinger_v2",
+    "convert",
+    "cross_depth_maker",
+    "cross_exchange_mm",
+    "cross_fixed_maker",
+    "cross_maker",
+    "cvd_divergence",
+    "darvas_box",
+    "dca",
+    "dca_executor",
+    "dca_scheduler",
+    "deposit_transfer",
+    "dman_v3",
+    "dual_thrust",
+    "ema_cross",
+    "fixed_maker",
+    "glft_mm",
+    "grid_strike",
+    "hedge",
+    "hedge_grid",
+    "ichimoku",
+    "irr",
+    "liquidity_mining",
+    "macd_bb",
+    "market_cap",
+    "mean_reversion",
+    "momentum_factor",
+    "nav_recorder",
+    "obi_mm",
+    "perpetual_mm",
+    "pmm_dynamic",
+    "premium_monitor",
+    "pure_market_making",
+    "queue_mm",
+    "random_entry",
+    "rebalance",
+    "sentinel",
+    "simple_grid",
+    "simplified_glft_mm",
+    "skewed_grid",
+    "spot_perp_arb",
+    "stat_arb",
+    "supertrend",
+    "twap_executor",
+    "vwap_executor",
+    "xfunding_lite",
+];
+
+/// Kinds for worker strategies that are not market makers: the terminal UI
+/// groups and filters by `kind`, so a mislabeled stub would hide a strategy
+/// under the wrong filter. Anything absent here is a maker.
+const ARB_STRATEGY_IDS: [&str; 3] = ["amm_arb", "spot_perp_arb", "stat_arb"];
+const HEDGE_STRATEGY_IDS: [&str; 2] = ["hedge", "hedge_grid"];
+
+/// Minimal descriptor for a worker strategy without a detailed numeric schema.
+fn worker_stub(id: &'static str) -> StrategyDescriptor {
+    // Human name: `snake_case` -> `Title Words`.
+    let name = id
+        .split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_ascii_uppercase().to_string() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let kind = if ARB_STRATEGY_IDS.contains(&id) {
+        "arb"
+    } else if HEDGE_STRATEGY_IDS.contains(&id) {
+        "hedge"
+    } else {
+        "maker"
+    };
+    StrategyDescriptor {
+        id: id.into(),
+        name,
+        note: "Worker strategy: configure via TOML until a detailed numeric schema lands.".into(),
+        builtin: true,
+        kind: kind.into(),
+        // No numeric slots: every `ParamSlot` is a double, which cannot express
+        // the string-valued params (symbols, venues) these strategies take.
+        // The `..Default::default()` below supplies the empty params list.
+        ..Default::default()
+    }
+}
+
+/// Returns every built-in strategy descriptor: the two fully specified terminal
+/// templates plus one stub per worker registry entry so no executable strategy
+/// is invisible to the UI.
+///
+/// Uniqueness across the two groups is enforced by
+/// `descriptor_ids_are_unique_non_empty_and_snake_case`: if a worker ever
+/// adopts a terminal-only id, that test fails and forces an explicit decision
+/// instead of silently emitting two entries for one id.
 #[must_use]
 pub fn builtin_descriptors() -> Vec<StrategyDescriptor> {
-    vec![grid_maker(), cmdnc_arb()]
+    let mut out = vec![grid_maker(), cmdnc_arb()];
+    for id in WORKER_STRATEGY_IDS {
+        out.push(worker_stub(id));
+    }
+    out
 }
 
 /// Looks up a built-in descriptor by id.
@@ -159,7 +275,14 @@ mod tests {
     }
 
     fn id_is_snake_case(id: &str) -> bool {
-        !id.is_empty() && id.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+        let mut chars = id.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !first.is_ascii_lowercase() {
+            return false;
+        }
+        id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
     }
 
     /// Runs `f` over every `(descriptor, slot)` pair in the catalog.
@@ -195,22 +318,34 @@ mod tests {
     }
 
     #[test]
-    fn catalog_contains_only_the_two_builtins() {
+    fn catalog_contains_the_two_detailed_builtins_plus_worker_stubs() {
         let descriptors = builtin_descriptors();
         let ids: Vec<&str> = descriptors.iter().map(|d| d.id.as_str()).collect();
-        assert_eq!(ids, [ids::GRID_MAKER, ids::CMDNC_ARB]);
+        // The two fully specified templates lead; every worker id follows.
+        assert_eq!(&ids[..2], [ids::GRID_MAKER, ids::CMDNC_ARB]);
+        for worker_id in WORKER_STRATEGY_IDS {
+            assert!(
+                ids.contains(&worker_id),
+                "worker strategy {worker_id:?} must be visible to the UI"
+            );
+        }
+        assert_eq!(ids.len(), 2 + WORKER_STRATEGY_IDS.len());
     }
 
     #[test]
-    fn every_descriptor_is_builtin_and_has_slots() {
+    fn every_descriptor_is_builtin() {
         for d in builtin_descriptors() {
             assert!(d.builtin, "{} must be builtin", d.id);
-            assert!(!d.params.is_empty(), "{} must declare param slots", d.id);
             for (i, p) in d.params.iter().enumerate() {
                 assert!(!p.label.is_empty(), "{}.params[{i}].label empty", d.id);
                 assert!(!p.dimension.is_empty(), "{}.params[{i}].dimension empty", d.id);
             }
         }
+        // The two detailed templates carry numeric slots; worker stubs carry
+        // none (string-only configs render as TOML until a schema lands).
+        let detailed: Vec<_> =
+            builtin_descriptors().into_iter().filter(|d| !d.params.is_empty()).collect();
+        assert_eq!(detailed.len(), 2);
     }
 
     #[test]
@@ -335,7 +470,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn worker_stubs_carry_their_strategy_kind() {
+        // `kind` drives UI grouping/filtering: an arb strategy labeled
+        // "maker" would vanish under the "arb" filter.
+        for id in ARB_STRATEGY_IDS {
+            assert_eq!(descriptor(id).expect("worker stub must exist").kind, "arb", "{id}");
+        }
+        for id in HEDGE_STRATEGY_IDS {
+            assert_eq!(descriptor(id).expect("worker stub must exist").kind, "hedge", "{id}");
+        }
+        for id in WORKER_STRATEGY_IDS {
+            if !ARB_STRATEGY_IDS.contains(&id) && !HEDGE_STRATEGY_IDS.contains(&id) {
+                assert_eq!(descriptor(id).expect("worker stub must exist").kind, "maker", "{id}");
+            }
+        }
+    }
+
     // ---- descriptor identity ----------------------------------------------------
+
+    /// Every descriptor must be displayable: the UI renders the id, name, and
+    /// note with no fallback text, so an empty one would ship a blank card.
+    #[test]
+    fn every_descriptor_has_displayable_identity() {
+        for d in builtin_descriptors() {
+            assert!(!d.id.is_empty(), "descriptor id must not be empty");
+            assert!(!d.name.is_empty(), "{}.name must not be empty", d.id);
+            assert!(!d.note.is_empty(), "{}.note must not be empty", d.id);
+        }
+    }
+
+    /// Detailed templates fully specify their controls: every numeric slot
+    /// declares an explicit step. A missing step would silently fall back to
+    /// the dimension default and change the UI granularity.
+    #[test]
+    fn detailed_descriptors_declare_explicit_steps() {
+        for d in [grid_maker(), cmdnc_arb()] {
+            assert!(!d.params.is_empty(), "{}.params must not be empty", d.id);
+            for p in &d.params {
+                assert!(
+                    p.step.is_some(),
+                    "{}.{}: detailed slots must declare an explicit step",
+                    d.id,
+                    p.label
+                );
+            }
+        }
+    }
 
     #[test]
     fn descriptor_ids_are_unique_non_empty_and_snake_case() {
@@ -396,9 +577,12 @@ mod tests {
         let first = builtin_descriptors();
         let second = builtin_descriptors();
         assert_eq!(first, second, "builtin_descriptors() must be a pure function");
+        // 2 detailed (6 + 4 numeric slots) + 55 worker stubs (no numeric slots).
         let counts: Vec<usize> = first.iter().map(|d| d.params.len()).collect();
-        assert_eq!(counts, [6, 4]);
+        assert_eq!(&counts[..2], [6, 4]);
+        assert!(counts[2..].iter().all(|c| *c == 0));
         assert_eq!(all_slots().len(), 10);
+        assert_eq!(first.len(), 2 + WORKER_STRATEGY_IDS.len());
     }
 
     // ---- property-based invariants ----------------------------------------------
