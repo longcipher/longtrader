@@ -195,9 +195,7 @@ export class SessionTradingPort extends TradingPort {
     stopLoss?: unknown,
   ): Promise<unknown> {
     return this.session.modifyPosition(positionId, {
-      ...(takeProfit !== undefined
-        ? { takeProfit: takeProfit as never }
-        : {}),
+      ...(takeProfit !== undefined ? { takeProfit: takeProfit as never } : {}),
       ...(stopLoss !== undefined ? { stopLoss: stopLoss as never } : {}),
     });
   }

@@ -88,8 +88,8 @@ func TestIsSequenceGap(t *testing.T) {
 		{1, 1, true},  // a repeat is still a discontinuity
 		{7, 6, true},  // going backwards
 		{99, 100, false},
-		{^uint64(0), 0, false},     // wrap to zero is contiguous, not a gap
-		{^uint64(0), 1, true},      // wrapped past zero
+		{^uint64(0), 0, false},              // wrap to zero is contiguous, not a gap
+		{^uint64(0), 1, true},               // wrapped past zero
 		{^uint64(0) - 1, ^uint64(0), false}, // contiguous into the wrap point
 	}
 	for _, tc := range cases {
