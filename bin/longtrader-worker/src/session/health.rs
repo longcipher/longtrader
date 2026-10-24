@@ -2,7 +2,7 @@
 
 use super::{
     Arc, Duration, HEALTH_PROBE_FAILURE_THRESHOLD, HEALTH_PROBE_TIMEOUT, ManagerError, Ordering,
-    SessionHandle, SessionManager, SessionState, Weak,
+    SessionHandle, SessionManager, SessionState, TERMINAL_SESSION_RETENTION, Weak,
 };
 use crate::proto::{trading, worker};
 
@@ -87,18 +87,27 @@ impl SessionManager {
     /// that the loop holds would make the manager immortal — its session map, its
     /// adapter and its sockets could never be dropped, so a worker that stopped
     /// accepting connections would still keep every one of them alive.
+    ///
+    /// The started-flag is claimed *after* the `Weak` is known to exist: claiming
+    /// it first turned a missing `install_self()` into one warning followed by
+    /// permanent silence — every later attach a no-op, leases never enforced,
+    /// nothing to indicate why.
     pub(crate) async fn ensure_watchdog(&self) {
-        if self.watchdog_started.swap(true, Ordering::AcqRel) {
+        if self.watchdog_started.load(Ordering::Acquire) {
             return;
         }
-        if let Some(weak) = self.self_weak.lock().await.clone() {
-            tokio::spawn(watchdog_loop(weak));
-        } else {
+        let Some(weak) = self.self_weak.lock().await.clone() else {
             tracing::warn!(
                 "SessionManager::ensure_watchdog without install_self: leases will never expire; \
                  call install_self() after SessionManager::new()"
             );
+            return;
+        };
+        if self.watchdog_started.swap(true, Ordering::AcqRel) {
+            // Lost the race to a concurrent caller; its loop is the one running.
+            return;
         }
+        tokio::spawn(watchdog_loop(weak));
     }
 
     /// Lease expiry tripwire for one session: flip state and execute the
@@ -134,6 +143,7 @@ impl SessionManager {
             // terminal state stands, no second publish.
             return;
         };
+        handle.mark_terminal().await;
         tracing::error!(
             session = %handle.id,
             lease_timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
@@ -220,6 +230,10 @@ async fn watchdog_loop(weak: Weak<SessionManager>) {
         let Some(manager) = weak.upgrade() else {
             return;
         };
+        // Retire terminal sessions past their retention window first: it keeps
+        // the registry — and everything that scans it below — bounded, and it
+        // is the exit condition for strategy-side lease guards.
+        manager.retire_terminal_sessions(TERMINAL_SESSION_RETENTION).await;
         // Snapshot session handles to avoid holding the lock during processing.
         let handles: Vec<Arc<SessionHandle>> = {
             let sessions = manager.sessions.lock().await;
@@ -299,8 +313,23 @@ async fn watchdog_loop(weak: Weak<SessionManager>) {
                     .cloned()
                     .collect()
             };
+            // Mass-cancel is concurrent and per-cancel bounded (see
+            // `CANCEL_ROUND_TRIP_TIMEOUT`): a sequential loop awaiting one
+            // unresponsive venue cancel per session could stall this tick —
+            // and with it lease enforcement for every session — indefinitely.
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
+            let mut jobs = Vec::with_capacity(active.len());
             for handle in active {
-                manager.trip_kill_switch(&handle, handle.policy().await.lease_timeout).await;
+                let manager = Arc::clone(&manager);
+                let sem = Arc::clone(&semaphore);
+                jobs.push(tokio::spawn(async move {
+                    let _permit = sem.acquire().await;
+                    let lease_timeout = handle.policy().await.lease_timeout;
+                    manager.trip_kill_switch(&handle, lease_timeout).await;
+                }));
+            }
+            for job in jobs {
+                let _ = job.await;
             }
         }
     }
@@ -331,24 +360,27 @@ pub fn spawn_strategy_lease_guard(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(heartbeat_interval);
-        // Strategy-side watchdog: spawn a timer that checks the lease every
+        // Strategy-side watchdog: a timer that checks the lease every
         // `heartbeat_interval` and trips the cancel path on timeout.
+        //
+        // The predicate is not re-implemented here: this loop asks
+        // `check_lease_expiry` — the single owner of "expired" — every tick and
+        // only reports/acts on its verdict. A local `elapsed > lease_timeout`
+        // recomputation (what this used to do) was a second definition of the
+        // same rule that could drift from the one the watchdog enforces.
         loop {
             tick.tick().await;
-            let Ok(handle) = manager.get(&session_id).await else {
-                break; // session gone
-            };
-            let lease_timeout = handle.policy().await.lease_timeout;
-            let elapsed = Duration::from_millis(handle.last_seen_elapsed_ms().await);
-            if elapsed > lease_timeout {
-                tracing::warn!(
-                    session = %session_id,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    lease_timeout_ms = lease_timeout.as_millis() as u64,
-                    "strategy-side lease timeout detected; triggering kill-switch cancel"
-                );
-                let _ = manager.check_lease_expiry(&session_id).await;
-                break;
+            match manager.check_lease_expiry(&session_id).await {
+                Ok(true) => {
+                    tracing::warn!(
+                        session = %session_id,
+                        "strategy-side lease timeout detected; kill-switch executed"
+                    );
+                    break;
+                }
+                Ok(false) => {}
+                // Session gone (retired or never existed): nothing left to watch.
+                Err(_) => break,
             }
         }
     })

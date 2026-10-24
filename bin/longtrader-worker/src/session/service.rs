@@ -18,35 +18,15 @@
 //! Also exposes `RegisterStrategy` / `StrategyStatus` / `StopStrategy` /
 //! `ReportLog` / `StreamStrategyEvents` per the FMZ observability model.
 
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::Arc;
 
 use connectrpc::{
     InboundStream, PreEncoded, RequestContext, Response, ServiceRequest, error::ConnectError,
 };
 use futures_util::StreamExt;
 
-use super::{ClientIdentity, ManagerError, SessionManager, SessionState};
+use super::{ClientIdentity, ManagerError, SessionManager, SessionState, time};
 use crate::proto::{common, worker};
-
-fn now_ts() -> buffa_types::google::protobuf::Timestamp {
-    let dur = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    buffa_types::google::protobuf::Timestamp {
-        // saturate (not zero) on far-future overflow
-        seconds: i64::try_from(dur.as_secs()).unwrap_or(i64::MAX),
-        // subsec_nanos() < 1e9 always fits i32; panic-free conversion.
-        nanos: i32::try_from(dur.subsec_nanos()).unwrap_or(0),
-        ..Default::default()
-    }
-}
-
-fn now_ns() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
-}
 
 /// Build the structured `longtrader.common.v1.ErrorDetail` carrying a stable
 /// reason. Split out from [`error_detail`] so a test can assert the reason
@@ -142,7 +122,7 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
         let resp = worker::AttachSessionResponse {
             session_id,
             heartbeat_interval_ms,
-            server_time: buffa::MessageField::some(now_ts()),
+            server_time: buffa::MessageField::some(time::now_ts()),
             capabilities: vec![
                 "reconcile".to_string(),
                 "kill_switch".to_string(),
@@ -162,7 +142,7 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
         let handle = self.manager.get(&req.session_id).await?;
         handle.touch().await;
         let resp = worker::KeepAliveResponse {
-            server_time_ns: now_ns(),
+            server_time_ns: time::now_ns(),
             heartbeat_interval_ms: handle.heartbeat_interval_ms,
             ..Default::default()
         };
@@ -217,9 +197,10 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
         // policy without applying any part of it, so a caller can never believe it
         // has a lease the worker is not enforcing.
         if let Some(policy) = req.policy.as_option() {
-            let mut session_policy = handle.policy().await;
-            super::apply_policy(&mut session_policy, policy)?;
-            handle.set_policy(session_policy).await;
+            // Atomic read-modify-write: the clone-mutate-write this replaces let
+            // a concurrent reconnect (or a second SetKillSwitchPolicy) land
+            // between the read and the write and silently overwrite it.
+            handle.update_policy(|current| super::apply_policy(current, policy)).await?;
         }
         let resp = worker::SetKillSwitchPolicyResponse::default();
         Response::ok(PreEncoded::from_message(&resp))
@@ -237,7 +218,7 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
             .set_strategy(super::StrategyInfo {
                 id: strategy_id.clone(),
                 name: req.name.clone(),
-                started_at_ms: now_ns() / 1_000_000,
+                started_at_ms: time::now_ns() / 1_000_000,
                 orders_submitted: 0,
                 log_events: 0,
             })
@@ -261,12 +242,7 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
             strategy_id: info.as_ref().map_or_default(|i| i.id.clone()),
             name: info.as_ref().map_or_default(|i| i.name.clone()),
             started_at: info.as_ref().map_or(buffa::MessageField::none(), |i| {
-                buffa::MessageField::some(buffa_types::google::protobuf::Timestamp {
-                    seconds: i.started_at_ms.div_euclid(1000),
-                    nanos: i32::try_from(i.started_at_ms.rem_euclid(1000) * 1_000_000)
-                        .expect("ms remainder fits i32"),
-                    ..Default::default()
-                })
+                buffa::MessageField::some(time::timestamp_from_ms(i.started_at_ms))
             }),
             // Reported from the handle, not the strategy record, so a session
             // that traded before `RegisterStrategy` still reports its count.
@@ -345,20 +321,252 @@ impl worker::WorkerSessionService for WorkerSessionServiceImpl {
                 ))
             })?
         };
-        let replay = handle.replay_after(after_seq).await;
+        // Atomic replay/subscribe handoff. The order matters: subscribing
+        // *first* and snapshotting the sequence watermark *second* partitions
+        // the event space exactly once —
+        //   - events with `sequence <= watermark` are already in the ring, so the replay (filtered
+        //     to the watermark) delivers them and the receiver never will;
+        //   - events published after the subscription are delivered by the receiver and excluded
+        //     from the replay.
+        // Replaying before subscribing — the previous order — left everything
+        // published in between absent from both: a silent gap the client could
+        // detect but never repair.
         let mut rx = handle.subscribe();
+        let watermark = handle.current_seq();
+        let replay = handle.replay_after(after_seq).await;
         let stream = async_stream::stream! {
             for event in replay {
+                if event.header.as_option().is_some_and(|h| h.sequence > watermark) {
+                    // Published after the subscription: the receiver owns it.
+                    continue;
+                }
                 yield Ok((*event).clone());
             }
             loop {
                 match rx.recv().await {
                     Ok(event) => yield Ok((*event).clone()),
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // The ring/broadcast fell behind: continuity is broken
+                        // and only the client can repair it (re-fetch the
+                        // snapshot / full ReconcileState). Ending the stream is
+                        // that signal — swallowing the lag would leave a slow
+                        // consumer silently behind forever.
+                        tracing::warn!(
+                            session = %req.session_id,
+                            lagged = n,
+                            "event stream lagged; terminating so the client resyncs"
+                        );
+                        break;
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         };
         Ok(Response::stream(stream))
+    }
+}
+
+/// Response-contract tests for the service handlers.
+///
+/// The handlers build the reply messages by hand, so what the *client* receives
+/// is a property of this layer alone: a field dropped from a struct literal
+/// here is invisible to every manager-level test. Each test drives the handler
+/// the way the dispatcher does (encode → decode a view → call → decode the
+/// pre-encoded reply) and asserts on the decoded reply.
+#[cfg(test)]
+mod service_contract_tests {
+    use std::sync::Arc as StdArc;
+
+    use buffa::{HasMessageView, Message};
+    use bytes::Bytes;
+    use connectrpc::{CodecFormat, Encodable, RequestContext, ServiceRequest};
+
+    use super::*;
+    use crate::{
+        adapters::MockAdapter,
+        ports::TradingGateway as _,
+        proto::{trading, worker, worker::WorkerSessionService as _},
+    };
+
+    /// A service over the mock venue, with the mock kept in hand.
+    fn test_service() -> (StdArc<MockAdapter>, StdArc<WorkerSessionServiceImpl>) {
+        let adapter = StdArc::new(MockAdapter::new(rust_decimal_macros::dec!(100)));
+        let gateway: StdArc<dyn crate::ports::TradingGateway> = adapter.clone();
+        let market: StdArc<dyn crate::ports::MarketDataSource> = adapter.clone();
+        let manager = StdArc::new(SessionManager::new(
+            None,
+            crate::ports::exchange_id("mock", ""),
+            gateway,
+            market,
+        ));
+        (adapter, StdArc::new(WorkerSessionServiceImpl { manager }))
+    }
+
+    /// Call a unary handler the way the dispatcher does: encode the request,
+    /// decode a view over the same bytes, hand both to the handler, then decode
+    /// the pre-encoded reply. The round trip is what makes the assertions below
+    /// about *what the client receives*, not about internal state.
+    async fn attach_reply(
+        svc: &WorkerSessionServiceImpl,
+        request: worker::AttachSessionRequest,
+    ) -> worker::AttachSessionResponse {
+        let body = Bytes::from(request.encode_to_vec());
+        let view = worker::AttachSessionRequest::decode_view(&body).expect("the request decodes");
+        let req = ServiceRequest::from_parts(&view, &body);
+        let resp = svc
+            .attach_session(RequestContext::new(Default::default()), req)
+            .await
+            .expect("a well-formed attach must be accepted");
+        worker::AttachSessionResponse::decode_from_slice(
+            &resp.body.encode(CodecFormat::Proto).expect("the reply encodes"),
+        )
+        .expect("the reply decodes as AttachSessionResponse")
+    }
+
+    async fn reconcile_reply(
+        svc: &WorkerSessionServiceImpl,
+        session_id: &str,
+    ) -> worker::ReconcileStateResponse {
+        let request = worker::ReconcileStateRequest {
+            session_id: session_id.to_string(),
+            ..Default::default()
+        };
+        let body = Bytes::from(request.encode_to_vec());
+        let view = worker::ReconcileStateRequest::decode_view(&body).expect("the request decodes");
+        let req = ServiceRequest::from_parts(&view, &body);
+        let resp = svc
+            .reconcile_state(RequestContext::new(Default::default()), req)
+            .await
+            .expect("a reconcile on an attached session must be accepted");
+        worker::ReconcileStateResponse::decode_from_slice(
+            &resp.body.encode(CodecFormat::Proto).expect("the reply encodes"),
+        )
+        .expect("the reply decodes as ReconcileStateResponse")
+    }
+
+    /// `attach_session` answers with everything the client needs to drive the
+    /// lease: the id, the negotiated heartbeat, a server clock and the
+    /// capabilities it may feature-detect. A field dropped here is invisible
+    /// until a client stalls on a heartbeat it never negotiated.
+    #[tokio::test]
+    async fn attach_session_advertises_the_full_lease() {
+        let (_mock, svc) = test_service();
+        let resp = attach_reply(
+            &svc,
+            worker::AttachSessionRequest {
+                token: "t".to_string(),
+                client_name: "test".to_string(),
+                client_version: "0.0.0".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(!resp.session_id.is_empty(), "the session id binds every later call");
+        assert_eq!(
+            resp.heartbeat_interval_ms,
+            crate::session::DEFAULT_HEARTBEAT_MS,
+            "the client paces its KeepAlive on the negotiated interval"
+        );
+        assert!(resp.server_time.as_option().is_some(), "the server clock anchors lease math");
+        assert_eq!(
+            resp.capabilities,
+            vec!["reconcile".to_string(), "kill_switch".to_string(), "event_replay".to_string()],
+            "capabilities are what the client feature-detects against"
+        );
+    }
+
+    /// `reconcile_state` returns the atomic snapshot verbatim, watermark
+    /// included: the watermark is what lets a client replay buffered deltas
+    /// after recovery without a multi-RPC race, and the balances are the
+    /// snapshot itself. A dropped field would leave the client reconciling
+    /// against an empty world it believes is complete.
+    #[tokio::test]
+    async fn reconcile_state_returns_the_snapshot_verbatim() {
+        let (mock, svc) = test_service();
+        // A snapshot with content: every field pinned below has to be
+        // non-empty, or "returned verbatim" and "field dropped" read the same.
+        mock.set_positions(vec![trading::Position {
+            symbol: "BTC/USDT".to_string(),
+            ..Default::default()
+        }])
+        .await;
+        let resting = mock
+            .create_order(trading::CreateOrderRequest {
+                exchange_id: buffa::MessageField::some(svc.manager.default_exchange().clone()),
+                order: buffa::MessageField::some(trading::OrderRequest {
+                    client_order_id: "resting-1".to_string(),
+                    symbol: "BTC/USDT".to_string(),
+                    r#type: buffa::EnumValue::Known(trading::OrderType::Limit),
+                    side: buffa::EnumValue::Known(trading::OrderSide::Buy),
+                    amount: buffa::MessageField::some(longtrader_contract::ext::decimal_to_common(
+                        rust_decimal_macros::dec!(1),
+                    )),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("test setup");
+
+        let attached = attach_reply(
+            &svc,
+            worker::AttachSessionRequest { token: "t".to_string(), ..Default::default() },
+        )
+        .await;
+        let resp = reconcile_reply(&svc, &attached.session_id).await;
+
+        assert_eq!(resp.snapshot_sequence, 1, "the mock's first snapshot watermark");
+        assert!(resp.snapshot_time.as_option().is_some(), "the snapshot is stamped in time");
+        assert_eq!(resp.balances.len(), 1, "the mock venue reports one balance");
+        assert_eq!(resp.positions.len(), 1, "the seeded position must be returned");
+        assert_eq!(
+            resp.open_orders.iter().map(|o| o.id.clone()).collect::<Vec<_>>(),
+            vec![resting.id.clone()],
+            "the resting order must be returned"
+        );
+    }
+
+    /// `register_strategy` stamps the strategy record with the wall-clock start
+    /// in **milliseconds**. The ns-to-ms conversion is the whole content of
+    /// `started_at_ms`: a `%` where the `/` belongs reports the sub-millisecond
+    /// remainder, and every reader of the age of a strategy is then wrong by
+    /// six orders of magnitude.
+    #[tokio::test]
+    async fn register_strategy_stamps_the_start_in_epoch_milliseconds() {
+        let (_mock, svc) = test_service();
+        let attached = attach_reply(
+            &svc,
+            worker::AttachSessionRequest { token: "t".to_string(), ..Default::default() },
+        )
+        .await;
+        let request = worker::RegisterStrategyRequest {
+            session_id: attached.session_id.clone(),
+            name: "grid".to_string(),
+            ..Default::default()
+        };
+        let body = Bytes::from(request.encode_to_vec());
+        let view =
+            worker::RegisterStrategyRequest::decode_view(&body).expect("the request decodes");
+        let req = ServiceRequest::from_parts(&view, &body);
+        let resp = svc
+            .register_strategy(RequestContext::new(Default::default()), req)
+            .await
+            .expect("a register on an attached session must be accepted");
+        let resp = worker::RegisterStrategyResponse::decode_from_slice(
+            &resp.body.encode(CodecFormat::Proto).expect("the reply encodes"),
+        )
+        .expect("the reply decodes as RegisterStrategyResponse");
+        assert!(!resp.strategy_id.is_empty(), "the strategy id is what later RPCs address");
+
+        let handle = svc.manager.get(&attached.session_id).await.expect("test setup");
+        let info = handle.strategy_info().await.expect("the record was stored");
+        assert_eq!(info.name, "grid");
+        assert_eq!(info.id, resp.strategy_id);
+        assert!(
+            info.started_at_ms > 1_600_000_000_000,
+            "started_at_ms must be epoch milliseconds, got {}",
+            info.started_at_ms
+        );
     }
 }

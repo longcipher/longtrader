@@ -16,8 +16,8 @@ use thiserror::Error;
 
 use crate::{
     client_core::{
-        SERVICE_MARKET, SERVICE_RUNTIME, SERVICE_STRATEGY, SERVICE_TRADING, service_url,
-        trim_base_url,
+        SERVICE_MARKET, SERVICE_RUNTIME, SERVICE_STRATEGY, SERVICE_TRADING, end_of_stream_error,
+        service_url, trim_base_url,
     },
     proto::longtrader::{
         common::v1 as common, market::v1 as umarket, stream::v1 as stream, terminal::v1 as proto,
@@ -603,10 +603,13 @@ impl TerminalClient {
             ..Default::default()
         };
         let payload = req_msg.encode_to_vec();
-        let mut body = Vec::with_capacity(5 + payload.len());
-        body.push(0);
-        body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        body.extend_from_slice(&payload);
+        // Connect streaming framing for the request: 1 flag byte (0 =
+        // uncompressed) + 4-byte big-endian length + protobuf payload. Encoded
+        // by the contract crate's single owner of the framing.
+        let body = longtrader_contract::envelope::encode_envelope(
+            longtrader_contract::envelope::FLAG_MESSAGE,
+            &payload,
+        );
 
         let opts = web_sys::RequestInit::new();
         opts.set_method("POST");
@@ -653,23 +656,38 @@ impl TerminalClient {
             (reader, Vec::<u8>::new()),
             |(reader, mut buf)| async move {
                 loop {
-                    if buf.len() >= 5 {
-                        let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-                        let total = 5 + len;
-                        if buf.len() >= total {
-                            let payload: Vec<u8> = buf[5..total].to_vec();
-                            buf.drain(..total);
-                            match stream::UpdateEnvelope::decode_from_slice(&payload) {
-                                Ok(env) => return Some((Ok(env), (reader, buf))),
-                                Err(e) => {
-                                    return Some((
-                                        Err(TerminalClientError::Decode(e.to_string())),
-                                        (reader, buf),
-                                    ));
-                                }
-                            }
+                    // Decoding is delegated to the contract crate's framing
+                    // owner. The flags byte is load-bearing: `0x02` marks the
+                    // terminal end-of-stream frame, whose JSON body carries the
+                    // stream's verdict when the HTTP status alone said 200.
+                    if let Ok((flags, payload, consumed)) =
+                        longtrader_contract::envelope::decode_envelope_result(&buf)
+                    {
+                        let payload: Vec<u8> = payload.to_vec();
+                        buf.drain(..consumed);
+                        if flags & longtrader_contract::envelope::FLAG_EOS != 0 {
+                            // Terminal frame: `{"error":null}` closes the
+                            // stream cleanly; a non-null error is the
+                            // rejection this stream was answered with.
+                            return match end_of_stream_error(&payload) {
+                                Some(end) => Some((
+                                    Err(TerminalClientError::Rpc {
+                                        code: 200,
+                                        message: format!("{}: {}", end.code, end.message),
+                                    }),
+                                    (reader, buf),
+                                )),
+                                None => None,
+                            };
                         }
+                        return Some((
+                            stream::UpdateEnvelope::decode_from_slice(&payload)
+                                .map_err(|e| TerminalClientError::Decode(e.to_string())),
+                            (reader, buf),
+                        ));
                     }
+                    // TooShort / Truncated: the frame is not fully buffered
+                    // yet; fall through and read more.
                     let result = match JsFuture::from(reader.read()).await {
                         Ok(v) => v,
                         Err(e) => {

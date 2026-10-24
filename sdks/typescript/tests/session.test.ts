@@ -15,18 +15,30 @@ import { test } from "node:test";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
   CreateOrderRequestSchema,
+  CreateOrderResponseSchema,
   CreateOrdersRequestSchema,
   OrderRequestSchema,
   OrderSide,
   OrderType,
   TimeInForce,
 } from "../src/gen/longtrader/trading/v1/trading_pb.js";
+import {
+  MarketDataEventSchema,
+  StreamChannel,
+} from "../src/gen/longtrader/market/v1/market_pb.js";
+import {
+  AttachSessionResponseSchema,
+  StrategyEventSchema,
+} from "../src/gen/longtrader/worker/v1/worker_pb.js";
+import type { Order } from "../src/gen/longtrader/trading/v1/trading_pb.js";
 import { DecimalSchema } from "../src/gen/longtrader/common/v1/types_pb.js";
 import {
   ConnectError,
   OverflowPolicy,
   SYNC_IN_PROGRESS,
   Session,
+  SessionMarketPort,
+  SessionTradingPort,
   TERMINAL_STATES,
   decimalNumber,
   decimalText,
@@ -437,4 +449,323 @@ test("overflow policy defaults match the worker's per-channel choice", () => {
   assert.equal(overflowPolicyForChannel("ORDERBOOK"), OverflowPolicy.Coalesce);
   assert.equal(overflowPolicyForChannel("ORDERS"), OverflowPolicy.Block);
   assert.equal(overflowPolicyForChannel("unknown"), OverflowPolicy.Block);
+});
+
+// -- streaming: reader lifetime, frame bound, end-of-stream errors ----------
+//
+// These exercise the hand-written Connect envelope decoder, mirroring the
+// cases sdks/go/session/envelope_test.go holds the Go decoder to.
+
+/** Connect frame flags (docs/bare-protocol-guide.md). */
+const FLAG_MESSAGE = 0x00;
+const FLAG_END_OF_STREAM = 0x02;
+
+/** Wrap `payload` in the 5-byte Connect envelope with `flags`. */
+function frame(flags: number, payload: Uint8Array): Uint8Array {
+  const out = new Uint8Array(5 + payload.length);
+  out[0] = flags;
+  new DataView(out.buffer).setUint32(1, payload.length, false);
+  out.set(payload, 5);
+  return out;
+}
+
+/** A `StrategyEvent` on the wire, stamped with `sequence`. */
+function eventBytes(sequence: bigint): Uint8Array {
+  return toBinary(
+    StrategyEventSchema,
+    create(StrategyEventSchema, { header: { sequence } }),
+  );
+}
+
+/**
+ * A streaming reply over `frames`. The body is handed back so a test can
+ * assert the reader was released once the generator finished or was
+ * abandoned.
+ */
+function streamReply(frames: Uint8Array[]): {
+  reply: Response;
+  body: ReadableStream<Uint8Array>;
+} {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of frames) controller.enqueue(chunk);
+      controller.close();
+    },
+  });
+  return { reply: { status: 200, body } as unknown as Response, body };
+}
+
+/** A unary reply whose whole body is `bytes`. */
+function unaryReply(bytes: Uint8Array): Response {
+  return {
+    status: 200,
+    arrayBuffer: async () =>
+      bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer,
+  } as unknown as Response;
+}
+
+/** A session bound to `reply`, with no lease negotiated. */
+function streamingSession(reply: Response): Session {
+  const session = Session.create(
+    "http://worker.local",
+    (async () => reply) as unknown as typeof fetch,
+  );
+  session.sessionId = "sess-1";
+  return session;
+}
+
+/** Consume an async iterable into an array. */
+async function drain<T>(iterable: AsyncIterable<T>): Promise<T[]> {
+  const out: T[] = [];
+  for await (const item of iterable) out.push(item);
+  return out;
+}
+
+test("a clean end-of-stream ends the stream without an error", async () => {
+  const { reply, body } = streamReply([
+    frame(FLAG_MESSAGE, eventBytes(1n)),
+    frame(
+      FLAG_END_OF_STREAM,
+      new TextEncoder().encode('{"error":null,"metadata":{}}'),
+    ),
+  ]);
+  const events = await drain(streamingSession(reply).streamEvents());
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.header?.sequence, 1n);
+  assert.equal(body.locked, false, "a finished stream must release the reader");
+});
+
+test("a sequence gap is reported as a null item", async () => {
+  const { reply } = streamReply([
+    frame(FLAG_MESSAGE, eventBytes(1n)),
+    frame(FLAG_MESSAGE, eventBytes(3n)),
+  ]);
+  const events = await drain(streamingSession(reply).streamEvents());
+  assert.equal(events.length, 3);
+  assert.equal(events[1], null, "1 -> 3 missed event 2");
+});
+
+test("an end-of-stream error frame is thrown, not swallowed", async () => {
+  // Connect answers a rejected subscription with HTTP 200 and puts the reason
+  // in the final end-of-stream frame and nowhere else.
+  const { reply } = streamReply([
+    frame(FLAG_MESSAGE, eventBytes(1n)),
+    frame(
+      FLAG_END_OF_STREAM,
+      new TextEncoder().encode(
+        '{"error":{"code":"unauthenticated","message":"token expired"}}',
+      ),
+    ),
+  ]);
+  await assert.rejects(
+    () => drain(streamingSession(reply).streamEvents()),
+    (err: unknown) =>
+      err instanceof ConnectError &&
+      err.status === 200 &&
+      err.code === "unauthenticated" &&
+      err.message.includes("token expired"),
+  );
+});
+
+test("a frame above the length bound is a protocol error", async () => {
+  // The length is an untrusted u32; a 4 GiB claim must be refused before the
+  // decoder buffers toward it.
+  const header = new Uint8Array(5);
+  header[0] = FLAG_MESSAGE;
+  new DataView(header.buffer).setUint32(1, (64 << 20) + 1, false);
+  const { reply } = streamReply([header]);
+  await assert.rejects(
+    () => drain(streamingSession(reply).streamEvents()),
+    /frame exceeds the maximum length/,
+  );
+});
+
+test("breaking out of a stream releases the body reader", async () => {
+  const { reply, body } = streamReply([
+    frame(FLAG_MESSAGE, eventBytes(1n)),
+    frame(FLAG_MESSAGE, eventBytes(2n)),
+  ]);
+  for await (const event of streamingSession(reply).streamEvents()) {
+    assert.equal(event?.header?.sequence, 1n);
+    break;
+  }
+  assert.equal(
+    body.locked,
+    false,
+    "an abandoned stream must not keep the body locked",
+  );
+});
+
+test("attach negotiates through the injected fetch", async () => {
+  const urls: string[] = [];
+  const fetchImpl = (async (input: string) => {
+    urls.push(input);
+    return unaryReply(
+      toBinary(
+        AttachSessionResponseSchema,
+        create(AttachSessionResponseSchema, {
+          sessionId: "sess-9",
+          heartbeatIntervalMs: 500,
+          capabilities: ["orders"],
+        }),
+      ),
+    );
+  }) as unknown as typeof fetch;
+  const session = await Session.attach(
+    "http://worker.local/",
+    "token",
+    undefined,
+    "",
+    fetchImpl,
+  );
+  assert.equal(urls.length, 1);
+  assert.ok(urls[0]?.endsWith("/AttachSession"));
+  assert.equal(session.sessionId, "sess-9");
+  assert.equal(session.heartbeatIntervalMs, 500);
+});
+
+// -- ports: order specs, bracket prices, channel grouping -------------------
+
+/** A stand-in Session recording the market-stream calls it receives. */
+function recordingMarketSession(): {
+  calls: Array<[string[], string]>;
+  session: Session;
+} {
+  const calls: Array<[string[], string]> = [];
+  const session = {
+    streamMarketData: async function* (symbols: string[], channel: string) {
+      calls.push([symbols, channel]);
+      yield create(MarketDataEventSchema, { resumeToken: channel });
+    },
+  } as unknown as Session;
+  return { calls, session };
+}
+
+test("subscribeMarketData forwards one channel per call, unfolded", async () => {
+  // The port used to take a list of per-symbol channels and fold them onto the
+  // first one -- a TRADES symbol silently subscribed as ORDERBOOK. One channel
+  // per call (the Go SDK's shape) makes that unrepresentable.
+  const { calls, session } = recordingMarketSession();
+  const events = await drain(
+    new SessionMarketPort(session).subscribeMarketData(
+      ["BTC/USDT", "ETH/USDT"],
+      StreamChannel.ORDERBOOK,
+    ),
+  );
+  assert.deepEqual(calls, [[["BTC/USDT", "ETH/USDT"], "ORDERBOOK"]]);
+  assert.deepEqual(
+    events.map((event) => event.resumeToken),
+    ["ORDERBOOK"],
+  );
+});
+
+test("an omitted channel subscribes to TICKER", async () => {
+  const { calls, session } = recordingMarketSession();
+  await drain(new SessionMarketPort(session).subscribeMarketData(["BTC/USDT"]));
+  assert.deepEqual(calls, [[["BTC/USDT"], "TICKER"]]);
+});
+
+test("an unknown channel is rejected, not defaulted to TICKER", async () => {
+  const { session } = recordingMarketSession();
+  await assert.rejects(
+    () =>
+      drain(
+        new SessionMarketPort(session).subscribeMarketData(
+          ["BTC/USDT"],
+          99 as StreamChannel,
+        ),
+      ),
+    /unknown StreamChannel 99/,
+  );
+});
+
+test("the trading port takes an OrderSpec, not a forged OrderRequest", async () => {
+  const seen: OrderSpec[] = [];
+  const session = {
+    createOrder: async (spec: OrderSpec) => {
+      seen.push(spec);
+      return {} as unknown as Order;
+    },
+  } as unknown as Session;
+  await new SessionTradingPort(session).createOrder({
+    symbol: "BTC/USDT",
+    amount: 1,
+    timeInForce: TimeInForce.IOC,
+  });
+  assert.equal(seen[0]?.timeInForce, TimeInForce.IOC);
+});
+
+test("the batch port forwards order specs unchanged", async () => {
+  const seen: OrderSpec[][] = [];
+  const session = {
+    createOrders: async (specs: OrderSpec[]) => {
+      seen.push(specs);
+      return [] as Order[];
+    },
+  } as unknown as Session;
+  const specs: OrderSpec[] = [
+    { symbol: "BTC/USDT", amount: 1 },
+    { symbol: "ETH/USDT", amount: 2 },
+  ];
+  await new SessionTradingPort(session).batchCreateOrders(specs);
+  assert.deepEqual(seen[0], specs);
+});
+
+test("modifyPosition forwards bracket prices without a cast", async () => {
+  const seen: Array<{
+    positionId: string;
+    takeProfit?: unknown;
+    stopLoss?: unknown;
+  }> = [];
+  const session = {
+    modifyPosition: async (
+      positionId: string,
+      opts: { takeProfit?: unknown; stopLoss?: unknown },
+    ) => {
+      seen.push({ positionId, ...opts });
+      return {};
+    },
+  } as unknown as Session;
+  await new SessionTradingPort(session).modifyPosition(
+    "pos-1",
+    "105000",
+    "90000",
+  );
+  assert.deepEqual(seen[0], {
+    positionId: "pos-1",
+    takeProfit: "105000",
+    stopLoss: "90000",
+  });
+});
+
+test("a GTD time in force reaches the wire from the generated enum", async () => {
+  const s = bareSession("ACTIVE");
+  const msg = await capture(
+    s,
+    () =>
+      s.createOrder({
+        symbol: "BTC/USDT",
+        amount: 1,
+        timeInForce: TimeInForce.GTD,
+      }),
+    (b) => fromBinary(CreateOrderRequestSchema, b),
+    () => create(CreateOrderResponseSchema, {}),
+  );
+  assert.equal(msg.order?.timeInForce, TimeInForce.GTD);
+});
+
+test("POST_ONLY is not a TimeInForce value in the contract", () => {
+  // The proto spells GTC/IOC/FOK/GTD and carries post_only as its own bool
+  // field, so the hand-written union that accepted "POST_ONLY" is gone. This
+  // is a compile-time assertion, checked by `tsc --noEmit`.
+  const spec: OrderSpec = {
+    symbol: "BTC/USDT",
+    amount: 1,
+    // @ts-expect-error POST_ONLY is not a TimeInForce value.
+    timeInForce: "POST_ONLY",
+  };
+  void spec;
 });

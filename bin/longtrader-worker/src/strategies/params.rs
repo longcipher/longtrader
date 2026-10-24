@@ -45,7 +45,7 @@ impl VenueRef {
     /// Builds the proto `ExchangeId`.
     #[must_use]
     pub fn proto(&self) -> common::ExchangeId {
-        crate::adapters::exchange_id(&self.exchange_id, &self.label)
+        crate::ports::exchange_id(&self.exchange_id, &self.label)
     }
 }
 
@@ -87,7 +87,7 @@ impl CommonParams {
     /// Builds the proto `ExchangeId` from the configured venue + label.
     #[must_use]
     pub fn proto_exchange_id(&self) -> common::ExchangeId {
-        crate::adapters::exchange_id(&self.exchange_id, &self.label)
+        crate::ports::exchange_id(&self.exchange_id, &self.label)
     }
 }
 

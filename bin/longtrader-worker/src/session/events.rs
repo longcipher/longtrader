@@ -1,23 +1,7 @@
 //! Part of the session control plane; see [`super::SessionManager`].
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use super::{HashMap, ManagerError, Ordering, SessionHandle, SessionManager, SessionState};
-use crate::proto::{common, trading, worker};
-
-fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
-        // saturate on overflow (far future) rather than silently returning epoch
-        i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
-    })
-}
-
-/// Millis remainder (<1000) scaled to nanos always fits i32 (<1e9).
-fn nanos_from_ms_rem(ms: i64) -> i32 {
-    let nanos = ms.rem_euclid(1000) * 1_000_000;
-    debug_assert!((0..1_000_000_000).contains(&nanos), "ms remainder nanos fits i32");
-    i32::try_from(nanos).unwrap_or(0)
-}
+use super::{HashMap, ManagerError, Ordering, SessionHandle, SessionManager, SessionState, time};
+use crate::proto::{common, worker};
 
 impl SessionManager {
     /// Record a strategy log event into the ring/broadcast bus.
@@ -29,16 +13,12 @@ impl SessionManager {
         fields: HashMap<String, String>,
     ) -> Result<(), ManagerError> {
         let handle = self.get(session_id).await?;
-        let now = now_ms();
+        let now = time::now_ms();
         let event = worker::LogEvent {
             session_id: session_id.to_string(),
             level: buffa::EnumValue::Known(level),
             message: message.clone(),
-            timestamp: buffa::MessageField::some(buffa_types::google::protobuf::Timestamp {
-                seconds: now.div_euclid(1000),
-                nanos: nanos_from_ms_rem(now),
-                ..Default::default()
-            }),
+            timestamp: buffa::MessageField::some(time::timestamp_from_ms(now)),
             fields: fields.into_iter().collect(),
             ..Default::default()
         };
@@ -72,31 +52,7 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Publish an order update attributed to this session.
-    pub async fn publish_order_update(
-        &self,
-        session_id: &str,
-        order: trading::Order,
-        update_type: String,
-    ) -> Result<(), ManagerError> {
-        let handle = self.get(session_id).await?;
-        handle
-            .publish(worker::StrategyEvent {
-                header: buffa::MessageField::some(common::EventHeader::default()),
-                event: Some(worker::strategy_event::Event::OrderUpdate(Box::new(
-                    worker::OrderUpdate {
-                        order: buffa::MessageField::some(order),
-                        update_type,
-                        ..Default::default()
-                    },
-                ))),
-                resume_token: String::new(),
-                ..Default::default()
-            })
-            .await;
-        Ok(())
-    }
-
+    /// Publish a state change attributed to this session.
     pub(crate) async fn publish_state_change(
         &self,
         handle: &SessionHandle,

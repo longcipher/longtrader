@@ -68,9 +68,9 @@ impl SessionManager {
                         handle.assert_reconnect_client(client)?;
                         handle.touch().await;
                         if let Some(policy) = policy.clone() {
-                            let mut new_policy = handle.policy().await;
-                            apply_policy(&mut new_policy, &policy)?;
-                            handle.set_policy(new_policy).await;
+                            // Atomic RMW: a concurrent SetKillSwitchPolicy must not be
+                            // overwritten by this reconnect's read-modify-write.
+                            handle.update_policy(|current| apply_policy(current, &policy)).await?;
                         }
                         return Ok((reconnect_session_id.to_string(), handle.heartbeat_interval_ms));
                     }
@@ -104,6 +104,7 @@ impl SessionManager {
             log_events: AtomicU64::new(0),
             seq: AtomicU64::new(0),
             snapshot_seq: AtomicU64::new(0),
+            terminal_at: Mutex::new(None),
         });
         self.sessions.lock().await.insert(id.clone(), Arc::clone(&handle));
         self.ensure_watchdog().await;
@@ -187,12 +188,6 @@ impl SessionManager {
         }
     }
 
-    /// Current snapshot watermark for this session (0 if never reconciled).
-    pub async fn snapshot_sequence(&self, session_id: &str) -> Result<u64, ManagerError> {
-        let handle = self.get(session_id).await?;
-        Ok(handle.snapshot_seq.load(Ordering::Acquire))
-    }
-
     /// Stop a session: optionally cancel its tracked orders, then transition
     /// to `GRACEFUL_SHUTDOWN`. Returns the state actually reached.
     ///
@@ -233,9 +228,21 @@ impl SessionManager {
         }
         let Some(prev) = handle.transition(prev, SessionState::GracefulShutdown) else {
             // Lost a concurrent transition (e.g. kill-switch tripped first):
-            // the winner's terminal state stands, no second publish.
-            return Ok(handle.state());
+            // the winner's terminal state stands, no second publish. Any cancel
+            // failures this stop observed are still reported — dropping them
+            // here would answer `StopStrategy` with success over orders that
+            // may still be resting, which is exactly what
+            // `ManagerError::CancelsFailed` exists to prevent.
+            if failures.is_empty() {
+                return Ok(handle.state());
+            }
+            return Err(ManagerError::CancelsFailed {
+                session_id: session_id.to_string(),
+                state: handle.state(),
+                failures,
+            });
         };
+        handle.mark_terminal().await;
         self.publish_state_change(&handle, prev, SessionState::GracefulShutdown, "stop requested")
             .await;
         if !failures.is_empty() {

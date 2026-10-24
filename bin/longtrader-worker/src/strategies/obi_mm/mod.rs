@@ -27,7 +27,7 @@ use serde::Deserialize;
 use crate::{
     ports::{MarketDataSource, TradingGateway},
     proto::market,
-    strategies::{CommonParams, Strategy, limit_order, params_from_table},
+    strategies::{CommonParams, Strategy, cancel_all_orders, limit_order, params_from_table},
 };
 
 /// Configuration for the OBI market maker.
@@ -223,12 +223,7 @@ impl ObiMm {
         let exchange = self.config.common.proto_exchange_id();
         // Cancel-and-replace: in a production venue this would be an amend, but
         // the worker's ports only offer cancel-all, so we cancel and re-place.
-        self.gateway
-            .cancel_all_orders(crate::proto::trading::CancelAllOrdersRequest {
-                exchange_id: buffa::MessageField::some(exchange.clone()),
-                symbol: self.config.common.symbol.clone(),
-                ..Default::default()
-            })
+        cancel_all_orders(self.gateway.as_ref(), &exchange.clone(), &self.config.common.symbol)
             .await?;
         let bid_coid = format!("obimm-{}", ulid::Ulid::generate());
         let ask_coid = format!("obimm-{}", ulid::Ulid::generate());

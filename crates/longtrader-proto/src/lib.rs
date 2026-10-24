@@ -43,6 +43,10 @@ pub use client_wasm::{TerminalClient, TerminalClientError};
 pub mod transport;
 
 /// Canonical service name constants (Connect path `/{service}/{method}`).
+///
+/// The single owner of every Connect service path in the workspace: the
+/// worker's `RemoteAdapter` and both clients derive their paths from these, so
+/// a rename is one edit plus a failing test, not a silent 404.
 pub mod service_name {
     /// Canonical market data service; the terminal surface never redefined it.
     pub const MARKET_DATA: &str = "longtrader.market.v1.MarketDataService";
@@ -54,6 +58,8 @@ pub mod service_name {
     pub const RUNTIME: &str = "longtrader.terminal.v1.RuntimeService";
     /// Terminal-only strategy surface: lifecycle, actions, strategy events.
     pub const STRATEGY: &str = "longtrader.terminal.v1.StrategyService";
+    /// Self-describing venue-operation registry.
+    pub const OPS: &str = "longtrader.ops.v1.VenueOpService";
 }
 
 // Backwards-compatible convenience: surface the terminal.v1 types at the crate

@@ -12,7 +12,7 @@ pub(crate) async fn run(
 ) -> Result<()> {
     match client.search_symbols(exchange, query, limit).await {
         Ok(symbols) => {
-            output.render_symbols(&symbols);
+            output.render_symbols(&symbols)?;
             Ok(())
         }
         Err(e) => Err(e.into()),

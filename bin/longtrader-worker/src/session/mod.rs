@@ -17,6 +17,11 @@
 //! (`LEASE_HEARTBEAT_BUDGET = 3`). Missed-heartbeat budget exhausted while
 //! in ACTIVE trips the configured `KillSwitchPolicy`.
 //!
+//! Terminal sessions are retained in the registry for
+//! [`TERMINAL_SESSION_RETENTION`] after their last transition so a client can
+//! still drain the replay ring, then swept by the watchdog: without the sweep
+//! the map — and every lease guard watching it — would grow without bound.
+//!
 //! KillSwitchPolicy Scope routing:
 //! - `SESSION_ORDERS` (SCOPE_SESSION_ORDERS) cancels only orders submitted by this session (tracked
 //!   `client_order_id`s);
@@ -53,6 +58,7 @@ pub mod proxy;
 pub mod server;
 pub mod service;
 pub mod state;
+pub mod time;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -86,6 +92,22 @@ const EVENT_RING_CAPACITY: usize = 1024;
 /// its reads are not atomic, so a busy venue can legitimately exceed this. The
 /// budget is there to notice a *dead* daemon, not a slow one.
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Wall-clock budget for one venue cancel on the kill-switch path.
+///
+/// A cancel is a single order-scoped RPC, so it must be bounded like the health
+/// probe: an unbounded await here would let one unresponsive venue stall the
+/// watchdog tick — and with it lease enforcement for every session — for as
+/// long as the venue stays silent. A timed-out cancel is recorded as a failure
+/// (the order may still be resting), never silently dropped.
+const CANCEL_ROUND_TRIP_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a terminal session stays in the registry after its last
+/// transition.
+///
+/// Long enough for a client to drain the replay ring after `StopStrategy` or a
+/// kill-switch trip; short enough that the registry, the watchdog's per-tick
+/// scan and every strategy-side lease guard stay bounded over a long-running
+/// worker. The watchdog sweeps anything older (see `retire_terminal_sessions`).
+const TERMINAL_SESSION_RETENTION: Duration = Duration::from_secs(300);
 /// Consecutive L2 probe failures required before every ACTIVE session is tripped.
 ///
 /// Two, not one: see [`SessionManager::note_health_probe`].
@@ -193,6 +215,9 @@ pub struct SessionHandle {
     seq: AtomicU64,
     /// Last reconciled snapshot watermark (`snapshot_sequence`) for recovery.
     snapshot_seq: AtomicU64,
+    /// When this session last entered a terminal state; `None` while live.
+    /// Read by the watchdog sweep (see [`TERMINAL_SESSION_RETENTION`]).
+    terminal_at: Mutex<Option<tokio::time::Instant>>,
 }
 
 impl SessionHandle {
@@ -224,8 +249,23 @@ impl SessionHandle {
         self.policy.lock().await.clone()
     }
 
-    pub async fn set_policy(&self, policy: SessionPolicy) {
-        *self.policy.lock().await = policy;
+    /// Read-modify-write the policy under one lock hold.
+    ///
+    /// The clone-mutate-write sequence this replaces had a lost-update window:
+    /// a concurrent `SetKillSwitchPolicy` (or a reconnect carrying a policy)
+    /// between the read and the write was silently overwritten, leaving the
+    /// caller believing in a lease the worker was not enforcing. Holding the
+    /// lock across the mutation makes the update atomic; `f` must not await.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the closure's error, leaving the policy untouched.
+    pub async fn update_policy<E>(
+        &self,
+        f: impl FnOnce(&mut SessionPolicy) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut guard = self.policy.lock().await;
+        f(&mut guard)
     }
 
     /// The identity recorded when this session was attached, as
@@ -275,6 +315,14 @@ impl SessionHandle {
     /// Sequence is monotonically increasing per subscription (§7 gap-free);
     /// gap detection via `crate::ports::is_sequence_gap(prev, next)` — gaps
     /// trigger resync (re-fetch snapshot or full `ReconcileState`).
+    ///
+    /// Concurrency invariant: the `seq` assignment above and the `ring` push
+    /// below happen with no `await` between them, and the ring lock is only
+    /// ever taken here. That is what makes `current_seq()` a usable watermark:
+    /// every event with `sequence <= current_seq()` is already in the ring
+    /// (capacity permitting), so a subscriber that reads the watermark and then
+    /// replays up to it loses nothing. Inserting an `await` between the two
+    /// would silently break that guarantee.
     async fn publish(&self, mut event: worker::StrategyEvent) -> Arc<worker::StrategyEvent> {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
         let mut header = event.header.as_option().cloned().unwrap_or_default();
@@ -302,6 +350,16 @@ impl SessionHandle {
         self.ring.lock().await.iter().filter(|e| e.header.sequence > after_seq).cloned().collect()
     }
 
+    /// The current sequence watermark: every event with `sequence <=` this
+    /// value is already in the replay ring (capacity permitting). Read it
+    /// *after* subscribing and before replaying to close the
+    /// replay/subscribe handoff window (see
+    /// [`crate::session::service::WorkerSessionServiceImpl::stream_strategy_events`]).
+    #[inline]
+    pub fn current_seq(&self) -> u64 {
+        self.seq.load(Ordering::Acquire)
+    }
+
     /// Check whether `next_seq` follows `prev_seq` without a gap; gap triggers resync.
     #[inline]
     pub fn is_gap(prev_seq: u64, next_seq: u64) -> bool {
@@ -312,12 +370,29 @@ impl SessionHandle {
         self.events_tx.subscribe()
     }
 
-    pub async fn track_order(&self, coid: String) {
-        self.tracked_coids.lock().await.insert(coid);
-    }
-
     pub async fn tracked_orders(&self) -> HashSet<String> {
         self.tracked_coids.lock().await.clone()
+    }
+
+    /// Record the moment this session entered a terminal state. Idempotent:
+    /// the first transition wins, so the retention window starts at the real
+    /// end of the session, not at a later redundant observation.
+    pub(crate) async fn mark_terminal(&self) {
+        let mut slot = self.terminal_at.lock().await;
+        if slot.is_none() {
+            *slot = Some(tokio::time::Instant::now());
+        }
+    }
+
+    /// Age of this session's terminal stamp, or `None` while live.
+    ///
+    /// Lock-free by design: the watchdog sweep must not await per session.
+    /// `try_lock` can only lose against `mark_terminal`'s microscopic critical
+    /// section, and a lost race fails open (the session survives one more
+    /// tick) rather than dropping a live session early.
+    pub(crate) fn try_terminal_age(&self, now: tokio::time::Instant) -> Option<Duration> {
+        let slot = self.terminal_at.try_lock().ok()?;
+        slot.map(|at| now.saturating_duration_since(at))
     }
 
     /// Session-scoped orders submitted through the gate, counted regardless of
@@ -330,10 +405,6 @@ impl SessionHandle {
     /// `RegisterStrategy` ran first.
     pub fn log_events_count(&self) -> u64 {
         self.log_events.load(Ordering::Acquire)
-    }
-
-    pub async fn record_order_submitted(&self) {
-        self.orders_submitted.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -497,6 +568,33 @@ impl SessionManager {
     pub fn default_exchange(&self) -> &common::ExchangeId {
         &self.default_exchange
     }
+
+    /// Drop terminal sessions whose retention window (see
+    /// [`TERMINAL_SESSION_RETENTION`]) has elapsed.
+    ///
+    /// Without this the registry only ever grows: every stop, every failed
+    /// reconnect and every kill-switch trip leaves its handle behind, the
+    /// watchdog scans them all forever, and a strategy-side lease guard
+    /// watching a session nobody can reach never exits. In-flight RPCs and
+    /// event streams hold their own `Arc<SessionHandle>`, so retiring a session
+    /// never cancels work that is already running — it only stops *new* calls
+    /// (and the lease guards) from resolving it.
+    ///
+    /// Called by the watchdog once per tick; safe to call from anywhere.
+    pub(crate) async fn retire_terminal_sessions(&self, retention: Duration) {
+        let now = tokio::time::Instant::now();
+        let mut sessions = self.sessions.lock().await;
+        sessions.retain(|_, handle| {
+            // Live sessions stay. A terminal one stays until its retention
+            // window closes; a `None` terminal stamp on a live-state handle is
+            // impossible (the stamp is written on the transition itself), and
+            // treated as live either way — fail-open on the retention side.
+            match handle.try_terminal_age(now) {
+                Some(age) => age < retention,
+                None => true,
+            }
+        });
+    }
 }
 
 #[cfg(test)]
@@ -517,6 +615,25 @@ mod tests {
         // Note: install_self is now async, but we don't need the watchdog in tests
         // manager.install_self().await;
         manager
+    }
+
+    /// The same manager, with the mock kept in hand so a test can assert what
+    /// the venue was asked (recorded requests), not only what the session holds.
+    /// The default venue is `"mock"` — a *named* exchange, so an assertion on a
+    /// recorded request can tell the bound venue from a dropped field.
+    fn test_manager_with_mock(
+        price: rust_decimal::Decimal,
+    ) -> (StdArc<MockAdapter>, Arc<SessionManager>) {
+        let adapter = StdArc::new(MockAdapter::new(price));
+        let gateway: StdArc<dyn TradingGateway> = adapter.clone();
+        let market: StdArc<dyn MarketDataSource> = adapter.clone();
+        let manager = Arc::new(SessionManager::new(
+            None,
+            crate::ports::exchange_id("mock", ""),
+            gateway,
+            market,
+        ));
+        (adapter, manager)
     }
 
     fn kill_switch_policy(lease_ms: u64) -> worker::KillSwitchPolicy {
@@ -582,6 +699,9 @@ mod tests {
         inner: StdArc<MockAdapter>,
         fail_sync: StdArc<AtomicBool>,
         sync_calls: StdArc<AtomicU64>,
+        /// When set, `cancel_order` hangs forever — a venue that accepted the
+        /// connection and then went silent.
+        hang_cancel: AtomicBool,
     }
 
     impl HealthProbeGateway {
@@ -590,7 +710,13 @@ mod tests {
                 inner: StdArc::new(MockAdapter::new(rust_decimal_macros::dec!(100))),
                 fail_sync: StdArc::new(AtomicBool::new(false)),
                 sync_calls: StdArc::new(AtomicU64::new(0)),
+                hang_cancel: AtomicBool::new(false),
             }
+        }
+
+        /// Make every `cancel_order` hang, as an unresponsive venue would.
+        fn hang_cancels(&self) {
+            self.hang_cancel.store(true, Ordering::Release);
         }
 
         /// Simulate a lost daemon connection: `sync_state` starts failing.
@@ -637,6 +763,11 @@ mod tests {
             &self,
             req: trading::CancelOrderRequest,
         ) -> Result<trading::Order, PortError> {
+            if self.hang_cancel.load(Ordering::Acquire) {
+                // Far longer than any bounded wait the manager is allowed to
+                // make on the kill-switch path.
+                tokio::time::sleep(Duration::from_secs(3_600)).await;
+            }
             self.inner.cancel_order(req).await
         }
 
@@ -717,6 +848,139 @@ mod tests {
         }
     }
 
+    // ---- Registry retention, stream handoff, bounded cancels, watchdog start --
+
+    /// Terminal sessions must leave the registry after their retention window.
+    ///
+    /// The registry only ever grew before: every stop, failed reconnect and
+    /// kill-switch trip left its handle behind forever, the watchdog scanned
+    /// them all every tick, and a strategy-side lease guard watching a session
+    /// nobody could reach never exited.
+    #[tokio::test(start_paused = true)]
+    async fn terminal_sessions_are_retired_after_the_retention_window() {
+        let manager = test_manager(rust_decimal_macros::dec!(1));
+        let (stopped, _) = attach_anonymous(&manager, None).await.expect("attach");
+        let (live, _) = attach_anonymous(&manager, None).await.expect("attach");
+        manager.stop_session(&stopped, false).await.expect("stop");
+
+        // Immediately after the stop the session is still resolvable: the
+        // client may still be draining its replay ring.
+        manager.get(&stopped).await.expect("a just-stopped session stays for its window");
+
+        tokio::time::sleep(TERMINAL_SESSION_RETENTION + Duration::from_secs(1)).await;
+        manager.retire_terminal_sessions(TERMINAL_SESSION_RETENTION).await;
+
+        assert!(
+            matches!(manager.get(&stopped).await, Err(ManagerError::NotFound(_))),
+            "a terminal session past its retention window must be retired"
+        );
+        manager.get(&live).await.expect("a live session must never be retired");
+    }
+
+    /// The replay/subscribe handoff must partition the event space exactly
+    /// once — no event delivered twice, none lost.
+    ///
+    /// The previous order (replay snapshot, then subscribe) lost everything
+    /// published in between: absent from both the snapshot and the receiver,
+    /// a silent gap the client could detect but never repair.
+    #[tokio::test(start_paused = true)]
+    async fn the_replay_subscribe_handoff_loses_and_duplicates_nothing() {
+        let manager = test_manager(rust_decimal_macros::dec!(1));
+        let (session_id, _) = attach_anonymous(&manager, None).await.expect("attach");
+        let handle = manager.get(&session_id).await.expect("test setup");
+        for message in ["first", "second"] {
+            manager
+                .report_log(
+                    &session_id,
+                    worker::LogLevel::Info,
+                    message.to_string(),
+                    HashMap::new(),
+                )
+                .await
+                .expect("report");
+        }
+
+        // The service's order: subscribe, watermark, replay.
+        let mut rx = handle.subscribe();
+        let watermark = handle.current_seq();
+        let replay = handle.replay_after(0).await;
+        let replayed: Vec<u64> = replay
+            .iter()
+            .filter(|e| e.header.as_option().is_none_or(|h| h.sequence <= watermark))
+            .filter_map(|e| e.header.as_option().map(|h| h.sequence))
+            .collect();
+        assert_eq!(replayed, vec![1, 2], "pre-subscription events replay from the ring");
+
+        // An event published after the subscription belongs to the receiver —
+        // and must not also appear in this subscription's replay partition.
+        manager
+            .report_log(&session_id, worker::LogLevel::Info, "third".to_string(), HashMap::new())
+            .await
+            .expect("report");
+        let via_rx = rx.recv().await.expect("the post-subscription event arrives live");
+        assert_eq!(via_rx.header.as_option().expect("header").sequence, 3);
+
+        let replay_partition: Vec<u64> = handle
+            .replay_after(0)
+            .await
+            .iter()
+            .filter(|e| e.header.as_option().is_some_and(|h| h.sequence <= watermark))
+            .filter_map(|e| e.header.as_option().map(|h| h.sequence))
+            .collect();
+        assert_eq!(replay_partition, vec![1, 2], "the late event is not double-delivered");
+    }
+
+    /// A venue that accepts a cancel and then goes silent must not stall the
+    /// kill-switch: the cancel is bounded, and a timeout is reported as a
+    /// failure (the order may still be resting) rather than dropped.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_venue_cannot_stall_the_kill_switch() {
+        let (probe, manager) = manager_with_probe();
+        let (session_id, _) =
+            attach_anonymous(&manager, Some(kill_switch_policy(600))).await.expect("attach");
+        manager.begin_reconcile(&session_id).await.expect("test setup");
+        manager.complete_reconcile(&session_id, 0).await.expect("test setup");
+        let handle = manager.get(&session_id).await.expect("test setup");
+        let order = manager
+            .gateway()
+            .create_order(limit_order_req(&manager, "hang-1"))
+            .await
+            .expect("order placed");
+        manager.record_submitted_orders(&handle, std::slice::from_ref(&order)).await;
+        probe.hang_cancels();
+
+        let started = tokio::time::Instant::now();
+        let failures = manager.cancel_session_orders(&handle).await;
+        let elapsed = started.elapsed();
+        assert_eq!(failures.len(), 1, "the timed-out cancel must be reported, not dropped");
+        assert!(failures[0].contains("timed out"), "got {failures:?}");
+        assert!(elapsed >= CANCEL_ROUND_TRIP_TIMEOUT, "the wait must not be abandoned early");
+        assert!(
+            elapsed < CANCEL_ROUND_TRIP_TIMEOUT * 2,
+            "the wait must be bounded, took {elapsed:?}"
+        );
+    }
+
+    /// A missing `install_self()` must not permanently silence the watchdog:
+    /// claiming the started-flag before the `Weak` exists turned one
+    /// misconfigured startup into "warn once, then never enforce leases again".
+    #[tokio::test]
+    async fn a_failed_watchdog_start_does_not_claim_the_flag() {
+        let manager = test_manager(rust_decimal_macros::dec!(1));
+        manager.ensure_watchdog().await;
+        assert!(
+            !manager.watchdog_started.load(Ordering::Acquire),
+            "a failed start must leave the flag unclaimed"
+        );
+
+        manager.install_self().await;
+        manager.ensure_watchdog().await;
+        assert!(
+            manager.watchdog_started.load(Ordering::Acquire),
+            "install_self must make the watchdog startable afterwards"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn lifecycle_attaches_syncs_and_activates() {
         let manager = test_manager(rust_decimal_macros::dec!(100));
@@ -773,7 +1037,7 @@ mod tests {
             })
             .await
             .expect("order placed");
-        handle.track_order(order.id.clone()).await;
+        manager.record_submitted_orders(&handle, std::slice::from_ref(&order)).await;
 
         // Heartbeat once so the lease clock starts from now.
         handle.touch().await;
@@ -983,8 +1247,8 @@ mod tests {
         manager.begin_reconcile(&session_id).await.expect("test setup");
         manager.complete_reconcile(&session_id, 0).await.expect("test setup");
 
-        // Submit through the real gate + attribution path — no test-side
-        // `track_order` call, unlike the pre-existing lease test.
+        // Submit through the real gate + attribution path: every session test
+        // attributes orders the same way the proxy does.
         let handle = manager
             .authorize_order_submission(&session_id)
             .await
@@ -1065,8 +1329,11 @@ mod tests {
         manager.begin_reconcile(&session_id).await.expect("test setup");
         manager.complete_reconcile(&session_id, 0).await.expect("test setup");
         let handle = manager.get(&session_id).await.expect("test setup");
-        // The mock refuses to cancel an id it does not know.
-        handle.track_order("an-order-the-venue-lost".to_string()).await;
+        // The mock refuses to cancel an id it does not know; attribute it
+        // through the real gate so the kill-switch/stop path owns it.
+        let lost =
+            trading::Order { id: "an-order-the-venue-lost".to_string(), ..Default::default() };
+        manager.record_submitted_orders(&handle, std::slice::from_ref(&lost)).await;
 
         let err = manager
             .stop_session(&session_id, true)
@@ -1574,7 +1841,7 @@ mod tests {
         let market: StdArc<dyn MarketDataSource> = adapter.clone();
         let manager = Arc::new(SessionManager::new(
             None,
-            crate::adapters::exchange_id("mock", ""),
+            crate::ports::exchange_id("mock", ""),
             gateway,
             market,
         ));
@@ -1605,7 +1872,7 @@ mod tests {
         let market: StdArc<dyn MarketDataSource> = adapter.clone();
         let manager = Arc::new(SessionManager::new(
             None,
-            crate::adapters::exchange_id("mock", ""),
+            crate::ports::exchange_id("mock", ""),
             gateway,
             market,
         ));
@@ -1995,7 +2262,12 @@ mod tests {
             "a-session-that-never-existed".to_string(),
             Duration::from_millis(500),
         );
-        guard.await.expect("the guard must return, not panic");
+        // Bounded like every other guard test: a predicate that never says
+        // "expired" must fail this assertion, not hang the test binary.
+        tokio::time::timeout(Duration::from_secs(30), guard)
+            .await
+            .expect("the guard must return once its session is gone")
+            .expect("the guard must not panic");
     }
 
     /// The other exit: the strategy's own lease has lapsed, so the guard asks the
@@ -2056,6 +2328,124 @@ mod tests {
             handle.state(),
             Some(SessionState::KillSwitchTripped),
             "the session's policy lease is the only budget the guard knows"
+        );
+    }
+
+    /// The registry must remember the venue it was built with. A manager that
+    /// answered with some other exchange id would send every cancel and probe
+    /// to the wrong venue, and the session tests that share the default id
+    /// could not see it.
+    #[test]
+    fn the_default_exchange_is_the_one_the_manager_was_built_with() {
+        let adapter = StdArc::new(MockAdapter::new(rust_decimal_macros::dec!(100)));
+        let gateway: StdArc<dyn TradingGateway> = adapter.clone();
+        let market: StdArc<dyn MarketDataSource> = adapter;
+        let manager = SessionManager::new(
+            None,
+            common::ExchangeId { id: "bound-venue".to_string(), ..Default::default() },
+            gateway,
+            market,
+        );
+        assert_eq!(manager.default_exchange().id, "bound-venue");
+    }
+
+    /// The retention boundary is part of the contract: a session is kept for
+    /// its whole window and dropped the moment it closes. `age <= retention`
+    /// would keep it one tick too long; `age < retention - 1` would drop it
+    /// early, while the client may still be draining its replay ring.
+    #[tokio::test(start_paused = true)]
+    async fn a_session_is_retired_exactly_at_the_retention_deadline() {
+        let manager = test_manager(rust_decimal_macros::dec!(1));
+        let (stopped, _) = attach_anonymous(&manager, None).await.expect("attach");
+        manager.stop_session(&stopped, false).await.expect("stop");
+
+        // One millisecond before the deadline the session is still resolvable.
+        tokio::time::sleep(TERMINAL_SESSION_RETENTION - Duration::from_millis(1)).await;
+        manager.retire_terminal_sessions(TERMINAL_SESSION_RETENTION).await;
+        manager.get(&stopped).await.expect("inside its window the session stays");
+
+        // Exactly at the deadline it is gone.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        manager.retire_terminal_sessions(TERMINAL_SESSION_RETENTION).await;
+        assert!(
+            matches!(manager.get(&stopped).await, Err(ManagerError::NotFound(_))),
+            "a terminal session at its retention deadline must be retired"
+        );
+    }
+
+    /// The session-scoped log counter is what `StrategyStatus` reports, and it
+    /// moves for every accepted event regardless of `RegisterStrategy`.
+    #[tokio::test(start_paused = true)]
+    async fn the_log_event_counter_moves_for_every_accepted_event() {
+        let manager = test_manager(rust_decimal_macros::dec!(1));
+        let (session_id, _) = attach_anonymous(&manager, None).await.expect("attach");
+        let handle = manager.get(&session_id).await.expect("test setup");
+        assert_eq!(handle.log_events_count(), 0, "nothing has been reported yet");
+
+        for _ in 0..3 {
+            manager
+                .report_log(
+                    &session_id,
+                    worker::LogLevel::Info,
+                    "hello".to_string(),
+                    HashMap::new(),
+                )
+                .await
+                .expect("report_log");
+        }
+        assert_eq!(handle.log_events_count(), 3, "every accepted event is counted");
+    }
+
+    /// The gate is a point-in-time check, so an order the venue accepted after
+    /// its session went terminal must be unwound here — the kill-switch already
+    /// ran and will never reach it. A session that is still trading keeps its
+    /// orders: unwinding those would cancel live strategy work.
+    #[tokio::test(start_paused = true)]
+    async fn late_submissions_are_unwound_only_after_the_session_went_terminal() {
+        let (mock, manager) = test_manager_with_mock(rust_decimal_macros::dec!(100));
+        let (session_id, _) = attach_anonymous(&manager, None).await.expect("attach");
+        let handle = manager.get(&session_id).await.expect("test setup");
+        manager.begin_reconcile(&session_id).await.expect("test setup");
+        manager.complete_reconcile(&session_id, 0).await.expect("test setup");
+
+        let placed = mock
+            .create_order(trading::CreateOrderRequest {
+                exchange_id: MessageField::some(manager.default_exchange().clone()),
+                order: MessageField::some(trading::OrderRequest {
+                    client_order_id: "late-1".to_string(),
+                    symbol: "BTC/USDT".to_string(),
+                    r#type: EnumValue::Known(trading::OrderType::Limit),
+                    side: EnumValue::Known(trading::OrderSide::Buy),
+                    amount: MessageField::some(longtrader_contract::ext::decimal_to_common(
+                        rust_decimal_macros::dec!(1),
+                    )),
+                    price: MessageField::some(longtrader_contract::ext::decimal_to_common(
+                        rust_decimal_macros::dec!(99),
+                    )),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("test setup");
+        let orders = [placed.clone()];
+
+        // Still ACTIVE: the gate was satisfied, so the order stays.
+        manager.unwind_late_submissions(&handle, &orders).await;
+        assert!(mock.cancel_seen().await.is_empty(), "a live session's orders must not be unwound");
+
+        // Empty input is a no-op on any state, terminal included.
+        manager.stop_session(&session_id, false).await.expect("stop");
+        manager.unwind_late_submissions(&handle, &[]).await;
+        assert!(mock.cancel_seen().await.is_empty(), "no orders means nothing to unwind");
+
+        // Terminal with a resting order: cancel it, addressed at the bound
+        // venue and by the venue order id.
+        manager.unwind_late_submissions(&handle, &orders).await;
+        assert_eq!(
+            mock.cancel_seen().await,
+            vec![("mock".to_string(), placed.id.clone())],
+            "a late submission on a terminal session is cancelled by its venue id"
         );
     }
 
@@ -2309,8 +2699,14 @@ mod tests {
     /// strategy acts on `update_type` ("fill" vs "canceled") and on the order's own
     /// remaining quantity, so a synthesised stub would be indistinguishable from a
     /// real fill.
+    ///
+    /// The manager no longer exposes a dedicated `publish_order_update`: nothing
+    /// in the worker produced order-update events, and an API with no producer
+    /// only invited a second, drifting publisher. The event variant stays in the
+    /// contract; this test pins the ring semantics (resumability, sequence)
+    /// through the one publisher that does exist.
     #[tokio::test(start_paused = true)]
-    async fn publish_order_update_records_the_order_and_the_kind() {
+    async fn an_order_update_event_is_recorded_verbatim_and_resumable() {
         let manager = test_manager(rust_decimal_macros::dec!(1));
         let (session_id, _) = attach_anonymous(&manager, None).await.expect("attach");
         let handle = manager.get(&session_id).await.expect("test setup");
@@ -2320,10 +2716,20 @@ mod tests {
             .await
             .expect("order placed");
 
-        manager
-            .publish_order_update(&session_id, order.clone(), "fill".to_string())
-            .await
-            .expect("publish order update");
+        handle
+            .publish(worker::StrategyEvent {
+                header: MessageField::some(common::EventHeader::default()),
+                event: Some(worker::strategy_event::Event::OrderUpdate(Box::new(
+                    worker::OrderUpdate {
+                        order: MessageField::some(order.clone()),
+                        update_type: "fill".to_string(),
+                        ..Default::default()
+                    },
+                ))),
+                resume_token: String::new(),
+                ..Default::default()
+            })
+            .await;
 
         let ring = handle.replay_after(0).await;
         let updates: Vec<&worker::OrderUpdate> = ring
@@ -2371,8 +2777,12 @@ mod tests {
         );
         assert_eq!(info.orders_submitted, 0, "the handle's counter is authoritative");
 
-        for _ in 0..3 {
-            handle.record_order_submitted().await;
+        // Attribute through the real gate — the only production path that
+        // moves the counter — so the test exercises the same increment the
+        // proxy uses, not a test-only shortcut.
+        for i in 0..3 {
+            let placed = trading::Order { id: format!("o-{i}"), ..Default::default() };
+            manager.record_submitted_orders(&handle, std::slice::from_ref(&placed)).await;
         }
         let after = handle.strategy_info().await.expect("strategy record");
         assert_eq!(after.orders_submitted, 3, "the counter must win over the stale record");

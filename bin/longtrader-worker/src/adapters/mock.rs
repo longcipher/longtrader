@@ -44,6 +44,10 @@ struct State {
     /// kill-switch scope test pins that a trip targets the bound venue with no
     /// symbol filter, rather than a defaulted or narrowed request.
     cancel_all_seen: Vec<(String, String)>,
+    /// Every `cancel_order` request seen, as `(exchange_id, order_id)`: the
+    /// session cancel path pins that it addresses the bound venue and the
+    /// tracked order id, rather than a defaulted venue or a dropped field.
+    cancel_seen: Vec<(String, String)>,
     /// id -> (request, status, created_at_ms).
     trigger_orders: Vec<(String, TriggerOrderRequest, TriggerOrderStatus, i64)>,
     /// client_transfer_id -> receipt, for idempotent retries.
@@ -51,6 +55,10 @@ struct State {
     /// Symbols the mock reports funding for. Empty means "every symbol", which
     /// is the pre-existing permissive default; a test that cares can narrow it.
     funding_symbols: Vec<String>,
+    /// Positions `sync_state` reports. Empty is the default, and an empty
+    /// snapshot cannot distinguish a field that was returned from one that was
+    /// dropped, so a test that pins the snapshot verbatim seeds this first.
+    positions: Vec<trading::Position>,
 }
 
 /// The mock venue's self-describing operation table.
@@ -192,6 +200,12 @@ impl MockAdapter {
         self.state.lock().await.cancel_all_seen.clone()
     }
 
+    /// Every `cancel_order` request the mock has served, as
+    /// `(exchange_id, order_id)`, oldest first.
+    pub async fn cancel_seen(&self) -> Vec<(String, String)> {
+        self.state.lock().await.cancel_seen.clone()
+    }
+
     /// Script a failure *in the middle* of a batch: every creation from the
     /// 0-based `index` onward fails, and the ones before it are accepted.
     ///
@@ -282,6 +296,10 @@ impl TradingGateway for MockAdapter {
         req: trading::CancelOrderRequest,
     ) -> Result<trading::Order, PortError> {
         let mut state = self.state.lock().await;
+        state.cancel_seen.push((
+            req.exchange_id.as_option().map_or_default(|e| e.id.clone()),
+            req.order_id.clone(),
+        ));
         if state.fail_next_cancels > 0 {
             state.fail_next_cancels -= 1;
             return Err(PortError::Transport("venue refused cancel".to_string()));
@@ -345,7 +363,7 @@ impl TradingGateway for MockAdapter {
                 total: MessageField::some(decimal_to_common(Decimal::from(10_000))),
                 ..Default::default()
             }],
-            positions: Vec::new(),
+            positions: state.positions.clone(),
             open_orders: state
                 .orders
                 .iter()
@@ -1293,6 +1311,15 @@ impl MockAdapter {
     /// Sets the funding rate returned by [`FundingRateSource`].
     pub async fn set_funding_rate(&self, rate: Decimal) {
         self.state.lock().await.funding_rate = rate;
+    }
+
+    /// Seed the positions `sync_state` reports.
+    ///
+    /// `sync_state` is the atomic snapshot `ReconcileState` hands back; a test
+    /// that pins that reply as verbatim needs a snapshot whose fields are not
+    /// all empty, or "returned it" and "dropped it" read the same.
+    pub async fn set_positions(&self, positions: Vec<trading::Position>) {
+        self.state.lock().await.positions = positions;
     }
 
     /// Restrict funding to `symbols`, so a strategy cannot read another

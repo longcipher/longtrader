@@ -73,7 +73,10 @@ pub use registry::{
 };
 use rust_decimal::Decimal;
 
-use crate::proto::{common, trading};
+use crate::{
+    ports::TradingGateway,
+    proto::{common, trading},
+};
 
 #[async_trait]
 pub trait Strategy: Send + Sync {
@@ -125,6 +128,39 @@ pub(crate) fn market_order(
     order_request(exchange_id, symbol, client_order_id, is_buy, None, qty, true)
 }
 
+/// Midpoint of a two-sided quote.
+///
+/// Every quoting strategy computed `(bid + ask) / 2` by hand; one owner keeps
+/// the arithmetic identical across them and gives the rounding rule a single
+/// home if it ever needs to change.
+#[must_use]
+pub(crate) fn mid_price(bid: Decimal, ask: Decimal) -> Decimal {
+    (bid + ask) / Decimal::from(2)
+}
+
+/// Cancels every open order of `symbol` on `exchange_id`.
+///
+/// The request shape is the same in every quoting strategy; building it once
+/// keeps the cancel-all semantics (which exchange, which symbol filter) from
+/// drifting between them.
+///
+/// # Errors
+///
+/// Propagates the venue's refusal.
+pub(crate) async fn cancel_all_orders(
+    gateway: &dyn TradingGateway,
+    exchange_id: &common::ExchangeId,
+    symbol: &str,
+) -> Result<Vec<trading::Order>, crate::ports::PortError> {
+    gateway
+        .cancel_all_orders(trading::CancelAllOrdersRequest {
+            exchange_id: buffa::MessageField::some(exchange_id.clone()),
+            symbol: symbol.to_string(),
+            ..Default::default()
+        })
+        .await
+}
+
 #[allow(clippy::too_many_arguments)]
 fn order_request(
     exchange_id: &common::ExchangeId,
@@ -160,5 +196,41 @@ fn order_request(
             ..Default::default()
         }),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal_macros::dec;
+
+    use super::*;
+    use crate::adapters::MockAdapter;
+
+    /// The midpoint is symmetric and exact: quoting strategies compare their
+    /// generated bid/ask against it, so an asymmetric or rounding midpoint
+    /// would skew every quote by half a tick.
+    #[test]
+    fn mid_price_is_symmetric_and_exact() {
+        assert_eq!(mid_price(dec!(100), dec!(101)), dec!(100.5));
+        assert_eq!(mid_price(dec!(101), dec!(100)), dec!(100.5));
+        assert_eq!(mid_price(dec!(7), dec!(7)), dec!(7));
+    }
+
+    /// The shared cancel-all must reach the venue with the exchange and symbol
+    /// it was given — an empty symbol would cancel the whole account, and a
+    /// wrong exchange would silently cancel nothing.
+    #[tokio::test]
+    async fn cancel_all_orders_targets_the_given_exchange_and_symbol() {
+        let mock = std::sync::Arc::new(MockAdapter::new(dec!(100)));
+        let exchange = common::ExchangeId {
+            id: "binance".to_string(),
+            label: String::new(),
+            ..Default::default()
+        };
+        cancel_all_orders(mock.as_ref(), &exchange, "BTC/USDT").await.expect("cancel-all");
+        assert_eq!(
+            mock.cancel_all_seen().await,
+            vec![("binance".to_string(), "BTC/USDT".to_string())]
+        );
     }
 }

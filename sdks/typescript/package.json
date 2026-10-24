@@ -49,8 +49,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@bufbuild/protobuf": "^2",
-    "undici": "^8"
+    "@bufbuild/protobuf": "^2"
   },
   "devDependencies": {
     "@bufbuild/protoc-gen-es": "^2",

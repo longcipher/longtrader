@@ -22,7 +22,7 @@ connectrpc = "0.9.1"
 connectrpc-build = "0.9.0"
 futures-util = "0.3.34"
 gloo-net = "0.7.0"
-hotpath = "0.29.0"
+hotpath = "0.29.1"
 hpx = { version = "2.5.32", default-features = false, features = ["rustls-tls", "http1", "http2", "stream", "tracing", "hickory-dns"] }
 http-body = "1.1.0"
 js-sys = "0.3.105"

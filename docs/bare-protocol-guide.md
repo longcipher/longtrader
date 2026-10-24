@@ -7,7 +7,7 @@ by hand with any HTTP/1.1 or HTTP/2 stack. The contract under `proto/` (buf v2,
 `longtrader.*.v1`) is the single source of truth.
 
 > Everything here is also implemented for you in
-> `bin/longtrader-worker/src/envelope.rs` (streaming framing) and
+> `crates/longtrader-contract/src/envelope.rs` (streaming framing) and
 > `bin/longtrader-worker/src/session/mod.rs` (lease / kill-switch), and mirrored
 > in the SDK session modules.
 
@@ -215,5 +215,7 @@ one marks an unscoped operator call (the CLI) that is neither gated nor tracked.
 
 - `proto/longtrader/worker/v1/worker.proto` — session RPCs & `KillSwitchPolicy`
 - `proto/longtrader/common/v1/errors.proto` — `ErrorDetail`
-- `bin/longtrader-worker/src/envelope.rs` — 5-byte `encode_envelope`/`decode_envelope`
+- `crates/longtrader-contract/src/envelope.rs` — 5-byte `encode_envelope`/`decode_envelope`
+  (re-exported as `longtrader_worker::envelope`; the worker, both proto clients
+  and the SDKs all frame through this one owner)
 - `bin/longtrader-worker/src/session/mod.rs` — lease, kill-switch, state machine

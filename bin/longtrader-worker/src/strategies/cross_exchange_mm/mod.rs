@@ -23,7 +23,9 @@ use serde::Deserialize;
 
 use crate::{
     ports::{MarketDataSource, TradingGateway},
-    strategies::{CrossVenueParams, Strategy, limit_order, params_from_table},
+    strategies::{
+        CrossVenueParams, Strategy, cancel_all_orders, limit_order, mid_price, params_from_table,
+    },
 };
 
 /// Configuration for the XEMM strategy.
@@ -101,7 +103,7 @@ pub fn plan_xemm_quotes(
     if taker_spread < min_profitability * dec!(2) {
         return Some(XemmQuotePlan { bids: Vec::new(), asks: Vec::new(), skip: true });
     }
-    let center = (taker_bid + taker_ask) / dec!(2);
+    let center = mid_price(taker_bid, taker_ask);
     let mut bids = Vec::with_capacity(levels as usize);
     let mut asks = Vec::with_capacity(levels as usize);
     for i in 1..=levels {
@@ -191,12 +193,7 @@ impl Xemm {
             return Ok(());
         }
         let exchange = self.config.venues.primary.proto();
-        self.gateway
-            .cancel_all_orders(crate::proto::trading::CancelAllOrdersRequest {
-                exchange_id: buffa::MessageField::some(exchange.clone()),
-                symbol: self.config.venues.symbol.clone(),
-                ..Default::default()
-            })
+        cancel_all_orders(self.gateway.as_ref(), &exchange.clone(), &self.config.venues.symbol)
             .await?;
         for (i, bid) in plan.bids.iter().enumerate() {
             let coid = format!("xemm-b-{i}-{}", ulid::Ulid::generate());

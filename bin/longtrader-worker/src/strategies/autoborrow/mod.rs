@@ -150,7 +150,7 @@ mod tests {
         let s = Autoborrow::new(config, ops);
         s.tick().await.expect("tick");
         // Verify via the mocked op surface that the borrow path executed.
-        let exchange = crate::adapters::exchange_id("mock", "");
+        let exchange = crate::ports::exchange_id("mock", "");
         let response = adapter
             .invoke_venue_op(&exchange, "account.balance", Default::default())
             .await

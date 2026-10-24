@@ -2,9 +2,46 @@
 //! Single owner is `crate::service_name`; these re-exports keep call sites short.
 
 pub(crate) use crate::service_name::{
-    MARKET_DATA as SERVICE_MARKET, RUNTIME as SERVICE_RUNTIME, STRATEGY as SERVICE_STRATEGY,
-    TRADING as SERVICE_TRADING,
+    MARKET_DATA as SERVICE_MARKET, OPS as SERVICE_VENUE_OPS, RUNTIME as SERVICE_RUNTIME,
+    STRATEGY as SERVICE_STRATEGY, TRADING as SERVICE_TRADING,
 };
+
+/// The `error` object of a Connect end-of-stream frame.
+pub(crate) struct StreamEndError {
+    /// Connect code name (e.g. `unauthenticated`); `unknown` when absent.
+    pub code: String,
+    /// Human-readable reason; empty when absent.
+    pub message: String,
+}
+
+/// Parse one end-of-stream envelope payload into the error it carries.
+///
+/// A Connect reply can be HTTP 200 and still be a failure: a streaming reply
+/// reports the reason in its terminating end-of-stream frame and nowhere else,
+/// so a reader that only checks the status — or that feeds the frame to the
+/// message decoder — loses why the stream ended. A clean close-out is
+/// `{"error":null,...}` and maps to `None`, as do a non-JSON body and a body
+/// with no error object. Mirrors the Go SDK's `endStreamFrameError`.
+#[must_use]
+pub(crate) fn end_of_stream_error(payload: &[u8]) -> Option<StreamEndError> {
+    let frame: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let error = frame.get("error")?;
+    if error.is_null() {
+        return None;
+    }
+    Some(StreamEndError {
+        code: error
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        message: error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
 
 /// The `://` that separates a URL scheme from its authority.
 const SCHEME_SEPARATOR: &str = "://";

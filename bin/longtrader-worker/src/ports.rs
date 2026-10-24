@@ -24,6 +24,18 @@ use crate::proto::{common, market, trading, worker};
 // Sequence gap detection (design doc §6.1: per-stream gap-free `EventHeader.sequence`)
 // ---------------------------------------------------------------------------
 
+/// Build a [`common::ExchangeId`] from config strings.
+///
+/// Lives on the ports side, not in `adapters`: constructing the venue identity
+/// is port-level vocabulary that strategies, the session control plane and the
+/// adapters all need, and an adapter-owned constructor forced every one of
+/// them to depend on the transport layer to name a venue.
+#[inline]
+#[must_use]
+pub fn exchange_id(id: &str, label: &str) -> common::ExchangeId {
+    common::ExchangeId { id: id.to_string(), label: label.to_string(), ..Default::default() }
+}
+
 /// Returns `true` when `next` does NOT follow `prev` by exactly one.
 /// Consumers MUST treat a gap as a trigger for resync: orderbook streams
 /// re-fetch a fresh snapshot, private streams re-run `ReconcileState`.

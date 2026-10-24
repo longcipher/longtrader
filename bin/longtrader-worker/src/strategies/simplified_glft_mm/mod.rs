@@ -32,7 +32,7 @@ use serde::Deserialize;
 use crate::{
     indicators::Ema,
     ports::{MarketDataSource, TradingGateway},
-    strategies::{CommonParams, Strategy, limit_order, params_from_table},
+    strategies::{CommonParams, Strategy, cancel_all_orders, limit_order, params_from_table},
 };
 
 /// Configuration for the simplified GLFT market maker.
@@ -277,12 +277,7 @@ impl SimplifiedGlftMm {
             return Ok(());
         };
         let exchange = self.config.common.proto_exchange_id();
-        self.gateway
-            .cancel_all_orders(crate::proto::trading::CancelAllOrdersRequest {
-                exchange_id: buffa::MessageField::some(exchange.clone()),
-                symbol: self.config.common.symbol.clone(),
-                ..Default::default()
-            })
+        cancel_all_orders(self.gateway.as_ref(), &exchange.clone(), &self.config.common.symbol)
             .await?;
         let bid_coid = format!("sglft-{}", ulid::Ulid::generate());
         let ask_coid = format!("sglft-{}", ulid::Ulid::generate());

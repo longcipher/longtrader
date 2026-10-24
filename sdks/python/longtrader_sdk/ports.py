@@ -167,9 +167,16 @@ class MarketPort(ABC):
         """Tradeable symbols on the bound venue."""
 
     @abstractmethod
-    def subscribe_market_data(self, subscriptions: Iterable[Any]) -> Any:
-        """Stream MarketDataEvent for the given subscriptions; events carry
-        resume_token for reconnect-with-replay and gap-free header.sequence."""
+    def subscribe_market_data(self, symbols: list[str], channel: Any = None) -> Any:
+        """Stream MarketDataEvent for ``symbols`` on one channel; events carry
+        resume_token for reconnect-with-replay and gap-free header.sequence.
+
+        One channel per call, mirroring the Go SDK's port shape: the host opens
+        one stream per (symbols, channel) request, so a list of per-symbol
+        channels could only be served by subscribing every symbol to the first
+        channel -- silent wrong data. Ask for a second channel with a second
+        call.
+        """
 
 
 class SessionTradingPort(TradingPort):
@@ -257,18 +264,36 @@ class SessionMarketPort(MarketPort):
     def list_symbols(self) -> Any:
         return self._session.list_symbols()
 
-    def subscribe_market_data(self, subscriptions: Iterable[Any]) -> Any:
-        symbols = [s.symbol for s in subscriptions]
-        channel = _channel_name(subscriptions[0].channel) if subscriptions else "TICKER"
-        return self._session.stream_market_data(symbols, channel)
+    def subscribe_market_data(self, symbols: list[str], channel: Any = None) -> Any:
+        """One channel per call; see :meth:`MarketPort.subscribe_market_data`.
+
+        ``channel`` accepts the generated numeric enum (what a
+        ``StreamSubscription`` carries) or the short name string. An omitted
+        channel subscribes to TICKER; an unknown one raises rather than
+        silently defaulting.
+        """
+        if channel is None:
+            return self._session.stream_market_data(symbols, "TICKER")
+        return self._session.stream_market_data(symbols, _channel_name(channel))
 
 
-def _channel_name(value: int) -> str:
-    """Map a numeric proto enum back to its short name (TICKER, ORDERBOOK, ...)."""
+def _channel_name(value: Any) -> str:
+    """Map a channel -- numeric proto enum or short name -- to its short name.
+
+    Numeric values resolve against the generated constants so a renumbering in
+    the contract cannot drift from this table. An unknown value raises:
+    defaulting it to TICKER would silently subscribe the caller to a channel it
+    never asked for.
+    """
+    if isinstance(value, str):
+        name = value.strip().upper()
+        if name in ("TICKER", "ORDERBOOK", "TRADES", "OHLCV"):
+            return name
+        raise ValueError(f"unknown StreamChannel {value!r}")
     from .session import _market_pb
 
     pb = _market_pb()
     for name in ("TICKER", "ORDERBOOK", "TRADES", "OHLCV"):
         if getattr(pb, f"STREAM_CHANNEL_{name}") == value:
             return name
-    return "TICKER"
+    raise ValueError(f"unknown StreamChannel {value!r}")

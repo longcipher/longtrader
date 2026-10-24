@@ -723,3 +723,33 @@ class TestPublicSurface:
     )
     def test_method_exists(self, name):
         assert callable(getattr(Session, name)), name
+
+
+class TestGateOrdering:
+    """The local gate runs before the request is built.
+
+    ``create_order`` used to construct the whole ``CreateOrderRequest`` first
+    and check the session state afterwards, so a pre-ACTIVE submission paid for
+    a decimal conversion and two enum lookups before being refused. The Go SDK
+    checks ``requireActive`` before ``buildOrderRequest``; the order here is the
+    same contract.
+    """
+
+    def test_a_refused_submission_builds_no_request(self, monkeypatch):
+        s = bare_session(sdk.ATTACHED)
+        built: list[str] = []
+
+        def boom(*args, **kwargs):
+            built.append("_order_request")
+            raise AssertionError("the request must not be built before the gate")
+
+        monkeypatch.setattr(sdk, "_order_request", boom)
+        with pytest.raises(sdk.ConnectError, match="SYNC_IN_PROGRESS"):
+            s.create_order("BTC/USDT", 1)
+        assert built == [], "a refused submission must not build a request"
+
+    def test_the_amount_is_not_validated_before_the_state_is_checked(self):
+        """The state is the first thing wrong, so it is the first thing said."""
+        s = bare_session(sdk.ATTACHED)
+        with pytest.raises(sdk.ConnectError, match="SYNC_IN_PROGRESS"):
+            s.create_order("BTC/USDT", "not-a-decimal")

@@ -29,7 +29,7 @@ use serde::Deserialize;
 
 use crate::{
     ports::{MarketDataSource, TradingGateway},
-    strategies::{CommonParams, Strategy, limit_order, params_from_table},
+    strategies::{CommonParams, Strategy, cancel_all_orders, limit_order, params_from_table},
 };
 
 /// Configuration for the queue market maker.
@@ -279,12 +279,7 @@ impl QueueMm {
             return Ok(());
         };
         let exchange = self.config.common.proto_exchange_id();
-        self.gateway
-            .cancel_all_orders(crate::proto::trading::CancelAllOrdersRequest {
-                exchange_id: buffa::MessageField::some(exchange.clone()),
-                symbol: self.config.common.symbol.clone(),
-                ..Default::default()
-            })
+        cancel_all_orders(self.gateway.as_ref(), &exchange.clone(), &self.config.common.symbol)
             .await?;
         let bid_coid = format!("queuemm-{}", ulid::Ulid::generate());
         let ask_coid = format!("queuemm-{}", ulid::Ulid::generate());

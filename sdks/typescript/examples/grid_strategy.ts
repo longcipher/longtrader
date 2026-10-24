@@ -29,6 +29,7 @@ import {
   KillSwitchPolicy_Scope,
 } from "../src/gen/longtrader/worker/v1/worker_pb.js";
 import type { Decimal } from "../src/gen/longtrader/common/v1/types_pb.js";
+import { TimeInForce } from "../src/gen/longtrader/trading/v1/trading_pb.js";
 
 /**
  * 26-char uppercase id, ULID-shaped. The backend dedupes on
@@ -166,7 +167,7 @@ async function refreshGrid(
         price: formatPrice(price),
         side,
         orderType: "LIMIT",
-        timeInForce: "GTC",
+        timeInForce: TimeInForce.GTC,
         clientOrderId: ulidLikeId(),
         postOnly: true,
       });

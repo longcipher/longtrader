@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 use crate::{
     ports::{FundingRateSource, MarketDataSource, TradingGateway},
-    strategies::{CommonParams, Strategy, limit_order, params_from_table},
+    strategies::{CommonParams, Strategy, cancel_all_orders, limit_order, params_from_table},
 };
 
 /// Configuration for the perpetual MM strategy.
@@ -169,7 +169,7 @@ impl PerpMm {
         match self
             .funding
             .fetch_funding_rate(
-                &crate::adapters::exchange_id(
+                &crate::ports::exchange_id(
                     &self.config.common.exchange_id,
                     &self.config.common.label,
                 ),
@@ -198,12 +198,7 @@ impl PerpMm {
             return Ok(());
         };
         let exchange = self.config.common.proto_exchange_id();
-        self.gateway
-            .cancel_all_orders(crate::proto::trading::CancelAllOrdersRequest {
-                exchange_id: buffa::MessageField::some(exchange.clone()),
-                symbol: self.config.perp_symbol.clone(),
-                ..Default::default()
-            })
+        cancel_all_orders(self.gateway.as_ref(), &exchange.clone(), &self.config.perp_symbol)
             .await?;
         let bid_coid = format!("perpm-{}", ulid::Ulid::generate());
         let ask_coid = format!("perpm-{}", ulid::Ulid::generate());

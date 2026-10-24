@@ -18,7 +18,8 @@ use crate::{
     indicators::{Bands, BollingerBands},
     ports::{MarketDataSource, TradingGateway},
     strategies::{
-        CommonParams, Strategy, closes_of, fetch_candles, limit_order, params_from_table,
+        CommonParams, Strategy, cancel_all_orders, closes_of, fetch_candles, limit_order,
+        params_from_table,
     },
 };
 
@@ -155,12 +156,7 @@ impl BollGrid {
 
         // Cancel previous ladder before quoting the new one (kill-switch
         // path also clears anything stale on other symbols).
-        self.gateway
-            .cancel_all_orders(crate::proto::trading::CancelAllOrdersRequest {
-                exchange_id: buffa::MessageField::some(exchange.clone()),
-                symbol: self.config.common.symbol.clone(),
-                ..Default::default()
-            })
+        cancel_all_orders(self.gateway.as_ref(), &exchange.clone(), &self.config.common.symbol)
             .await?;
 
         for (price, is_buy) in plan_ladder(close, &bands, self.config.grid_num) {

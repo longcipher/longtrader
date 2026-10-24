@@ -29,7 +29,7 @@ use crate::{
         WalletGateway,
     },
     proto::{account, common, market, ops, trading},
-    session::{SessionHandle, SessionManager},
+    session::{SessionHandle, SessionManager, time},
 };
 
 fn internal<E: std::fmt::Display>(err: E) -> connectrpc::ConnectError {
@@ -124,18 +124,8 @@ fn ledger_entry_to_unified(entry: &crate::ports::LedgerEntry) -> account::Ledger
         direction: if entry.amount.is_sign_negative() { "out" } else { "in" }.to_string(),
         r#type: entry.entry_type.clone(),
         amount: longtrader_contract::ext::decimal_to_common(entry.amount).into(),
-        timestamp: timestamp_from_ms(entry.time_ms).into(),
+        timestamp: time::timestamp_from_ms(entry.time_ms).into(),
         status: if entry.completed { "completed" } else { "pending" }.to_string(),
-        ..Default::default()
-    }
-}
-
-/// Build a `google.protobuf.Timestamp` from Unix milliseconds.
-fn timestamp_from_ms(ms: i64) -> buffa_types::google::protobuf::Timestamp {
-    buffa_types::google::protobuf::Timestamp {
-        seconds: ms.div_euclid(1000),
-        // The ms remainder (< 1000) scaled to nanos always fits in i32.
-        nanos: i32::try_from(ms.rem_euclid(1000) * 1_000_000).unwrap_or(0),
         ..Default::default()
     }
 }
@@ -218,11 +208,11 @@ fn trigger_order_to_unified(order: &crate::ports::TriggerOrder) -> trading::Trig
         order_type: buffa::EnumValue::Known(trading::OrderType::Market),
         reduce_only: order.reduce_only,
         status: buffa::EnumValue::Known(status),
-        created_at: timestamp_from_ms(order.created_at_ms).into(),
+        created_at: time::timestamp_from_ms(order.created_at_ms).into(),
         order_id: order.order_id.clone(),
         triggered_at: order
             .triggered_at_ms
-            .map_or_else(buffa::MessageField::none, |ms| timestamp_from_ms(ms).into()),
+            .map_or_else(buffa::MessageField::none, |ms| time::timestamp_from_ms(ms).into()),
         ..Default::default()
     }
 }
@@ -278,6 +268,12 @@ async fn gate_submission(
 }
 
 /// Attribute submitted orders to the session that passed the gate.
+///
+/// Also re-checks the session after the venue round trip: the gate is a
+/// point-in-time check, so an order can be accepted by the venue after its
+/// session went terminal (lease lapsed mid-flight, kill-switch already ran).
+/// Such an order would rest on the venue unreachable by the kill-switch, so it
+/// is unwound best-effort here.
 async fn attribute(
     manager: Option<&Arc<SessionManager>>,
     handle: Option<&Arc<SessionHandle>>,
@@ -285,6 +281,7 @@ async fn attribute(
 ) {
     if let (Some(manager), Some(handle)) = (manager, handle) {
         manager.record_submitted_orders(handle, orders).await;
+        manager.unwind_late_submissions(handle, orders).await;
     }
 }
 
@@ -1284,19 +1281,19 @@ mod tests {
     /// halves non-negative (the protobuf convention for pre-epoch values).
     #[test]
     fn milliseconds_split_into_seconds_and_nanos() {
-        let zero = timestamp_from_ms(0);
+        let zero = time::timestamp_from_ms(0);
         assert_eq!(zero.seconds, 0);
         assert_eq!(zero.nanos, 0);
 
-        let whole = timestamp_from_ms(1_700_000_000_000);
+        let whole = time::timestamp_from_ms(1_700_000_000_000);
         assert_eq!(whole.seconds, 1_700_000_000);
         assert_eq!(whole.nanos, 0);
 
-        let fractional = timestamp_from_ms(1_700_000_000_123);
+        let fractional = time::timestamp_from_ms(1_700_000_000_123);
         assert_eq!(fractional.seconds, 1_700_000_000);
         assert_eq!(fractional.nanos, 123_000_000);
 
-        let just_under = timestamp_from_ms(999);
+        let just_under = time::timestamp_from_ms(999);
         assert_eq!(just_under.seconds, 0);
         assert_eq!(just_under.nanos, 999_000_000);
     }
@@ -1307,7 +1304,7 @@ mod tests {
     #[test]
     fn a_negative_millisecond_keeps_nanos_non_negative() {
         for ms in [-1i64, -2, -999, -1_000, -1_001, -1_700_000_000_000] {
-            let ts = timestamp_from_ms(ms);
+            let ts = time::timestamp_from_ms(ms);
             assert!(ts.nanos >= 0, "ms={ms} produced nanos={}", ts.nanos);
             assert!(ts.nanos < 1_000_000_000, "ms={ms} produced nanos={}", ts.nanos);
             assert_eq!(recompose_ms(&ts), i128::from(ms), "ms={ms}");
@@ -1322,7 +1319,7 @@ mod tests {
     #[test]
     fn the_extremes_of_the_millisecond_range_stay_in_range() {
         for ms in [i64::MIN, i64::MAX, i64::MIN + 1, i64::MAX - 1, -1, 0] {
-            let ts = timestamp_from_ms(ms);
+            let ts = time::timestamp_from_ms(ms);
             assert!(ts.nanos >= 0 && ts.nanos < 1_000_000_000, "ms={ms} nanos={}", ts.nanos);
             assert_eq!(recompose_ms(&ts), i128::from(ms), "ms={ms}");
         }
@@ -1973,7 +1970,7 @@ mod tests {
         /// because `seconds * 1000` overflows `i64` at the range extremes.
         #[test]
         fn the_millisecond_split_is_lossless(ms in any::<i64>()) {
-            let ts = timestamp_from_ms(ms);
+            let ts = time::timestamp_from_ms(ms);
             prop_assert!(ts.nanos >= 0, "ms={} nanos={}", ms, ts.nanos);
             prop_assert!(ts.nanos < 1_000_000_000, "ms={} nanos={}", ms, ts.nanos);
             prop_assert_eq!(recompose_ms(&ts), i128::from(ms), "ms={}", ms);

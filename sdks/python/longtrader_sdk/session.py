@@ -13,6 +13,7 @@ Wire format (see ../../docs/bare-protocol-guide.md):
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import Any, Optional, Type
@@ -92,6 +93,58 @@ def _market_pb() -> Any:
 FLAG_MESSAGE = 0x00
 FLAG_END_OF_STREAM = 0x02
 
+#: Widest payload length a peer may announce in one Connect envelope.
+#:
+#: The length is an untrusted u32, so a hostile or buggy peer can claim up to
+#: 4 GiB. Without a bound the decoder has no way to tell a real frame from a
+#: bogus one until it has buffered the whole claim, and a peer that keeps
+#: sending filler drives the buffer to that claim: measured on the Go decoder,
+#: a 5-byte ``00 FF FF FF FF`` header plus filler reached 768 MiB of heap in 8
+#: seconds. 64 MiB is far above any real strategy event, market data update or
+#: log event, so anything larger is a protocol error rather than a big message.
+#: Mirrors ``sdks/go/session/envelope.go``.
+MAX_FRAME_LENGTH = 64 << 20
+
+
+def _check_frame_length(length: int) -> None:
+    """Reject an announced frame length above :data:`MAX_FRAME_LENGTH`.
+
+    Checked before the payload is waited for, never after: the point of the
+    bound is that a bogus claim is not believed long enough to grow a buffer
+    toward it.
+    """
+    if length > MAX_FRAME_LENGTH:
+        raise ValueError(
+            f"connect frame exceeds the maximum length: {length} bytes "
+            f"announced, limit {MAX_FRAME_LENGTH}"
+        )
+
+
+def _end_stream_frame_error(payload: bytes) -> Optional[ConnectError]:
+    """Map one end-of-stream frame payload to a ``ConnectError``, or ``None``.
+
+    A Connect reply can be HTTP 200 and still be a failure: a streaming reply
+    carries the reason in its terminating end-of-stream frame and nowhere else,
+    so a reader that only checks the status discards why the stream ended. A
+    clean close-out carries ``{"error":null}`` and maps to ``None``.
+    """
+    try:
+        frame = json.loads(payload)
+    except ValueError:
+        # Not JSON: there is no error to report, only a malformed frame.
+        return None
+    if not isinstance(frame, dict):
+        return None
+    error = frame.get("error")
+    if not isinstance(error, dict):
+        return None
+    return ConnectError(
+        200,
+        str(error.get("code") or "unknown"),
+        str(error.get("message") or ""),
+        error.get("details"),
+    )
+
 
 def _envelope(payload: bytes, flags: int = FLAG_MESSAGE) -> bytes:
     return bytes([flags]) + len(payload).to_bytes(4, "big") + payload
@@ -111,6 +164,7 @@ def _decode_envelope(buf: bytes) -> bytes:
         # carries no protobuf for the caller.
         raise ValueError("unexpected end-of-stream frame")
     length = int.from_bytes(buf[1:5], "big")
+    _check_frame_length(length)
     if len(buf) < 5 + length:
         raise ValueError(
             f"truncated connect envelope payload: need {5 + length} bytes, "
@@ -131,6 +185,7 @@ def _first_message_payload(buf: bytes) -> bytes:
     while pos + 5 <= len(buf):
         flags = buf[pos]
         length = int.from_bytes(buf[pos + 1 : pos + 5], "big")
+        _check_frame_length(length)
         end = pos + 5 + length
         if end > len(buf):
             break
@@ -146,6 +201,12 @@ def _iter_events(chunks, resp_type, event_attr: str | None = "event"):
     Frames may straddle chunk boundaries, so a running buffer is kept and the
     reader blocks until each frame is complete. A ``None`` yield marks a
     dropped sequence, which callers must treat as "resync required".
+
+    The stream ends on an end-of-stream frame. That frame is usually a clean
+    close-out, but a Connect 200 can carry its error there and nowhere else, so
+    a frame with a non-empty ``error`` raises instead of ending the stream
+    quietly -- see :func:`_end_stream_frame_error`. An announced length above
+    :data:`MAX_FRAME_LENGTH` is refused on the header rather than believed.
     """
     buf = bytearray()
     prev: int | None = None
@@ -153,11 +214,20 @@ def _iter_events(chunks, resp_type, event_attr: str | None = "event"):
         buf.extend(chunk)
         while len(buf) >= 5:
             length = int.from_bytes(buf[1:5], "big")
+            # The announced length is an untrusted u32: refuse an impossible
+            # claim on its header, or a peer that keeps talking grows the
+            # buffer toward whatever it announced.
+            _check_frame_length(length)
             if len(buf) < 5 + length:
                 break
             flags, payload = buf[0], bytes(buf[5 : 5 + length])
             del buf[: 5 + length]
             if flags & 0x02:
+                # A Connect 200 can carry its error here and nowhere else, so
+                # a stream that ends on an error frame has said why.
+                error = _end_stream_frame_error(payload)
+                if error is not None:
+                    raise error
                 return
             msg = resp_type()
             msg.ParseFromString(payload)
@@ -556,9 +626,15 @@ class Session:
         if policy is not None:
             req.policy.CopyFrom(policy)
         session = cls(base_url, **kwargs)
-        resp = session._unary(
-            "AttachSession", req.SerializeToString(), pb.AttachSessionResponse
-        )
+        try:
+            resp = session._unary(
+                "AttachSession", req.SerializeToString(), pb.AttachSessionResponse
+            )
+        except Exception:
+            # The constructor already opened an httpx.Client; a failed attach
+            # must not leak its connection pool.
+            session.close()
+            raise
         session.session_id = resp.session_id
         # A resumed session keeps its negotiated lease rather than resetting to
         # 0, which would stall the heartbeat and watchdog.
@@ -859,7 +935,7 @@ class Session:
             timeout=None,
         ) as resp:
             if resp.status_code != 200:
-                raise _error_from_response(resp.read())
+                raise _error_from_response(resp)
             yield from _iter_stream_events(resp.iter_bytes(), pb.StrategyEvent)
 
     # -- trading ------------------------------------------------------------
@@ -893,6 +969,11 @@ class Session:
         (``SYNC_IN_PROGRESS``) and record the order so the kill-switch can
         cancel it. Requires a reconciled (ACTIVE) session.
         """
+        # The gate runs before anything is built, mirroring the Go SDK's
+        # requireActive-before-buildOrderRequest order: a pre-ACTIVE submission
+        # is refused locally, so no request is ever constructed for a call that
+        # cannot be sent.
+        self._require_active()
         pb = _trading_pb()
         req = pb.CreateOrderRequest(
             exchange_id=_exchange_id(exchange_id),
@@ -910,7 +991,6 @@ class Session:
             ),
             session_id=self.session_id,
         )
-        self._require_active()
         resp = self._unary(
             "CreateOrder",
             req.SerializeToString(),
@@ -1194,7 +1274,7 @@ class Session:
             timeout=None,
         ) as resp:
             if resp.status_code != 200:
-                raise _error_from_response(resp.read())
+                raise _error_from_response(resp)
             yield from _iter_stream_events(
                 resp.iter_bytes(), pb.MarketDataEvent, event_attr=None
             )

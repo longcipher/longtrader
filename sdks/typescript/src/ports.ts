@@ -6,18 +6,17 @@
  * on these, never on the transport. `Session` is the concrete implementation,
  * so `new TradingSessionPort(session)` gives a strategy a swappable backend.
  */
-import { Timeframe } from "./gen/longtrader/market/v1/market_pb.js";
-import type {
-  MarketDataEvent,
-  StreamSubscription,
-  Ticker,
+import {
+  StreamChannel,
+  Timeframe,
 } from "./gen/longtrader/market/v1/market_pb.js";
 import type {
-  Order,
-  OrderRequest,
-} from "./gen/longtrader/trading/v1/trading_pb.js";
+  MarketDataEvent,
+  Ticker,
+} from "./gen/longtrader/market/v1/market_pb.js";
+import type { Order } from "./gen/longtrader/trading/v1/trading_pb.js";
 import type { ReconcileStateResponse } from "./gen/longtrader/worker/v1/worker_pb.js";
-import type { Session } from "./session.js";
+import type { DecimalLike, Session } from "./session.js";
 import type { OrderSpec } from "./session.js";
 
 /** How a full event queue behaves under a slow consumer. */
@@ -76,14 +75,18 @@ export function isSequenceGap(
   return n !== p + 1n;
 }
 
+/**
+ * Channel names the market stream accepts, as the proto enum spells them.
+ * Kept in sync with the generated `StreamChannel` by `channelName` below.
+ */
+export type StreamChannelName = "TICKER" | "ORDERBOOK" | "TRADES" | "OHLCV";
+
 /** Order management surface (mirrors longtrader.trading.v1, 13 methods). */
 export abstract class TradingPort {
-  /** Submit one OrderRequest; backend dedupes on client_order_id. */
-  abstract createOrder(request: OrderRequest | OrderSpec): Promise<Order>;
-  /** Submit many OrderRequests via CreateOrders. */
-  abstract batchCreateOrders(
-    requests: (OrderRequest | OrderSpec)[],
-  ): Promise<Order[]>;
+  /** Submit one order spec; the backend dedupes on client_order_id. */
+  abstract createOrder(spec: OrderSpec): Promise<Order>;
+  /** Submit many order specs via CreateOrders. */
+  abstract batchCreateOrders(specs: OrderSpec[]): Promise<Order[]>;
   /** Cancel by venue order id. */
   abstract cancelOrder(orderId: string, symbol?: string): Promise<Order>;
   /** Cancel every open order; an empty symbol spans all symbols. */
@@ -105,8 +108,8 @@ export abstract class TradingPort {
   /** Attach or replace a position's bracket orders. */
   abstract modifyPosition(
     positionId: string,
-    takeProfit?: unknown,
-    stopLoss?: unknown,
+    takeProfit?: DecimalLike,
+    stopLoss?: DecimalLike,
   ): Promise<unknown>;
   /** ReconcileState: best-effort snapshot for recovery (replay deltas after). */
   abstract syncState(): Promise<ReconcileStateResponse>;
@@ -127,11 +130,17 @@ export abstract class MarketPort {
   /** Tradeable symbols on the bound venue. */
   abstract listSymbols(): Promise<unknown>;
   /**
-   * Stream MarketDataEvent for the given subscriptions; events carry
+   * Stream MarketDataEvent for `symbols` on one channel; events carry
    * resume_token for reconnect-with-replay and gap-free header.sequence.
+   *
+   * One channel per call, mirroring the Go SDK's port shape: the host opens
+   * one stream per (symbols, channel) request, so a list of per-symbol
+   * channels could only be served by subscribing every symbol to the first
+   * channel -- silent wrong data. Ask for a second channel with a second call.
    */
   abstract subscribeMarketData(
-    subscriptions: StreamSubscription[],
+    symbols: string[],
+    channel?: StreamChannel,
   ): AsyncIterable<MarketDataEvent>;
 }
 
@@ -141,16 +150,12 @@ export class SessionTradingPort extends TradingPort {
     super();
   }
 
-  override async createOrder(
-    request: OrderRequest | OrderSpec,
-  ): Promise<Order> {
-    return this.session.createOrder(request as OrderSpec);
+  override async createOrder(spec: OrderSpec): Promise<Order> {
+    return this.session.createOrder(spec);
   }
 
-  override async batchCreateOrders(
-    requests: (OrderRequest | OrderSpec)[],
-  ): Promise<Order[]> {
-    return this.session.createOrders(requests as OrderSpec[]);
+  override async batchCreateOrders(specs: OrderSpec[]): Promise<Order[]> {
+    return this.session.createOrders(specs);
   }
 
   override async cancelOrder(orderId: string, symbol = ""): Promise<Order> {
@@ -191,12 +196,12 @@ export class SessionTradingPort extends TradingPort {
 
   override async modifyPosition(
     positionId: string,
-    takeProfit?: unknown,
-    stopLoss?: unknown,
+    takeProfit?: DecimalLike,
+    stopLoss?: DecimalLike,
   ): Promise<unknown> {
     return this.session.modifyPosition(positionId, {
-      ...(takeProfit !== undefined ? { takeProfit: takeProfit as never } : {}),
-      ...(stopLoss !== undefined ? { stopLoss: stopLoss as never } : {}),
+      ...(takeProfit !== undefined ? { takeProfit } : {}),
+      ...(stopLoss !== undefined ? { stopLoss } : {}),
     });
   }
 
@@ -232,29 +237,34 @@ export class SessionMarketPort extends MarketPort {
   }
 
   override async *subscribeMarketData(
-    subscriptions: StreamSubscription[],
+    symbols: string[],
+    channel: StreamChannel = StreamChannel.TICKER,
   ): AsyncIterable<MarketDataEvent> {
-    const symbols = subscriptions.map((s) => s.symbol);
-    const first = subscriptions[0];
-    const channel = first === undefined ? "TICKER" : channelName(first.channel);
-    yield* this.session.streamMarketData(symbols, channel);
+    // One channel per call (see the port's doc): the per-symbol channel list
+    // this used to take could only be served by folding every symbol onto the
+    // first channel, which delivered the wrong data for the rest.
+    yield* this.session.streamMarketData(symbols, channelName(channel));
   }
 }
 
-/** Map a numeric proto enum back to its short name (TICKER, ORDERBOOK, ...). */
-function channelName(
-  value: number,
-): "TICKER" | "ORDERBOOK" | "TRADES" | "OHLCV" {
-  // Imported lazily to keep this module free of a runtime dependency on the
-  // generated market stubs; the numeric values are the contract's.
-  switch (value) {
-    case 2:
-      return "ORDERBOOK";
-    case 3:
-      return "TRADES";
-    case 4:
-      return "OHLCV";
-    default:
-      return "TICKER";
+/** Channel names the market stream accepts, as the proto enum spells them. */
+const STREAM_CHANNEL_NAMES: readonly StreamChannelName[] = [
+  "TICKER",
+  "ORDERBOOK",
+  "TRADES",
+  "OHLCV",
+];
+
+/**
+ * Map a numeric proto enum back to its short name, resolving against the
+ * generated constants so a renumbering in the contract cannot drift from this
+ * hand-written table (mirrors sdks/python/longtrader_sdk/ports.py). An
+ * unknown value throws: defaulting it to TICKER would silently subscribe the
+ * caller to a channel it never asked for.
+ */
+function channelName(value: number): StreamChannelName {
+  for (const name of STREAM_CHANNEL_NAMES) {
+    if (StreamChannel[name] === value) return name;
   }
+  throw new Error(`unknown StreamChannel ${value}`);
 }

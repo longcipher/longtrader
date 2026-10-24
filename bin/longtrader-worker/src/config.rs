@@ -195,20 +195,32 @@ impl Config {
         self.endpoint.clone().unwrap_or_else(|| default.to_string())
     }
 
-    /// Terminal API token loaded from `api_token_file` (empty when unset).
-    /// Returns empty string if the file is missing or unreadable and emits a
-    /// warning so badly mounted secrets are visible without leaking the token.
-    pub fn api_token(&self) -> String {
+    /// Terminal API token loaded from `api_token_file`.
+    ///
+    /// Fail-fast lives here, with the loader, not at each call site: a
+    /// configured token file that is missing, unreadable or empty means the
+    /// worker would otherwise come up **unauthenticated**, and a future call
+    /// site that forgets the empty check would silently run that way. An unset
+    /// `api_token_file` is the deliberate local-dev case and yields an empty
+    /// token without an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the configured file cannot be read or holds only
+    /// whitespace.
+    pub fn api_token(&self) -> Result<String> {
         let Some(path) = self.api_token_file.as_deref() else {
-            return String::new();
+            return Ok(String::new());
         };
-        match std::fs::read_to_string(path) {
-            Ok(s) => s.trim().to_string(),
-            Err(err) => {
-                tracing::warn!(path = %path, error = %err, "api_token_file unreadable, using empty token");
-                String::new()
-            }
+        let raw = std::fs::read_to_string(path)
+            .wrap_err_with(|| format!("failed to read api_token_file {path}"))?;
+        let token = raw.trim().to_string();
+        if token.is_empty() {
+            return Err(color_eyre::eyre::eyre!(
+                "api_token_file {path} is empty; refusing to start unauthenticated"
+            ));
         }
+        Ok(token)
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
@@ -417,7 +429,7 @@ mod tests {
 
     #[test]
     fn an_unset_token_file_yields_an_empty_token() {
-        assert!(full_config("").api_token().is_empty());
+        assert!(full_config("").api_token().expect("unset is not an error").is_empty());
     }
 
     /// A token file usually ends in a newline from `echo`; the whitespace must
@@ -428,26 +440,31 @@ mod tests {
         let path = dir.path().join("token");
         std::fs::write(&path, "  secret-token\n").expect("write");
         let config = full_config(&format!("api_token_file = {:?}\n", path.display().to_string()));
-        assert_eq!(config.api_token(), "secret-token");
+        assert_eq!(config.api_token().expect("readable token"), "secret-token");
     }
 
-    /// A missing or unreadable secret file must degrade to an empty token rather
-    /// than aborting startup; the warning makes the misconfiguration visible.
+    /// A missing or unreadable secret file must fail startup rather than
+    /// degrade to an empty token: an unauthenticated worker is a worse outcome
+    /// than a worker that refuses to boot.
     #[test]
-    fn an_unreadable_token_file_yields_an_empty_token() {
+    fn an_unreadable_token_file_is_an_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("absent");
         let config = full_config(&format!("api_token_file = {:?}\n", path.display().to_string()));
-        assert!(config.api_token().is_empty());
+        let err = config.api_token().expect_err("an unreadable token file must fail");
+        assert!(err.to_string().contains("api_token_file"), "got {err}");
     }
 
+    /// Whitespace-only is the same misconfiguration as empty: the file exists
+    /// but carries no credential.
     #[test]
-    fn a_whitespace_only_token_file_yields_an_empty_token() {
+    fn a_whitespace_only_token_file_is_an_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("token");
         std::fs::write(&path, "\n\t  \n").expect("write");
         let config = full_config(&format!("api_token_file = {:?}\n", path.display().to_string()));
-        assert!(config.api_token().is_empty());
+        let err = config.api_token().expect_err("an empty token file must fail");
+        assert!(err.to_string().contains("empty"), "got {err}");
     }
 
     // -----------------------------------------------------------------------

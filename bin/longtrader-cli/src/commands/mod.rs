@@ -140,17 +140,17 @@ pub(crate) async fn dispatch(
         }
         Commands::Account => {
             let account = client.get_account(&exchange).await?;
-            output.render_account(&account);
+            output.render_account(&account)?;
         }
         Commands::Positions => positions::run(client, &exchange, output).await?,
         Commands::Orders { symbol } => {
             let orders =
                 client.fetch_open_orders(&exchange, symbol.as_deref().unwrap_or(""), 100).await?;
-            output.render_orders(&orders);
+            output.render_orders(&orders)?;
         }
         Commands::History { limit } => {
             let orders = client.get_order_history(&exchange, limit).await?;
-            output.render_orders(&orders);
+            output.render_orders(&orders)?;
         }
         Commands::Buy { symbol, quantity, price, take_profit, stop_loss } => {
             orders::place_order(
@@ -187,7 +187,7 @@ pub(crate) async fn dispatch(
                 ..Default::default()
             };
             let order = client.cancel_order(req).await?;
-            output.render_orders(&[order]);
+            output.render_orders(&[order])?;
         }
         Commands::Close { position_id } => {
             let pos = client.close_position(&exchange, &position_id).await?;

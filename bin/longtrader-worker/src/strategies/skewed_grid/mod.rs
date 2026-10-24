@@ -27,7 +27,7 @@ use crate::{
     indicators::Ema,
     ports::{MarketDataSource, PortError, TradingGateway},
     proto::{common, market, trading},
-    strategies::{CommonParams, Strategy, limit_order, params_from_table},
+    strategies::{CommonParams, Strategy, limit_order, mid_price, params_from_table},
 };
 
 /// Configuration for the Avellaneda–Stoikov skewed grid.
@@ -190,7 +190,7 @@ impl SkewedGrid {
         let bid = Self::usable_price(ticker.bid.as_option());
         let ask = Self::usable_price(ticker.ask.as_option());
         if let (Some(bid), Some(ask)) = (bid, ask) {
-            return Ok((bid + ask) / dec!(2));
+            return Ok(mid_price(bid, ask));
         }
         color_eyre::eyre::bail!("no usable price for {}", self.config.common.symbol)
     }
@@ -328,28 +328,56 @@ impl SkewedGrid {
         let mut errors = 0u32;
 
         // Cancel levels no longer desired.
+        //
+        // Awaited, not fire-and-forget: a detached `tokio::spawn` here dropped
+        // the cancel's error and its `JoinHandle`, so a refused cancel was
+        // invisible and `stop()` could return while the cancels were still in
+        // flight. Concurrent via `join_all` (the old behaviour) but observed.
+        let mut stale = Vec::new();
         updated.retain(|level| {
             if desired.contains(&level.price) {
                 return true;
             }
             if !level.order_id.is_empty() {
-                let gateway = self.gateway.clone();
-                let order_id = level.order_id.clone();
-                let symbol = self.config.common.symbol.clone();
-                let exchange_id = self.config.common.proto_exchange_id();
-                tokio::spawn(async move {
-                    let _ = gateway
-                        .cancel_order(trading::CancelOrderRequest {
-                            exchange_id: buffa::MessageField::some(exchange_id),
-                            order_id,
-                            symbol,
-                            ..Default::default()
-                        })
-                        .await;
-                });
+                stale.push(level.order_id.clone());
             }
             false
         });
+        if !stale.is_empty() {
+            let exchange_id = self.config.common.proto_exchange_id();
+            let symbol = self.config.common.symbol.clone();
+            let cancels: Vec<_> = stale
+                .into_iter()
+                .map(|order_id| {
+                    let gateway = self.gateway.clone();
+                    let exchange_id = exchange_id.clone();
+                    let symbol = symbol.clone();
+                    let reported = order_id.clone();
+                    async move {
+                        (
+                            reported,
+                            gateway
+                                .cancel_order(trading::CancelOrderRequest {
+                                    exchange_id: buffa::MessageField::some(exchange_id),
+                                    order_id,
+                                    symbol,
+                                    ..Default::default()
+                                })
+                                .await,
+                        )
+                    }
+                })
+                .collect();
+            for (order_id, outcome) in futures_util::future::join_all(cancels).await {
+                if let Err(err) = outcome {
+                    tracing::error!(
+                        order_id = %order_id,
+                        error = %err,
+                        "skew-grid stale-level cancel failed; the order may still be resting"
+                    );
+                }
+            }
+        }
 
         // Place missing levels.
         for price in &desired {

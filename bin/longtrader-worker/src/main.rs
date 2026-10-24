@@ -20,6 +20,11 @@ use longtrader_worker::{
 /// `endpoint = "http://127.0.0.1:8080"` explicitly for that layout.
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8810";
 
+/// How long in-flight control-plane RPCs get to finish after the strategy
+/// stops (or Ctrl-C arrives) before the server task is aborted. Bounded so a
+/// wedged venue cancel cannot keep the process alive forever.
+const CONTROL_PLANE_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -46,16 +51,11 @@ async fn main() -> Result<()> {
         "starting worker"
     );
 
-    // Fail-fast on badly mounted secrets: a configured token file that yields
-    // an empty token would otherwise run unauthenticated. Read once and reuse
-    // (see `start_with_ports`): two reads could observe two files.
-    let token = config.api_token();
-    if config.api_token_file.is_some() && token.is_empty() {
-        bail!(
-            "api_token_file {:?} unreadable or empty; refusing to start unauthenticated",
-            config.api_token_file
-        );
-    }
+    // Fail-fast on badly mounted secrets: `Config::api_token` refuses a
+    // configured-but-unreadable/empty token file rather than degrading to an
+    // unauthenticated worker. Read once and reuse (see `start_with_ports`):
+    // two reads could observe two files.
+    let token = config.api_token()?;
 
     match backend.as_str() {
         "mock" => {
@@ -180,7 +180,7 @@ async fn start_with_ports(
         // observe a rotated secret (TOCTOU) and leave the adapter and the
         // control plane holding different credentials.
         let token = token.to_string();
-        let exchange_id = longtrader_worker::adapters::exchange_id(
+        let exchange_id = longtrader_worker::ports::exchange_id(
             config.strategy.params.venue(),
             config.strategy.params.venue_label(),
         );
@@ -194,16 +194,37 @@ async fn start_with_ports(
         let manager = Arc::new(manager);
         manager.install_self().await;
         let bind = bind.clone();
-        let server_handle = tokio::spawn(async move {
-            if let Err(err) = longtrader_worker::session::server::run(bind, manager).await {
+        // Graceful shutdown: the strategy finishing (or Ctrl-C) signals the
+        // server, in-flight RPCs get `CONTROL_PLANE_SHUTDOWN_GRACE` to finish,
+        // and only then is the task aborted. `abort()` alone would drop live
+        // kill-switch cancels mid-round-trip.
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut server_handle = tokio::spawn(async move {
+            let shutdown = async move {
+                let _ = shutdown_rx.await;
+            };
+            if let Err(err) = longtrader_worker::session::server::run(bind, manager, shutdown).await
+            {
                 tracing::error!(error = %err, "control plane server exited");
             }
         });
 
         // Control plane is scoped to this run: stop it on every exit path, not
         // just the happy one, so a failed `stop()` hook cannot leak it.
-        let outcome = drive_strategy(strategy.as_ref()).await;
-        server_handle.abort();
+        let outcome = tokio::select! {
+            result = drive_strategy(strategy.as_ref()) => result,
+            signal = tokio::signal::ctrl_c() => {
+                match signal {
+                    Ok(()) => tracing::info!("shutdown signal received; stopping strategy"),
+                    Err(err) => tracing::warn!(error = %err, "shutdown signal handler failed"),
+                }
+                strategy.stop().await
+            }
+        };
+        let _ = shutdown_tx.send(());
+        if tokio::time::timeout(CONTROL_PLANE_SHUTDOWN_GRACE, &mut server_handle).await.is_err() {
+            server_handle.abort();
+        }
         outcome
     } else {
         drive_strategy(strategy.as_ref()).await

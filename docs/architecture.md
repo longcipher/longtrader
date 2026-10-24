@@ -111,7 +111,7 @@ a round trip to learn it is not reconciled.
 ## Connect envelope framing
 
 Server-streaming RPCs use `Content-Type: application/connect+proto` and a
-**5-byte envelope** (see `bin/longtrader-worker/src/envelope.rs` and the
+**5-byte envelope** (see `crates/longtrader-contract/src/envelope.rs` and the
 [Bare Protocol Guide](bare-protocol-guide.md) §5):
 
 ```

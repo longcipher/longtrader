@@ -34,11 +34,6 @@ use crate::{
     proto::{common, market},
 };
 
-/// Build an [`common::ExchangeId`] from config strings.
-pub fn exchange_id(id: &str, label: &str) -> common::ExchangeId {
-    common::ExchangeId { id: id.to_string(), label: label.to_string(), ..Default::default() }
-}
-
 /// Coalesce key shared by mock + remote subscriptions: `channel:symbol`.
 /// Single owner so backpressure semantics cannot drift between backends.
 #[must_use]
@@ -183,7 +178,7 @@ mod tests {
 
     #[test]
     fn exchange_id_carries_both_the_venue_and_the_label() {
-        let id = exchange_id("binance", "sub-1");
+        let id = crate::ports::exchange_id("binance", "sub-1");
         assert_eq!(id.id, "binance");
         assert_eq!(id.label, "sub-1");
     }
@@ -192,7 +187,7 @@ mod tests {
     /// selector, so it must survive construction rather than be defaulted away.
     #[test]
     fn an_empty_exchange_id_is_preserved() {
-        let id = exchange_id("", "");
+        let id = crate::ports::exchange_id("", "");
         assert!(id.id.is_empty());
         assert!(id.label.is_empty());
     }
@@ -277,7 +272,7 @@ mod tests {
 
     fn request(symbols: &[&str]) -> market::StreamMarketDataRequest {
         market::StreamMarketDataRequest {
-            exchange_id: buffa::MessageField::some(exchange_id("mock", "")),
+            exchange_id: buffa::MessageField::some(crate::ports::exchange_id("mock", "")),
             subscriptions: symbols
                 .iter()
                 .map(|symbol| market::StreamSubscription {
@@ -495,7 +490,7 @@ mod tests {
             id in "[a-z0-9_-]{0,16}",
             label in "[a-z0-9_-]{0,16}",
         ) {
-            let built = exchange_id(&id, &label);
+            let built = crate::ports::exchange_id(&id, &label);
             prop_assert_eq!(built.id.as_str(), id.as_str());
             prop_assert_eq!(built.label.as_str(), label.as_str());
         }

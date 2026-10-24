@@ -184,7 +184,7 @@ pub(crate) async fn place_order(
 
     match client.create_order(req).await {
         Ok(order) => {
-            output.render_orders(&[order]);
+            output.render_orders(&[order])?;
             Ok(())
         }
         Err(e) => Err(e.into()),

@@ -33,6 +33,17 @@ impl Renderer {
         Self { format }
     }
 
+    /// Print `value` as pretty JSON on stdout.
+    ///
+    /// A serialization failure is an error, not a warning: the command then
+    /// produced no output, and answering exit code 0 would tell a pipeline the
+    /// data was empty rather than unprintable. This is the single place the
+    /// JSON format decides that.
+    fn print_json<T: serde::Serialize + ?Sized>(value: &T) -> Result<(), serde_json::Error> {
+        println!("{}", serde_json::to_string_pretty(value)?);
+        Ok(())
+    }
+
     /// Left-align and truncate `s` to `width` columns, appending an ellipsis
     /// when it overflows. Keeps table output aligned regardless of payload.
     fn trunc(s: &str, width: usize) -> String {
@@ -45,12 +56,12 @@ impl Renderer {
         }
     }
 
-    pub(crate) fn render_symbols(&self, symbols: &[umarket::SymbolInfo]) {
+    pub(crate) fn render_symbols(
+        &self,
+        symbols: &[umarket::SymbolInfo],
+    ) -> Result<(), serde_json::Error> {
         match self.format {
-            OutputFormat::Json => match serde_json::to_string_pretty(symbols) {
-                Ok(json) => println!("{json}"),
-                Err(e) => eprintln!("JSON serialization error: {e}"),
-            },
+            OutputFormat::Json => Self::print_json(symbols)?,
             OutputFormat::Table => {
                 println!("{:<15} {:<20} {:<10} {:<10}", "NAME", "DISPLAY", "BASE", "QUOTE");
                 println!("{}", "-".repeat(60));
@@ -65,14 +76,15 @@ impl Renderer {
                 }
             }
         }
+        Ok(())
     }
 
-    pub(crate) fn render_candles(&self, candles: &[umarket::Candle]) {
+    pub(crate) fn render_candles(
+        &self,
+        candles: &[umarket::Candle],
+    ) -> Result<(), serde_json::Error> {
         match self.format {
-            OutputFormat::Json => match serde_json::to_string_pretty(candles) {
-                Ok(json) => println!("{json}"),
-                Err(e) => eprintln!("JSON serialization error: {e}"),
-            },
+            OutputFormat::Json => Self::print_json(candles)?,
             OutputFormat::Table => {
                 println!(
                     "{:<20} {:<12} {:<12} {:<12} {:<12} {:<12}",
@@ -92,14 +104,15 @@ impl Renderer {
                 }
             }
         }
+        Ok(())
     }
 
-    pub(crate) fn render_account(&self, account: &utrading::Account) {
+    pub(crate) fn render_account(
+        &self,
+        account: &utrading::Account,
+    ) -> Result<(), serde_json::Error> {
         match self.format {
-            OutputFormat::Json => match serde_json::to_string_pretty(account) {
-                Ok(json) => println!("{json}"),
-                Err(e) => eprintln!("JSON serialization error: {e}"),
-            },
+            OutputFormat::Json => Self::print_json(account)?,
             OutputFormat::Table => {
                 println!("{:<15} {}", "Balance", fmt_dec(&account.balance));
                 println!("{:<15} {}", "Equity", fmt_dec(&account.equity));
@@ -108,14 +121,15 @@ impl Renderer {
                 println!("{:<15} {}", "Margin Frozen", fmt_dec(&account.margin_frozen));
             }
         }
+        Ok(())
     }
 
-    pub(crate) fn render_positions(&self, positions: &[utrading::Position]) {
+    pub(crate) fn render_positions(
+        &self,
+        positions: &[utrading::Position],
+    ) -> Result<(), serde_json::Error> {
         match self.format {
-            OutputFormat::Json => match serde_json::to_string_pretty(positions) {
-                Ok(json) => println!("{json}"),
-                Err(e) => eprintln!("JSON serialization error: {e}"),
-            },
+            OutputFormat::Json => Self::print_json(positions)?,
             OutputFormat::Table => {
                 println!(
                     "{:<12} {:<12} {:<8} {:<12} {:<12} {:<12} {:<12}",
@@ -143,14 +157,15 @@ impl Renderer {
                 }
             }
         }
+        Ok(())
     }
 
-    pub(crate) fn render_orders(&self, orders: &[utrading::Order]) {
+    pub(crate) fn render_orders(
+        &self,
+        orders: &[utrading::Order],
+    ) -> Result<(), serde_json::Error> {
         match self.format {
-            OutputFormat::Json => match serde_json::to_string_pretty(orders) {
-                Ok(json) => println!("{json}"),
-                Err(e) => eprintln!("JSON serialization error: {e}"),
-            },
+            OutputFormat::Json => Self::print_json(orders)?,
             OutputFormat::Table => {
                 println!(
                     "{:<12} {:<12} {:<6} {:<8} {:<10} {:<10} {:<10}",
@@ -190,14 +205,15 @@ impl Renderer {
                 }
             }
         }
+        Ok(())
     }
 
-    pub(crate) fn render_venues(&self, venues: &[proto::VenueStatus]) {
+    pub(crate) fn render_venues(
+        &self,
+        venues: &[proto::VenueStatus],
+    ) -> Result<(), serde_json::Error> {
         match self.format {
-            OutputFormat::Json => match serde_json::to_string_pretty(venues) {
-                Ok(json) => println!("{json}"),
-                Err(e) => eprintln!("JSON serialization error: {e}"),
-            },
+            OutputFormat::Json => Self::print_json(venues)?,
             OutputFormat::Table => {
                 println!("{:<15} {:<10} {:<10}", "NAME", "CONNECTED", "SYMBOLS");
                 println!("{}", "-".repeat(35));
@@ -211,6 +227,7 @@ impl Renderer {
                 }
             }
         }
+        Ok(())
     }
 
     pub(crate) fn render_msg(&self, msg: &str) {
@@ -583,7 +600,7 @@ mod tests {
         for wire in [0i32, 7, i32::MAX, i32::MIN] {
             let position =
                 utrading::Position { side: buffa::EnumValue::Unknown(wire), ..Default::default() };
-            table().render_positions(std::slice::from_ref(&position));
+            table().render_positions(std::slice::from_ref(&position)).expect("render");
         }
     }
 
@@ -596,7 +613,7 @@ mod tests {
                 status: buffa::EnumValue::Unknown(wire),
                 ..Default::default()
             };
-            table().render_orders(std::slice::from_ref(&order));
+            table().render_orders(std::slice::from_ref(&order)).expect("render");
         }
     }
 
@@ -608,7 +625,7 @@ mod tests {
             status: buffa::EnumValue::Known(utrading::OrderStatus::Filled),
             ..Default::default()
         };
-        table().render_orders(std::slice::from_ref(&order));
+        table().render_orders(std::slice::from_ref(&order)).expect("render");
     }
 
     #[test]
@@ -616,7 +633,7 @@ mod tests {
         for side in [utrading::OrderSide::Buy, utrading::OrderSide::Sell] {
             let position =
                 utrading::Position { side: buffa::EnumValue::Known(side), ..Default::default() };
-            table().render_positions(std::slice::from_ref(&position));
+            table().render_positions(std::slice::from_ref(&position)).expect("render");
         }
     }
 
@@ -625,12 +642,12 @@ mod tests {
     #[test]
     fn every_renderer_accepts_an_empty_payload_in_both_formats() {
         for renderer in [table(), json()] {
-            renderer.render_symbols(&[]);
-            renderer.render_candles(&[]);
-            renderer.render_account(&utrading::Account::default());
-            renderer.render_positions(&[]);
-            renderer.render_orders(&[]);
-            renderer.render_venues(&[]);
+            renderer.render_symbols(&[]).expect("render");
+            renderer.render_candles(&[]).expect("render");
+            renderer.render_account(&utrading::Account::default()).expect("render");
+            renderer.render_positions(&[]).expect("render");
+            renderer.render_orders(&[]).expect("render");
+            renderer.render_venues(&[]).expect("render");
             renderer.render_msg("hello");
         }
     }
@@ -643,6 +660,6 @@ mod tests {
             amount: dec(1, 0).into(),
             ..Default::default()
         };
-        json().render_orders(std::slice::from_ref(&order));
+        json().render_orders(std::slice::from_ref(&order)).expect("render");
     }
 }

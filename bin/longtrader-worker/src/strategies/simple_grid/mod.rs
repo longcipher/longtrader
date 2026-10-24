@@ -2,20 +2,26 @@
 //!
 //! Replaces the former daemon-specific and terminal-specific grids; the
 //! backend is selected by configuration, not by strategy type.
+//!
+//! Responsibilities are split across three files: this module owns the
+//! lifecycle, price resolution and venue round trips; [`grid`] owns the pure
+//! ladder arithmetic; [`persistence`] owns the state file.
+
+mod grid;
+mod persistence;
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use longtrader_contract::ext::{common_to_decimal, decimal_to_common};
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::{
     ports::{MarketDataSource, PortError, TradingGateway},
     proto::{common, market, trading},
-    strategies::Strategy,
+    strategies::{Strategy, mid_price},
 };
 
 /// Configuration for the unified simple grid.
@@ -59,7 +65,7 @@ impl SimpleGridConfig {
                 .get("state_file")
                 .and_then(toml::Value::as_str)
                 .map(ToString::to_string),
-            exchange_id: crate::adapters::exchange_id(
+            exchange_id: crate::ports::exchange_id(
                 params.exchange_id.as_deref().unwrap_or("mock"),
                 params.label.as_deref().unwrap_or_default(),
             ),
@@ -78,7 +84,7 @@ impl SimpleGridConfig {
 }
 
 #[derive(Debug, Clone)]
-struct GridLevel {
+pub(crate) struct GridLevel {
     price: Decimal,
     side: trading::OrderSide,
     client_order_id: String,
@@ -108,11 +114,7 @@ impl SimpleGrid {
         gateway: Arc<dyn TradingGateway>,
         market: Arc<dyn MarketDataSource>,
     ) -> Self {
-        let grid_step = if config.num_levels > 0 {
-            (config.upper_price - config.lower_price) / Decimal::from(config.num_levels)
-        } else {
-            dec!(0)
-        };
+        let grid_step = grid::grid_step(&config);
         Self {
             config,
             gateway,
@@ -124,98 +126,17 @@ impl SimpleGrid {
     }
 
     /// Persists grid levels when `state_file` is configured.
+    ///
+    /// Thin seam over [`persistence::persist_levels`]; kept so the call sites
+    /// read as one vocabulary and the module boundary stays invisible to them.
     fn persist_levels(&self, levels: &[GridLevel]) {
-        if let Some(path) = &self.config.state_file {
-            let store = crate::state_store::StateStore::new(path);
-            let json = serde_json::json!(levels
-                .iter()
-                .map(|l| serde_json::json!({
-                    "price": l.price.to_string(),
-                    "side": if matches!(l.side, trading::OrderSide::Buy) { "buy" } else { "sell" },
-                    "client_order_id": l.client_order_id,
-                    // The venue order id travels with the level so a restored
-                    // ladder can still be addressed by the kill-switch. It is
-                    // only a hint: an id the venue has since retired fails the
-                    // cancel, which the kill-switch already treats as a warning.
-                    "order_id": l.order_id,
-                }))
-                .collect::<Vec<_>>());
-            let _ = store.save(&json).inspect_err(|err| {
-                tracing::warn!(error = %err, "grid state save failed");
-            });
-        }
+        persistence::persist_levels(self.config.state_file.as_deref(), levels);
     }
 
-    /// Restores the ladder from `state_file`. An empty vector means "nothing to
-    /// restore": no file configured, no file present, or a file holding an empty
-    /// ladder — which is exactly what the kill-switch writes, and what the
-    /// in-memory path does with an empty ladder anyway.
-    ///
-    /// A read or parse failure is an error rather than a silent seed-from-scratch.
-    /// The seeding path quotes every level without reading the venue, so a
-    /// restored-and-then-dropped ladder leaves the previous process's orders
-    /// resting *and* a second ladder on top of them — twice the intended
-    /// inventory, with the flip logic unable to tell the copies apart. Refusing
-    /// the cycle is loud and costs no money; guessing is silent and does.
+    /// Restores the ladder from `state_file` (see [`persistence::restore_levels`]
+    /// for why a corrupt file stops the grid instead of reseeding it).
     fn restore_levels(&self) -> color_eyre::Result<Vec<GridLevel>> {
-        let Some(path) = self.config.state_file.as_deref() else {
-            return Ok(Vec::new());
-        };
-        let Some(document) = crate::state_store::StateStore::new(path).load()? else {
-            return Ok(Vec::new());
-        };
-        let rows = document.as_array().ok_or_else(|| {
-            color_eyre::eyre::eyre!("grid state at {path} is not a list of levels")
-        })?;
-        let mut levels = Vec::with_capacity(rows.len());
-        let mut off_band = 0usize;
-        for row in rows {
-            let level = Self::level_from_json(row)?;
-            // A level the current band no longer contains can neither be
-            // re-quoted nor flipped sensibly, so it is dropped rather than left to
-            // linger as a level the strategy can never act on.
-            if level.price < self.config.lower_price || level.price > self.config.upper_price {
-                off_band += 1;
-                continue;
-            }
-            levels.push(level);
-        }
-        if off_band > 0 {
-            tracing::warn!(off_band, "dropped restored grid levels outside the configured band");
-        }
-        Ok(levels)
-    }
-
-    /// One persisted level row.
-    ///
-    /// A row the strategy wrote always carries a price and a side. A missing
-    /// client order id is replaced with a fresh one rather than refused: a
-    /// restored level is matched against the venue by price, and it is given a new
-    /// id the moment it is flipped anyway.
-    fn level_from_json(row: &serde_json::Value) -> color_eyre::Result<GridLevel> {
-        let price = row
-            .get("price")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| color_eyre::eyre::eyre!("grid level row has no price"))?
-            .parse::<Decimal>()
-            .map_err(|err| color_eyre::eyre::eyre!("grid level price is not a decimal: {err}"))?;
-        let side = match row.get("side").and_then(serde_json::Value::as_str) {
-            Some("buy") => trading::OrderSide::Buy,
-            Some("sell") => trading::OrderSide::Sell,
-            other => {
-                return Err(color_eyre::eyre::eyre!("grid level side is not buy/sell: {other:?}"));
-            }
-        };
-        let text = |key: &str| {
-            row.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_string()
-        };
-        let stored_coid = text("client_order_id");
-        let client_order_id = if stored_coid.is_empty() {
-            format!("grid-{}", ulid::Ulid::generate())
-        } else {
-            stored_coid
-        };
-        Ok(GridLevel { price, side, client_order_id, order_id: text("order_id") })
+        persistence::restore_levels(&self.config)
     }
 
     /// Latest price from ticker last/close, falling back to bid-ask mid.
@@ -241,7 +162,7 @@ impl SimpleGrid {
         let bid = Self::usable_price(ticker.bid.as_option());
         let ask = Self::usable_price(ticker.ask.as_option());
         if let (Some(bid), Some(ask)) = (bid, ask) {
-            return Ok((bid + ask) / dec!(2));
+            return Ok(mid_price(bid, ask));
         }
         color_eyre::eyre::bail!("no usable price in ticker for {}", self.config.symbol);
     }
@@ -253,27 +174,8 @@ impl SimpleGrid {
         (price > Decimal::ZERO).then_some(price)
     }
 
-    fn side_for(price: Decimal, current: Decimal) -> trading::OrderSide {
-        if price < current { trading::OrderSide::Buy } else { trading::OrderSide::Sell }
-    }
-
     fn calculate_levels(&self, current_price: Decimal) -> Vec<GridLevel> {
-        let mut levels = Vec::new();
-        if self.grid_step <= dec!(0) {
-            return levels;
-        }
-        let max_levels = usize::try_from(self.config.num_levels).unwrap_or(usize::MAX);
-        let mut price = self.config.lower_price;
-        while price <= self.config.upper_price && levels.len() <= max_levels {
-            levels.push(GridLevel {
-                price,
-                side: Self::side_for(price, current_price),
-                client_order_id: format!("grid-{}", ulid::Ulid::generate()),
-                order_id: String::new(),
-            });
-            price += self.grid_step;
-        }
-        levels
+        grid::calculate_levels(&self.config, self.grid_step, current_price)
     }
 
     /// Places the level and records the venue-assigned order id on it so the
@@ -601,19 +503,19 @@ mod tests {
     /// current price is never crossed for a bid it did not intend.
     #[test]
     fn a_level_below_the_current_price_buys_and_everything_else_sells() {
-        assert_eq!(SimpleGrid::side_for(dec!(99), dec!(100)), trading::OrderSide::Buy);
-        assert_eq!(SimpleGrid::side_for(dec!(100), dec!(100)), trading::OrderSide::Sell);
-        assert_eq!(SimpleGrid::side_for(dec!(101), dec!(100)), trading::OrderSide::Sell);
+        assert_eq!(grid::side_for(dec!(99), dec!(100)), trading::OrderSide::Buy);
+        assert_eq!(grid::side_for(dec!(100), dec!(100)), trading::OrderSide::Sell);
+        assert_eq!(grid::side_for(dec!(101), dec!(100)), trading::OrderSide::Sell);
     }
 
     #[test]
     fn the_side_rule_holds_for_degenerate_prices() {
-        assert_eq!(SimpleGrid::side_for(Decimal::ZERO, dec!(100)), trading::OrderSide::Buy);
-        assert_eq!(SimpleGrid::side_for(dec!(0.00000001), Decimal::ZERO), trading::OrderSide::Sell);
-        assert_eq!(SimpleGrid::side_for(Decimal::ZERO, Decimal::ZERO), trading::OrderSide::Sell);
-        assert_eq!(SimpleGrid::side_for(dec!(-2), dec!(-1)), trading::OrderSide::Buy);
-        assert_eq!(SimpleGrid::side_for(dec!(-1), dec!(-2)), trading::OrderSide::Sell);
-        assert_eq!(SimpleGrid::side_for(dec!(-1), dec!(-1)), trading::OrderSide::Sell);
+        assert_eq!(grid::side_for(Decimal::ZERO, dec!(100)), trading::OrderSide::Buy);
+        assert_eq!(grid::side_for(dec!(0.00000001), Decimal::ZERO), trading::OrderSide::Sell);
+        assert_eq!(grid::side_for(Decimal::ZERO, Decimal::ZERO), trading::OrderSide::Sell);
+        assert_eq!(grid::side_for(dec!(-2), dec!(-1)), trading::OrderSide::Buy);
+        assert_eq!(grid::side_for(dec!(-1), dec!(-2)), trading::OrderSide::Sell);
+        assert_eq!(grid::side_for(dec!(-1), dec!(-1)), trading::OrderSide::Sell);
     }
 
     // -----------------------------------------------------------------------
@@ -1463,7 +1365,7 @@ mod tests {
                 prop_assert!(level.price <= upper, "{} rose above {upper}", level.price);
                 prop_assert_eq!(
                     level.side,
-                    SimpleGrid::side_for(level.price, current),
+                    grid::side_for(level.price, current),
                     "side must follow side_for at {}",
                     level.price
                 );

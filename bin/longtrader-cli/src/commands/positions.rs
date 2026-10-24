@@ -10,7 +10,7 @@ pub(crate) async fn run(
 ) -> Result<()> {
     match client.get_positions(exchange, &[]).await {
         Ok(positions) => {
-            output.render_positions(&positions);
+            output.render_positions(&positions)?;
             Ok(())
         }
         Err(e) => Err(e.into()),

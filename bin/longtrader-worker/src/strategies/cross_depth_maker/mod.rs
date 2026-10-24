@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 use crate::{
     ports::{MarketDataSource, TradingGateway},
-    strategies::{CrossVenueParams, Strategy, limit_order},
+    strategies::{CrossVenueParams, Strategy, limit_order, mid_price},
 };
 
 /// Config for the cross depth maker.
@@ -88,9 +88,7 @@ impl CrossDepthMaker {
             .map(longtrader_contract::ext::common_to_decimal)
             .transpose()?;
         match (bid, ask) {
-            (Some(b), Some(a)) if b > Decimal::ZERO && a > Decimal::ZERO => {
-                Ok((b + a) / Decimal::from(2))
-            }
+            (Some(b), Some(a)) if b > Decimal::ZERO && a > Decimal::ZERO => Ok(mid_price(b, a)),
             _ => color_eyre::eyre::bail!("hedge book lacks both sides"),
         }
     }

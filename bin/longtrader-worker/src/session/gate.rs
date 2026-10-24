@@ -1,6 +1,9 @@
 //! Part of the session control plane; see [`super::SessionManager`].
 
-use super::{Arc, ManagerError, Ordering, SessionHandle, SessionManager, SessionState};
+use super::{
+    Arc, CANCEL_ROUND_TRIP_TIMEOUT, ManagerError, Ordering, SessionHandle, SessionManager,
+    SessionState,
+};
 use crate::proto::trading;
 
 impl SessionManager {
@@ -54,9 +57,9 @@ impl SessionManager {
             attributed += 1;
         }
         drop(tracked);
-        if attributed > 0 {
-            handle.orders_submitted.fetch_add(attributed, Ordering::Relaxed);
-        }
+        // No `attributed > 0` guard: `fetch_add(0)` is already a no-op, and a
+        // conditional here only mutates into a tautology.
+        handle.orders_submitted.fetch_add(attributed, Ordering::Relaxed);
     }
 
     /// Cancel every order this session tracked, returning one `"<id>: <error>"`
@@ -68,24 +71,85 @@ impl SessionManager {
     /// neither `StopStrategy` nor the kill-switch can report success over a
     /// partially unwound session.
     pub(crate) async fn cancel_session_orders(&self, handle: &SessionHandle) -> Vec<String> {
+        let coids: Vec<String> = handle.tracked_orders().await.into_iter().collect();
+        self.cancel_coids(&handle.id, &coids).await
+    }
+
+    /// Cancel the given venue order ids, concurrently and with a per-cancel
+    /// budget.
+    ///
+    /// Concurrency and the budget are both load-bearing: this runs on the
+    /// watchdog's kill-switch path, where a sequential loop of unbounded awaits
+    /// would let one silent venue stall lease enforcement for every session.
+    /// A cancel that exceeds [`CANCEL_ROUND_TRIP_TIMEOUT`] is reported as a
+    /// failure — the order may still be resting — never dropped.
+    pub(crate) async fn cancel_coids(&self, session_id: &str, coids: &[String]) -> Vec<String> {
+        let exchange_id = self.default_exchange.clone();
+        let jobs: Vec<_> = coids
+            .iter()
+            .map(|coid| {
+                let gateway = Arc::clone(&self.gateway);
+                let coid = coid.clone();
+                let exchange_id = exchange_id.clone();
+                async move {
+                    let req = trading::CancelOrderRequest {
+                        exchange_id: buffa::MessageField::some(exchange_id),
+                        order_id: coid.clone(),
+                        // No symbol: a session-scoped cancel addresses the venue
+                        // order id alone, and `..Default::default()` already
+                        // leaves the filter empty.
+                        ..Default::default()
+                    };
+                    match tokio::time::timeout(CANCEL_ROUND_TRIP_TIMEOUT, gateway.cancel_order(req))
+                        .await
+                    {
+                        Ok(Ok(_order)) => None,
+                        Ok(Err(err)) => Some((coid, err.to_string())),
+                        Err(_elapsed) => Some((
+                            coid,
+                            format!("cancel timed out after {CANCEL_ROUND_TRIP_TIMEOUT:?}"),
+                        )),
+                    }
+                }
+            })
+            .collect();
+        let outcomes = futures_util::future::join_all(jobs).await;
         let mut failures = Vec::new();
-        for coid in handle.tracked_orders().await {
-            let req = trading::CancelOrderRequest {
-                exchange_id: buffa::MessageField::some(self.default_exchange.clone()),
-                order_id: coid.clone(),
-                symbol: String::new(),
-                ..Default::default()
-            };
-            if let Err(err) = self.gateway.cancel_order(req).await {
-                tracing::error!(
-                    session = %handle.id,
-                    coid = %coid,
-                    error = %err,
-                    "session order cancel failed; it may still be resting on the venue"
-                );
-                failures.push(format!("{coid}: {err}"));
-            }
+        for outcome in outcomes.into_iter().flatten() {
+            tracing::error!(
+                session = %session_id,
+                coid = %outcome.0,
+                error = %outcome.1,
+                "session order cancel failed; it may still be resting on the venue"
+            );
+            failures.push(format!("{}: {}", outcome.0, outcome.1));
         }
         failures
+    }
+
+    /// Best-effort unwind of orders a session submitted moments before its
+    /// lease lapsed or its kill-switch tripped.
+    ///
+    /// The gate is a point-in-time check: between `authorize_order_submission`
+    /// and the venue's answer the session can go terminal, so an order can be
+    /// filled on a session whose kill-switch already ran — and therefore never
+    /// cancelled by it. Re-checking after the round trip catches exactly that
+    /// window; the cancel is best-effort because the order may already be gone.
+    pub(crate) async fn unwind_late_submissions(
+        &self,
+        handle: &SessionHandle,
+        orders: &[trading::Order],
+    ) {
+        if orders.is_empty() || !handle.state().is_some_and(SessionState::is_terminal) {
+            return;
+        }
+        let coids: Vec<String> =
+            orders.iter().map(|o| o.id.clone()).filter(|id| !id.is_empty()).collect();
+        tracing::error!(
+            session = %handle.id,
+            orders = coids.len(),
+            "orders were submitted while the session went terminal; unwinding them best-effort"
+        );
+        self.cancel_coids(&handle.id, &coids).await;
     }
 }

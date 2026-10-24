@@ -30,7 +30,7 @@ pub(crate) async fn run(
 
     match client.get_candles(exchange, symbol, tf, limit).await {
         Ok(candles) => {
-            output.render_candles(&candles);
+            output.render_candles(&candles)?;
             Ok(())
         }
         Err(e) => Err(e.into()),

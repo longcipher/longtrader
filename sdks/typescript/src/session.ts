@@ -137,6 +137,29 @@ export const SYNC_IN_PROGRESS = "SYNC_IN_PROGRESS";
  */
 const FLAG_END_OF_STREAM = 0x02;
 
+/**
+ * Maximum payload length a peer may announce in one Connect envelope.
+ *
+ * The length is an untrusted `u32`, so a hostile or buggy peer can claim up to
+ * 4 GiB. Without a bound the decoder has no way to tell a real frame from a
+ * bogus one until it has buffered the whole claim, and a peer that keeps
+ * sending filler drives the buffer to that claim. 64 MiB is far above any real
+ * strategy event, market data update or log event, so anything larger is a
+ * protocol error rather than a big message. Mirrors `MaxFrameLength` in
+ * sdks/go/session/envelope.go.
+ */
+const MAX_FRAME_LENGTH = 64 << 20;
+
+/** Reject an announced frame length above {@link MAX_FRAME_LENGTH}. */
+function checkFrameLength(length: number): void {
+  if (length > MAX_FRAME_LENGTH) {
+    throw new Error(
+      `connect frame exceeds the maximum length: ${length} bytes ` +
+        `announced, limit ${MAX_FRAME_LENGTH}`,
+    );
+  }
+}
+
 /** Wrap a protobuf payload in the 5-byte Connect envelope. */
 function envelope(payload: Uint8Array): Uint8Array {
   const out = new Uint8Array(5 + payload.length);
@@ -152,6 +175,11 @@ function envelope(payload: Uint8Array): Uint8Array {
  * Yields `null` where the sequence jumped, which means the host's ring buffer
  * overflowed and the caller must re-run `reconcileState()` rather than assume
  * continuity.
+ *
+ * The body reader is released on every exit path, including an early `break`
+ * from the caller's `for await`: a generator abandoned mid-stream would
+ * otherwise leave the response body locked and unread (the `defer body.Close()`
+ * of sdks/go/session/session.go).
  */
 async function* iterEvents<S extends DescMessage>(
   body: ReadableStream<Uint8Array> | null,
@@ -160,46 +188,87 @@ async function* iterEvents<S extends DescMessage>(
 ): AsyncGenerator<MessageShape<S> | null> {
   if (body === null) return;
   const reader = body.getReader();
-  let buf = new Uint8Array(0);
-  // `u64` watermarks stay `bigint`: `Number` loses integer precision past 2^53,
-  // which would silently disable gap detection on very long streams.
-  let prev = 0n;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (value) {
-      const merged = new Uint8Array(buf.length + value.length);
-      merged.set(buf);
-      merged.set(value, buf.length);
-      buf = merged;
-    }
+  try {
+    let buf = new Uint8Array(0);
+    // `u64` watermarks stay `bigint`: `Number` loses integer precision past
+    // 2^53, which would silently disable gap detection on very long streams.
+    let prev = 0n;
     for (;;) {
-      if (buf.length < 5) break;
-      const flags = buf[0] ?? 0;
-      const length = new DataView(
-        buf.buffer,
-        buf.byteOffset,
-        buf.byteLength,
-      ).getUint32(1, false);
-      if (buf.length < 5 + length) break;
-      const payload = buf.slice(5, 5 + length);
-      buf = buf.slice(5 + length);
-      if ((flags & FLAG_END_OF_STREAM) !== 0) {
-        await reader.cancel();
-        return;
+      const { done, value } = await reader.read();
+      if (value) {
+        const merged = new Uint8Array(buf.length + value.length);
+        merged.set(buf);
+        merged.set(value, buf.length);
+        buf = merged;
       }
-      const msg = fromBinary(schema, payload);
-      if (gapAware) {
-        const header = (msg as { header?: { sequence?: bigint } }).header;
-        const seq = header?.sequence ?? 0n;
-        if (seq > 0n) {
-          if (prev > 0n && seq !== prev + 1n) yield null;
-          prev = seq;
+      for (;;) {
+        if (buf.length < 5) break;
+        const flags = buf[0] ?? 0;
+        const length = new DataView(
+          buf.buffer,
+          buf.byteOffset,
+          buf.byteLength,
+        ).getUint32(1, false);
+        // The announced length is an untrusted u32: without a bound a peer
+        // turns a 5-byte header into a heap exhaustion by claiming 4 GiB and
+        // then sending filler.
+        checkFrameLength(length);
+        if (buf.length < 5 + length) break;
+        const payload = buf.slice(5, 5 + length);
+        buf = buf.slice(5 + length);
+        if ((flags & FLAG_END_OF_STREAM) !== 0) {
+          // A Connect 200 that ends in an error frame is a rejection, not a
+          // clean end of stream: the host reports a stream error there and
+          // nowhere else, so it is surfaced rather than swallowed.
+          const err = endOfStreamError(payload);
+          await reader.cancel();
+          if (err !== null) throw err;
+          return;
         }
+        const msg = fromBinary(schema, payload);
+        if (gapAware) {
+          const header = (msg as { header?: { sequence?: bigint } }).header;
+          const seq = header?.sequence ?? 0n;
+          if (seq > 0n) {
+            if (prev > 0n && seq !== prev + 1n) yield null;
+            prev = seq;
+          }
+        }
+        yield msg;
       }
-      yield msg;
+      if (done) return;
     }
-    if (done) return;
+  } finally {
+    reader.releaseLock();
   }
+}
+
+/**
+ * Map an end-of-stream frame payload to the {@link ConnectError} it carries.
+ *
+ * A clean close-out is `{"error":null,"metadata":{}}`, which returns `null`; a
+ * rejection is `{"error":{"code":...,"message":...,"details":...}}`, which
+ * returns the error. Mirrors `endStreamFrameError` in
+ * sdks/go/session/session.go.
+ */
+function endOfStreamError(payload: Uint8Array): ConnectError | null {
+  let frame: {
+    error?: { code?: string; message?: string; details?: unknown } | null;
+  };
+  try {
+    frame = JSON.parse(new TextDecoder().decode(payload)) as typeof frame;
+  } catch {
+    // A non-JSON end-of-stream payload carries no error to report.
+    return null;
+  }
+  const detail = frame.error;
+  if (detail === undefined || detail === null) return null;
+  return new ConnectError(
+    200,
+    detail.code ?? "unknown",
+    detail.message ?? "",
+    detail.details,
+  );
 }
 
 /**
@@ -481,7 +550,8 @@ export interface OrderSpec {
   price?: DecimalLike;
   side?: "BUY" | "SELL";
   orderType?: "LIMIT" | "MARKET" | "STOP" | "STOP_LIMIT";
-  timeInForce?: "GTC" | "IOC" | "FOK" | "POST_ONLY";
+  /** The contract's `TimeInForce`; `POST_ONLY` is the separate bool below. */
+  timeInForce?: TimeInForce;
   clientOrderId?: string;
   postOnly?: boolean;
   reduceOnly?: boolean;
@@ -510,6 +580,18 @@ export class Session {
   }
 
   /**
+   * Bind a session to a `fetch` implementation without negotiating a lease.
+   *
+   * Tests, and hosts that attach out of band, need to reach the transport
+   * without a live worker. The constructor stays private so this is the only
+   * way in, which keeps `fetchImpl` injectable instead of baked in as the
+   * platform global.
+   */
+  static create(baseUrl: string, fetchImpl: typeof fetch = fetch): Session {
+    return new Session(baseUrl, fetchImpl);
+  }
+
+  /**
    * Validate the terminal API token and negotiate lease parameters.
    *
    * `sessionId` resumes a previous session after a network drop: the host
@@ -521,6 +603,7 @@ export class Session {
     token: string,
     policy?: KillSwitchPolicy,
     sessionId = "",
+    fetchImpl: typeof fetch = fetch,
   ): Promise<Session> {
     const req = create(AttachSessionRequestSchema, {
       token,
@@ -529,7 +612,7 @@ export class Session {
       sessionId,
       ...(policy ? { policy } : {}),
     });
-    const session = new Session(baseUrl, fetch);
+    const session = new Session(baseUrl, fetchImpl);
     const resp = await session.unary(
       WORKER_SERVICE,
       "AttachSession",
@@ -1143,11 +1226,7 @@ function buildOrderRequest(
     ),
     amount: toDecimal(spec.amount),
     ...(spec.price !== undefined ? { price: toDecimal(spec.price) } : {}),
-    timeInForce: enumValue(
-      TimeInForce as unknown as Record<string, number>,
-      spec.timeInForce ?? "GTC",
-      "TimeInForce",
-    ),
+    timeInForce: spec.timeInForce ?? TimeInForce.GTC,
     postOnly: spec.postOnly ?? false,
     reduceOnly: spec.reduceOnly ?? false,
   });
@@ -1169,6 +1248,9 @@ function firstMessagePayload(buf: Uint8Array): Uint8Array {
       buf.byteOffset,
       buf.byteLength,
     ).getUint32(pos + 1, false);
+    // The announced length is untrusted; bound it exactly as the stream
+    // decoder does.
+    checkFrameLength(length);
     const end = pos + 5 + length;
     if (end > buf.length) break;
     if ((flags & FLAG_END_OF_STREAM) === 0) return buf.slice(pos + 5, end);

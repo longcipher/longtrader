@@ -30,9 +30,6 @@ use crate::{
     proto::{account, common, market, ops, trading, worker},
 };
 
-const SERVICE_TRADING: &str = "longtrader.trading.v1.TradingService";
-const SERVICE_MARKET: &str = "longtrader.market.v1.MarketDataService";
-
 fn ts_from_ms(ms: i64) -> buffa_types::google::protobuf::Timestamp {
     buffa_types::google::protobuf::Timestamp {
         seconds: ms.div_euclid(1000),
@@ -46,6 +43,22 @@ fn ms_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// Milliseconds since the epoch for a wire `Timestamp`, saturating instead of
+/// wrapping.
+///
+/// `seconds * 1000` overflows for a far-future (or far-past) timestamp, and the
+/// wrapped result is a *plausible nearby* value rather than an obviously wrong
+/// one — the worst shape for a bug. Saturating keeps the sign honest.
+fn ms_from_ts(ts: &buffa_types::google::protobuf::Timestamp) -> i64 {
+    let scaled =
+        ts.seconds.checked_mul(1000).and_then(|ms| ms.checked_add(i64::from(ts.nanos / 1_000_000)));
+    match scaled {
+        Some(ms) => ms,
+        None if ts.seconds > 0 => i64::MAX,
+        None => i64::MIN,
+    }
 }
 
 /// Minimal Connect client over `hpx` – mirrors the former `TerminalClient`
@@ -67,7 +80,11 @@ pub struct RemoteAdapter {
 impl RemoteAdapter {
     #[must_use]
     pub fn new(base_url: &str, token: &str) -> Self {
-        let base_url = base_url.trim_end_matches('/').to_string();
+        // No local trimming: every path is composed by
+        // `longtrader_proto::transport::unary` → `service_url`, which owns the
+        // trailing-slash and `://` invariants. The `trim_end_matches('/')` that
+        // used to live here was the anti-pattern that helper exists to avoid.
+        let base_url = base_url.to_string();
         // HTTP/2 is enabled so the same client can carry server-streaming
         // (`StreamMarketData`/`StreamUpdates`) once the backend exposes it;
         // unary calls work over either version.
@@ -230,12 +247,19 @@ impl TradingGateway for RemoteAdapter {
         // A server-side single-RPC `ReconcileState` is the long-term fix.
         //
         // SECURITY NOTE: The snapshot is NOT atomic. There is a race window
-        // between the three RPCs where the backend state may change. The
-        // `snapshot_sequence` is a local monotonic counter, not a server-side
-        // watermark. Strategies MUST replay deltas after `snapshot_sequence`
-        // to converge to the correct state. Do NOT treat the three reads as
-        // a single point-in-time view.
+        // between the three RPCs where the backend state may change.
+        //
+        // `snapshot_sequence` is exactly what its name in the contract says it
+        // is not: a *local* monotonic counter, stamped **before** the reads so
+        // that anything concurrent lands above it and is replayed rather than
+        // silently skipped. It carries no ordering meaning across adapters or
+        // sessions, and no consumer may compare it against another adapter's
+        // value. The stamp used to be taken after the reads, which invited
+        // exactly that misreading. A server-side single-RPC `ReconcileState`
+        // is the long-term fix; until then this is the honest watermark the
+        // open backend can produce.
         let started_ms = ms_now();
+        let snapshot_sequence = self.snapshot_seq.fetch_add(1, Ordering::AcqRel) + 1;
         let account_resp: trading::GetAccountResponse = self
             .unary(
                 SERVICE_TRADING,
@@ -291,9 +315,9 @@ impl TradingGateway for RemoteAdapter {
             );
         }
         Ok(worker::ReconcileStateResponse {
-            // Local monotonic watermark (NOT server-atomic). Session discards
-            // deltas at/below this point and replays the remainder.
-            snapshot_sequence: self.snapshot_seq.fetch_add(1, Ordering::AcqRel) + 1,
+            // Local monotonic watermark (NOT server-atomic), stamped before
+            // the reads; see the note above.
+            snapshot_sequence,
             snapshot_time: MessageField::some(ts_from_ms(started_ms)),
             balances,
             positions: positions_resp.positions,
@@ -402,7 +426,10 @@ impl RemoteAdapter {
                     exchange_id: MessageField::some(exchange_id.clone()),
                     symbol: symbol.clone(),
                     pagination: crate::proto::common::Pagination {
-                        limit: 100,
+                        // Unset → the shared default page size, not a private
+                        // literal: `page_limit_or_default` is the single owner
+                        // of "how deep one page is".
+                        limit: u64::from(page_limit_or_default(0)),
                         ..Default::default()
                     }
                     .into(),
@@ -439,16 +466,18 @@ impl RemoteAdapter {
 // stays unset rather than becoming a zero that reads as a real measurement.
 // ---------------------------------------------------------------------------
 
+/// Service names on the unified surface — all from
+/// [`longtrader_proto::service_name`], the single owner of Connect paths.
+use longtrader_proto::service_name::{
+    MARKET_DATA as MARKET_SERVICE, MARKET_DATA as SERVICE_MARKET, OPS as OPS_SERVICE,
+    TRADING as SERVICE_TRADING, TRADING as TRADING_SERVICE,
+};
+
 use crate::ports::{
     FundingRatePoint, FundingRateSnapshot, FundingRateSource, LedgerEntry, TransferReceipt,
     TriggerOrder, TriggerOrderGateway, TriggerOrderRequest, TriggerOrderStatus, VenueOpDescriptor,
     VenueOpInvoker, VenueOpParam, VenueOpParamType, WalletGateway,
 };
-
-/// Service names on the unified surface.
-const OPS_SERVICE: &str = "longtrader.ops.v1.VenueOpService";
-const MARKET_SERVICE: &str = "longtrader.market.v1.MarketDataService";
-const TRADING_SERVICE: &str = "longtrader.trading.v1.TradingService";
 
 /// Build a `google.protobuf.Timestamp` from Unix milliseconds.
 ///
@@ -539,15 +568,9 @@ fn trigger_order_to_port(order: &trading::TriggerOrder) -> Result<TriggerOrder, 
         qty: dec(order.qty.as_option(), "qty")?,
         reduce_only: order.reduce_only,
         status,
-        created_at_ms: order
-            .created_at
-            .as_option()
-            .map_or(0, |ts| ts.seconds * 1000 + i64::from(ts.nanos / 1_000_000)),
+        created_at_ms: order.created_at.as_option().map_or(0, ms_from_ts),
         order_id: order.order_id.clone(),
-        triggered_at_ms: order
-            .triggered_at
-            .as_option()
-            .map(|ts| ts.seconds * 1000 + i64::from(ts.nanos / 1_000_000)),
+        triggered_at_ms: order.triggered_at.as_option().map(ms_from_ts),
     })
 }
 

@@ -55,6 +55,17 @@ pub struct StrategyDescriptor {
 
 static REGISTRY: OnceLock<Vec<StrategyDescriptor>> = OnceLock::new();
 
+/// Builds the DCA scheduler — the single factory behind both `dca_scheduler`
+/// and its historical alias `dca`.
+///
+/// One function, not one closure per name: two copies of the same construction
+/// could drift, and the alias exists precisely so old configs keep behaving
+/// identically.
+fn build_dca_scheduler(ctx: &StrategyContext) -> Result<Box<dyn Strategy>> {
+    let cfg = dca_scheduler::DcaSchedulerConfig::from_params(ctx.config.strategy.params.table())?;
+    Ok(Box::new(dca_scheduler::DcaScheduler::new(cfg, ctx.gateway.clone())))
+}
+
 /// All known strategies. Order is irrelevant; lookup is by `name`.
 ///
 /// Uses `OnceLock` for lazy initialization. The registry is initialized once
@@ -212,28 +223,13 @@ pub fn registry() -> &'static [StrategyDescriptor] {
                     )))
                 },
             },
-            StrategyDescriptor {
-                name: "dca_scheduler",
-                factory: |ctx| {
-                    let cfg = dca_scheduler::DcaSchedulerConfig::from_params(
-                        ctx.config.strategy.params.table(),
-                    )?;
-                    Ok(Box::new(dca_scheduler::DcaScheduler::new(cfg, ctx.gateway.clone())))
-                },
-            },
+            StrategyDescriptor { name: "dca_scheduler", factory: build_dca_scheduler },
             // `dca` is the historical alias of `dca_scheduler`: same factory,
             // kept so existing configs keep working. The behavioral test
             // `the_dca_alias_behaves_identically_to_dca_scheduler` pins the
-            // equivalence; do not give the alias its own factory.
-            StrategyDescriptor {
-                name: "dca",
-                factory: |ctx| {
-                    let cfg = dca_scheduler::DcaSchedulerConfig::from_params(
-                        ctx.config.strategy.params.table(),
-                    )?;
-                    Ok(Box::new(dca_scheduler::DcaScheduler::new(cfg, ctx.gateway.clone())))
-                },
-            },
+            // equivalence; the alias shares the factory function above rather
+            // than carrying a second copy of it.
+            StrategyDescriptor { name: "dca", factory: build_dca_scheduler },
             StrategyDescriptor {
                 name: "fixed_maker",
                 factory: |ctx| {
@@ -951,6 +947,32 @@ qty_per_level = \"0.1\"
             )
             .expect("decodes"),
             "the alias must size the same order as the canonical name"
+        );
+    }
+}
+
+#[cfg(test)]
+mod catalog_sync_tests {
+    use super::registry;
+
+    /// The terminal's schema-driven catalog must name exactly the strategies
+    /// the registry can build.
+    ///
+    /// The catalog list is hand-maintained (the terminal renders it without
+    /// linking the worker), so without this check a registry addition silently
+    /// leaves the strategy missing from the UI, and a removal leaves a dead
+    /// entry that fails only at runtime.
+    #[test]
+    fn the_catalog_names_exactly_the_registry_strategies() {
+        let mut registry_names: Vec<&str> =
+            registry().iter().map(|descriptor| descriptor.name).collect();
+        registry_names.sort_unstable();
+        let mut catalog_names: Vec<&str> =
+            longtrader_catalog::WORKER_STRATEGY_IDS.iter().copied().collect();
+        catalog_names.sort_unstable();
+        assert_eq!(
+            catalog_names, registry_names,
+            "longtrader_catalog::WORKER_STRATEGY_IDS must mirror the registry exactly"
         );
     }
 }

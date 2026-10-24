@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     ports::{MarketDataSource, TradingGateway},
-    strategies::{CommonParams, Strategy, params_from_table},
+    strategies::{CommonParams, Strategy, cancel_all_orders, params_from_table},
 };
 
 /// Config for the sentinel.
@@ -134,15 +134,7 @@ impl Sentinel {
                 if !fire {
                     return Ok(false);
                 }
-                if let Err(err) = self
-                    .gateway
-                    .cancel_all_orders(crate::proto::trading::CancelAllOrdersRequest {
-                        exchange_id: buffa::MessageField::some(exchange),
-                        symbol: String::new(),
-                        ..Default::default()
-                    })
-                    .await
-                {
+                if let Err(err) = cancel_all_orders(self.gateway.as_ref(), &exchange, "").await {
                     // The safety net did not deploy, so leave the switch armed:
                     // the next failed probe has to try again.
                     let mut health = self.health.lock().await;

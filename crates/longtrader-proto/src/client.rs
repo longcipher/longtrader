@@ -20,7 +20,8 @@ use thiserror::Error;
 
 use crate::{
     client_core::{
-        SERVICE_MARKET, SERVICE_RUNTIME, SERVICE_STRATEGY, SERVICE_TRADING, service_url,
+        SERVICE_MARKET, SERVICE_RUNTIME, SERVICE_STRATEGY, SERVICE_TRADING, SERVICE_VENUE_OPS,
+        end_of_stream_error, service_url,
     },
     proto::longtrader::{
         account::v1 as account, common::v1 as common, market::v1 as umarket, ops::v1 as ops,
@@ -732,11 +733,12 @@ impl TerminalClient {
         };
         let payload = req.encode_to_vec();
         // Connect streaming framing for the request: 1 flag byte (0 =
-        // uncompressed) + 4-byte big-endian length + protobuf payload.
-        let mut body = Vec::with_capacity(5 + payload.len());
-        body.push(0);
-        body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        body.extend_from_slice(&payload);
+        // uncompressed) + 4-byte big-endian length + protobuf payload. Encoded
+        // by the contract crate's single owner of the framing.
+        let body = longtrader_contract::envelope::encode_envelope(
+            longtrader_contract::envelope::FLAG_MESSAGE,
+            &payload,
+        );
 
         let resp = self
             .request(&url, body, crate::transport::CONNECT_PROTO_STREAM)
@@ -755,27 +757,42 @@ impl TerminalClient {
 
         // Connect streaming framing: per-message prefix of 1 byte flags +
         // 4-byte big-endian length, followed by the raw protobuf payload.
+        // Decoding is delegated to the contract crate's framing owner — the
+        // flags byte is not decoration: `0x02` marks the terminal
+        // end-of-stream frame, whose JSON body carries the stream's verdict
+        // when the HTTP status alone said 200.
         let stream = futures_util::stream::unfold(
             (resp, Vec::<u8>::new()),
             |(mut resp, mut buf)| async move {
                 loop {
-                    if buf.len() >= 5 {
-                        let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-                        let total = 5 + len;
-                        if buf.len() >= total {
-                            let payload: Vec<u8> = buf[5..total].to_vec();
-                            buf.drain(..total);
-                            match stream::UpdateEnvelope::decode_from_slice(&payload) {
-                                Ok(env) => return Some((Ok(env), (resp, buf))),
-                                Err(e) => {
-                                    return Some((
-                                        Err(TerminalClientError::Decode(e.to_string())),
-                                        (resp, buf),
-                                    ));
-                                }
-                            }
+                    if let Ok((flags, payload, consumed)) =
+                        longtrader_contract::envelope::decode_envelope_result(&buf)
+                    {
+                        let payload: Vec<u8> = payload.to_vec();
+                        buf.drain(..consumed);
+                        if flags & longtrader_contract::envelope::FLAG_EOS != 0 {
+                            // Terminal frame: `{"error":null}` closes the
+                            // stream cleanly; a non-null error is the
+                            // rejection this stream was answered with.
+                            return match end_of_stream_error(&payload) {
+                                Some(end) => Some((
+                                    Err(TerminalClientError::Rpc {
+                                        code: 200,
+                                        message: format!("{}: {}", end.code, end.message),
+                                    }),
+                                    (resp, buf),
+                                )),
+                                None => None,
+                            };
                         }
+                        return Some((
+                            stream::UpdateEnvelope::decode_from_slice(&payload)
+                                .map_err(|e| TerminalClientError::Decode(e.to_string())),
+                            (resp, buf),
+                        ));
                     }
+                    // TooShort / Truncated: the frame is not fully buffered
+                    // yet; fall through and read more.
                     match resp.chunk().await {
                         Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
                         Ok(None) => return None,
@@ -849,16 +866,6 @@ impl TerminalClient {
     }
 }
 
-/// `longtrader.ops.v1.VenueOpService` — the self-describing registry of
-/// exchange-specific operations.
-pub const SERVICE_VENUE_OPS: &str = "longtrader.ops.v1.VenueOpService";
-/// `longtrader.market.v1.MarketDataService`.
-pub const SERVICE_UNIFIED_MARKET: &str = "longtrader.market.v1.MarketDataService";
-/// `longtrader.trading.v1.TradingService`.
-pub const SERVICE_UNIFIED_TRADING: &str = "longtrader.trading.v1.TradingService";
-/// `longtrader.stream.v1.StreamService`.
-pub const SERVICE_UNIFIED_STREAM: &str = "longtrader.stream.v1.StreamService";
-
 /// Convert a JSON value into a `google.protobuf.Struct` for the ops wire.
 fn json_to_struct(
     v: &serde_json::Value,
@@ -892,20 +899,45 @@ mod tests {
         assert_eq!(back["nested"]["k"], true);
     }
 
+    /// The service names this client speaks are the canonical ones, re-exported
+    /// from the single owner — never a local copy that could drift onto a path
+    /// the backend does not serve.
     #[test]
     fn service_constants_match_the_contract() {
-        assert_eq!(SERVICE_VENUE_OPS, "longtrader.ops.v1.VenueOpService");
-        assert_eq!(SERVICE_UNIFIED_MARKET, "longtrader.market.v1.MarketDataService");
-        assert_eq!(SERVICE_UNIFIED_TRADING, "longtrader.trading.v1.TradingService");
-        assert_eq!(SERVICE_UNIFIED_STREAM, "longtrader.stream.v1.StreamService");
+        use crate::service_name;
+        assert_eq!(SERVICE_MARKET, service_name::MARKET_DATA);
+        assert_eq!(SERVICE_TRADING, service_name::TRADING);
+        assert_eq!(SERVICE_RUNTIME, service_name::RUNTIME);
+        assert_eq!(SERVICE_STRATEGY, service_name::STRATEGY);
+        assert_eq!(SERVICE_VENUE_OPS, service_name::OPS);
     }
 
+    /// A Connect 200 that ends in an error frame is a rejection: the reason is
+    /// in the frame and nowhere else, so it must surface as an error rather
+    /// than a clean end of stream.
     #[test]
-    fn canonical_surface_uses_the_canonical_service_paths() {
-        // The terminal no longer redefines market/trading: every market and
-        // trading call must land on the canonical service, or a converged
-        // backend would answer with `unimplemented`.
-        assert_eq!(SERVICE_MARKET, SERVICE_UNIFIED_MARKET);
-        assert_eq!(SERVICE_TRADING, SERVICE_UNIFIED_TRADING);
+    fn an_end_of_stream_error_frame_surfaces_as_an_error() {
+        let payload = br#"{"error":{"code":"unauthenticated","message":"token expired"}}"#;
+        let end = end_of_stream_error(payload).expect("an error frame must parse");
+        assert_eq!(end.code, "unauthenticated");
+        assert_eq!(end.message, "token expired");
+    }
+
+    /// A clean close-out ends the stream silently.
+    #[test]
+    fn a_clean_end_of_stream_frame_carries_no_error() {
+        assert!(end_of_stream_error(br#"{"error":null,"metadata":{}}"#).is_none());
+        assert!(end_of_stream_error(br#"{}"#).is_none());
+        assert!(end_of_stream_error(b"not json").is_none());
+        assert!(end_of_stream_error(b"[]").is_none());
+    }
+
+    /// An error object with no fields still reports a rejection — with the
+    /// documented fallbacks rather than a panic.
+    #[test]
+    fn a_fieldless_end_of_stream_error_still_reports() {
+        let end = end_of_stream_error(br#"{"error":{}}"#).expect("an error frame must parse");
+        assert_eq!(end.code, "unknown");
+        assert_eq!(end.message, "");
     }
 }

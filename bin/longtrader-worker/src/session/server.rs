@@ -54,13 +54,24 @@ pub fn build_router(manager: Arc<SessionManager>) -> connectrpc::Router {
     VenueOpServiceExt::register(ops_svc, router)
 }
 
-/// Bind and serve until the process exits.
-pub async fn run(bind: String, manager: Arc<SessionManager>) -> color_eyre::Result<()> {
+/// Bind and serve until the process exits or `shutdown` resolves.
+///
+/// The shutdown future is not decoration: `axum::serve` drops every open
+/// connection — including in-flight kill-switch cancels and `StopStrategy`
+/// calls — the moment its own future is dropped. Waiting for it lets those
+/// requests finish, which is the difference between an orderly wind-down and
+/// orders left resting on the venue by a worker that looked healthy until it
+/// exited.
+pub async fn run(
+    bind: String,
+    manager: Arc<SessionManager>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> color_eyre::Result<()> {
     let router = build_router(manager);
     let app = axum::Router::new().fallback_service(router.into_axum_service());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "worker control plane listening");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
     Ok(())
 }
 
