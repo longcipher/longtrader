@@ -38,7 +38,7 @@ Most trading frameworks lock you into one language, one exchange SDK, and one de
 | | |
 |---|---|
 | **Contract-first API** | `proto/longtrader/**` defines trading, market, worker/session, data, backtest, ops and stream services. `buf breaking` guards every PR. |
-| **20+ native strategies** | Grid / market-making, trend-following, portfolio rebalancing, risk & operations, and analytics — each isolated behind `ports.rs`. |
+| **55 native strategies** | Grid / market-making, trend-following, arbitrage, execution algos, portfolio rebalancing, risk & operations, and analytics — each isolated behind `ports.rs`. |
 | **Deterministic session control plane** | Lease-based liveness, atomic `ReconcileState`, per-session `KillSwitchPolicy` (`session` / `all` / `none`). |
 | **Thin, consistent SDKs** | Python, TypeScript, and Go mirrors of the same canonical layout. Generated code is never hand-edited. |
 | **Hardened worker** | `tracing`-only observability, `eyre`/`thiserror` error split, `hpx` + `rustls` transport, `tokio` async, and strict `clippy::pedantic`/`nursery` lints under `-D warnings`. |
@@ -243,13 +243,35 @@ Each strategy under `bin/longtrader-worker/src/strategies/<name>/` ships its own
 
 | Category | Strategies |
 |---|---|
-| Grid / Market Making | `simple_grid`, `boll_grid`, `hedge_grid`, `fixed_maker`, `cross_maker`, `cross_depth_maker`, `cross_fixed_maker` |
-| Trend Following | `ema_cross`, `supertrend` |
-| Portfolio & Rebalancing | `rebalance`, `market_cap`, `dca_scheduler` |
+| Grid / Market Making | `simple_grid`, `boll_grid`, `skewed_grid`, `grid_strike`, `fixed_maker`, `cross_maker`, `cross_depth_maker`, `cross_fixed_maker`, `pure_market_making`, `pmm_dynamic`, `avellaneda_mm_v2`, `glft_mm`, `simplified_glft_mm`, `obi_mm`, `basis_mm`, `apt_mm`, `queue_mm`, `perpetual_mm`, `cross_exchange_mm`, `liquidity_mining`, `dman_v3` |
+| Trend Following | `ema_cross`, `supertrend`, `adx_trend`, `ichimoku`, `darvas_box`, `dual_thrust`, `macd_bb`, `bb_keltner_squeeze` |
+| Mean Reversion & Momentum | `mean_reversion`, `momentum_factor`, `cvd_divergence`, `bollinger_v2` |
+| Arbitrage | `amm_arb`, `spot_perp_arb`, `stat_arb` |
+| Hedging | `hedge`, `hedge_grid` |
+| Execution Algorithms | `twap_executor`, `vwap_executor`, `dca_executor` |
+| Portfolio & Rebalancing | `rebalance`, `market_cap`, `dca_scheduler`, `dca` |
 | Risk & Operations | `sentinel`, `autoborrow`, `balance_align`, `convert`, `deposit_transfer` |
-| Signals & Analytics | `irr`, `nav_recorder`, `premium_monitor`, `random_entry`, `xfunding_lite` |
+| Signals & Analytics | `irr`, `nav_recorder`, `premium_monitor`, `xfunding_lite` |
+| Simulation & Testing | `random_entry` |
 
 All strategies are original LongTrader implementations and depend only on `ports::{TradingGateway, MarketDataSource}` (and, where noted, the extended `FundingRateSource` / `VenueOpInvoker` / `WalletGateway` caps). Transport selection lives in `adapters/`. See [docs/strategy-author-guide.md](docs/strategy-author-guide.md) to write your own.
+
+`dca` is the historical alias of `dca_scheduler`; both names are accepted so existing configs keep working.
+
+### Pre-trade risk gate
+
+Every order a strategy submits passes through an optional pre-trade gate before it reaches a venue. It is configured under `[risk]` and is **off by default** — an absent or empty section is a pass-through with no allocation on the hot path.
+
+```toml
+[risk]
+max_order_notional = "50000"   # reject one order priced above this
+max_order_qty = "1"            # reject one order sized above this
+max_net_qty_per_symbol = "5"   # reject when a symbol's resting exposure would exceed this
+max_open_orders = 200          # reject once this many resting orders are outstanding
+max_orders_per_minute = 120    # reject once the submission rate exceeds this
+```
+
+A rejection is returned to the strategy as a `PortError` and never reaches the venue; cancel and close paths are always allowed so a kill switch can never be blocked by the gate. See [docs/risk-controls.md](docs/risk-controls.md).
 
 ---
 
@@ -282,6 +304,7 @@ Workspace rules: root `[workspace.dependencies]` carries numeric versions only (
 - [Bare Protocol Guide](docs/bare-protocol-guide.md) — ConnectRPC wire format, auth, and streaming for non-SDK clients.
 - [Strategy Author Guide](docs/strategy-author-guide.md) — build and register a portable strategy.
 - [Contract Style Guide](docs/contract-style-guide.md) — enum/timestamp/pagination/money/error conventions.
+- [Risk Controls](docs/risk-controls.md) — the pre-trade risk gate: limits, exposure accounting and bypass rules.
 - [FAQ](docs/faq.md) — venues, tokens, upgrade path.
 
 ---

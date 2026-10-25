@@ -11,6 +11,7 @@ pub mod envelope;
 pub mod indicators;
 pub mod overflow;
 pub mod ports;
+pub mod risk;
 pub mod session;
 pub mod state_store;
 pub mod strategies;

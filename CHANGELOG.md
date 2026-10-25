@@ -43,8 +43,31 @@ version (0.x.0).
   exit on one poll and open the short on a later one. Both legs are now submitted
   in the same cycle, as two orders of `qty` in the same direction rather than one
   order of `2 * qty`, which is the only form correct on both netting and hedging
-  venues. `Phase` is committed to `Flat` between the legs so a refused second leg
+  venues.   `Phase` is committed to `Flat` between the legs so a refused second leg
   is recoverable.
+- **Worker: optional pre-trade risk gate.** Every mainstream strategy host
+  leaves this layer out or charges for it — Hummingbot runs one bot per install
+  and cannot reconcile net exposure across them, and NautilusTrader ships its
+  risk engine behind the paid Pro tier. The gate sits between a strategy and its
+  `TradingGateway`, so it applies to every strategy in every language, and it is
+  off until configured. `[risk]` accepts `max_order_qty`, `max_order_notional`,
+  `max_orders_per_minute`, `max_open_orders` and `max_net_qty_per_symbol`:
+  - size and rate limits are decided from the request alone and cost nothing.
+    The rate limit is a continuously refilled token bucket (exact at any rate,
+    including one order per minute) and a refusal never spends rate budget;
+  - the two exposure limits are measured against the venue's own resting orders,
+    read once per submission, so they cannot drift as orders fill. Without that
+    read they fail closed. `max_net_qty_per_symbol` is net, not gross, so a
+    two-sided quote cancels out and keeps quoting.
+  - a batch is all-or-nothing, and cancel/close paths are never gated — a risk
+    control must not be able to hold the kill switch shut.
+  An absent `[risk]` table does not build the decorator at all, so the default
+  costs nothing on the hot path. See [docs/risk-controls.md](docs/risk-controls.md).
+- **Docs: both READMEs now list every registered strategy.** The tables named
+  22 of the 55 strategies the registry can build, so a reader comparing
+  frameworks counted a third of the library. The set is now pinned by tests in
+  `longtrader-catalog` that read both READMEs at test time and compare them
+  against `WORKER_STRATEGY_IDS`, so the tables cannot drift again.
 - **Contract (breaking): the terminal surface converged onto the canonical
   services.** `terminal.v1` had grown a near-complete second copy of the
   contract, with its own string-decimal payloads, its own `Side`/`OrderType`/

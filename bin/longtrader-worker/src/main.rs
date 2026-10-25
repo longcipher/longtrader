@@ -11,6 +11,7 @@ use longtrader_worker::{
         FundingRateSource, MarketDataSource, TradingGateway, TriggerOrderGateway, VenueOpInvoker,
         WalletGateway,
     },
+    risk::RiskGateway,
     session::{Capabilities, SessionManager},
     strategies::{self, StrategyContext},
 };
@@ -154,6 +155,18 @@ async fn start_with_ports(
     config: &Config,
     token: &str,
 ) -> Result<()> {
+    // The gate is off until configured: an unconfigured set must not cost
+    // anything on the hot path, so the decorator is not built at all. When it
+    // is built, it also serves the control plane — which is safe because the
+    // cancel and close paths are never gated, so a limit can never hold the
+    // kill switch shut.
+    let limits = config.risk.limits();
+    let gateway: Arc<dyn TradingGateway> = if limits.is_enabled() {
+        tracing::info!(?limits, "pre-trade risk gate enabled");
+        Arc::new(RiskGateway::new(gateway, limits))
+    } else {
+        gateway
+    };
     let ctx = StrategyContext {
         config: config.clone(),
         gateway: gateway.clone(),

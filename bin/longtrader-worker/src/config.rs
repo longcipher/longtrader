@@ -38,7 +38,43 @@ pub struct Config {
     /// (`WorkerSessionService` + unified trading/market proxies).
     #[serde(default)]
     pub listen_endpoint: Option<String>,
+    /// Optional pre-trade risk gate. Absent (or all-`None`) means every
+    /// submission reaches the venue unmeasured — see [`crate::risk`].
+    #[serde(default)]
+    pub risk: RiskConfig,
     pub strategy: StrategyConfig,
+}
+
+/// The `[risk]` table: one optional limit per row, `None` meaning "not
+/// enforced". Quantities are `rust_decimal` decimals, written as strings like
+/// every other decimal in this config so a limit is exact.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RiskConfig {
+    #[serde(default)]
+    pub max_order_qty: Option<Decimal>,
+    #[serde(default)]
+    pub max_order_notional: Option<Decimal>,
+    #[serde(default)]
+    pub max_orders_per_minute: Option<u32>,
+    #[serde(default)]
+    pub max_open_orders: Option<u32>,
+    #[serde(default)]
+    pub max_net_qty_per_symbol: Option<Decimal>,
+}
+
+impl RiskConfig {
+    /// The gate's view of these limits.
+    #[must_use]
+    pub const fn limits(&self) -> crate::risk::RiskLimits {
+        crate::risk::RiskLimits {
+            max_order_qty: self.max_order_qty,
+            max_order_notional: self.max_order_notional,
+            max_orders_per_minute: self.max_orders_per_minute,
+            max_open_orders: self.max_open_orders,
+            max_net_qty_per_symbol: self.max_net_qty_per_symbol,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -538,6 +574,82 @@ mod tests {
         let err = Config::load(&path).expect_err("unknown backend must fail load");
         let chain = format!("{err:?}");
         assert!(chain.contains("custom"), "{chain}");
+    }
+
+    // -----------------------------------------------------------------------
+    // risk gate
+    // -----------------------------------------------------------------------
+
+    /// A config with `[risk]` as a top-level table, before `[strategy]`.
+    fn config_with_risk(risk_toml: &str) -> Config {
+        let body = format!(
+            "daemon_endpoint = \"http://127.0.0.1:8810\"\n{risk_toml}\n\
+             [strategy]\ntype = \"simple_grid\"\n"
+        );
+        toml::from_str(&body).expect("config parses")
+    }
+
+    /// The gate is off by default: a config that never mentions `[risk]` must
+    /// behave exactly as it did before the gate existed.
+    #[test]
+    fn an_absent_risk_section_leaves_the_gate_disabled() {
+        let config = full_config("");
+        assert!(!config.risk.limits().is_enabled());
+        assert!(!config.risk.limits().needs_book());
+    }
+
+    /// The documented `[risk]` table parses into the limits the gate enforces.
+    /// Decimals arrive as strings, so a quantity never passes through `f64`.
+    #[test]
+    fn a_documented_risk_section_parses_into_limits() {
+        let config = config_with_risk(
+            "[risk]\nmax_order_qty = \"1\"\nmax_order_notional = \"50000\"\n\
+             max_orders_per_minute = 120\nmax_open_orders = 200\n\
+             max_net_qty_per_symbol = \"5\"\n",
+        );
+        let limits = config.risk.limits();
+        assert!(limits.is_enabled());
+        assert!(limits.needs_book());
+        assert_eq!(limits.max_order_qty, Some(dec!(1)));
+        assert_eq!(limits.max_order_notional, Some(dec!(50000)));
+        assert_eq!(limits.max_orders_per_minute, Some(120));
+        assert_eq!(limits.max_open_orders, Some(200));
+        assert_eq!(limits.max_net_qty_per_symbol, Some(dec!(5)));
+    }
+
+    /// A limit is opt-in per row: setting one must not silently arm the others,
+    /// and a local-only section must not make the gate pay for a book read.
+    #[test]
+    fn unset_risk_limits_stay_unset() {
+        let config = config_with_risk("[risk]\nmax_order_qty = \"1\"\n");
+        let limits = config.risk.limits();
+        assert_eq!(limits.max_order_qty, Some(dec!(1)));
+        assert_eq!(limits.max_order_notional, None);
+        assert_eq!(limits.max_orders_per_minute, None);
+        assert_eq!(limits.max_open_orders, None);
+        assert_eq!(limits.max_net_qty_per_symbol, None);
+        assert!(limits.is_enabled());
+        assert!(!limits.needs_book());
+    }
+
+    /// An empty `[risk]` table is a pass-through, not an error: an operator who
+    /// adds the header first and fills it in later must not break startup.
+    #[test]
+    fn an_empty_risk_section_is_a_pass_through() {
+        let config = config_with_risk("[risk]\n");
+        assert!(!config.risk.limits().is_enabled());
+    }
+
+    /// A misspelled limit is a config mistake, not a silently ignored one — the
+    /// gate would run with a limit the operator believes is armed.
+    #[test]
+    fn a_misspelled_risk_limit_is_rejected() {
+        let err = toml::from_str::<Config>(
+            "daemon_endpoint = \"http://x:1\"\n[risk]\nmax_order_size = \"1\"\n\
+             [strategy]\ntype = \"simple_grid\"\n",
+        )
+        .expect_err("an unknown risk key must be reported");
+        assert!(err.to_string().contains("max_order_size"), "{err}");
     }
 
     // -----------------------------------------------------------------------

@@ -653,3 +653,101 @@ mod tests {
         }
     }
 }
+
+/// The README strategy tables are the catalogue a reader sees;
+/// [`WORKER_STRATEGY_IDS`] is the catalogue the worker can actually build.
+///
+/// The two drifted once — the tables listed 22 of 55 registered strategies, so
+/// a reader comparing frameworks counted a third of the strategy library — and
+/// nothing in the build noticed, because the tables are prose. The set equality
+/// is pinned here instead of left to review.
+#[cfg(test)]
+mod readme_sync_tests {
+    use std::{collections::BTreeSet, path::PathBuf};
+
+    use super::WORKER_STRATEGY_IDS;
+
+    /// Table rows of the `##` section whose heading contains `marker`.
+    ///
+    /// Only table rows are collected: a fenced ```` ```toml ```` block also
+    /// contains backticks, and counting those would make the extraction depend
+    /// on fence parity rather than on what the table actually lists.
+    fn strategy_table_rows<'a>(markdown: &'a str, marker: &str) -> Vec<&'a str> {
+        let mut lines =
+            markdown.lines().skip_while(|l| !(l.starts_with("## ") && l.contains(marker)));
+        assert!(lines.next().is_some(), "no `##` heading containing {marker:?}");
+        lines
+            .take_while(|l| !l.starts_with("## "))
+            .filter(|l| l.trim_start().starts_with('|'))
+            .collect()
+    }
+
+    /// Every `snake_case` identifier the section's tables mention in backticks.
+    fn documented_ids(markdown: &str, marker: &str) -> BTreeSet<String> {
+        let mut ids = BTreeSet::new();
+        for row in strategy_table_rows(markdown, marker) {
+            for span in row.split('`').skip(1).step_by(2) {
+                if is_snake_case_id(span) {
+                    ids.insert(String::from(span));
+                }
+            }
+        }
+        ids
+    }
+
+    /// `snake_case`, the shape every strategy id has; anything else in backticks
+    /// is prose (`ports::TradingGateway`, `strategy.type`, a path) and is not a
+    /// strategy claim.
+    fn is_snake_case_id(id: &str) -> bool {
+        let Some(first) = id.chars().next() else { return false };
+        first.is_ascii_lowercase() &&
+            id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    }
+
+    /// Read at test time, not `include_str!`: a build-time embedding is not
+    /// re-run when only the README changes, so the guard would keep passing
+    /// against a stale copy.
+    fn readme(name: &str) -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(name);
+        std::fs::read_to_string(&path).expect("the README must be readable")
+    }
+
+    fn registered_ids() -> BTreeSet<String> {
+        WORKER_STRATEGY_IDS.iter().map(|id| String::from(*id)).collect()
+    }
+
+    #[test]
+    fn the_english_readme_names_exactly_the_registered_strategies() {
+        let documented = documented_ids(&readme("README.md"), "Strategies");
+        let registered = registered_ids();
+        assert!(!documented.is_empty(), "the README strategy table must not be empty");
+        assert_eq!(
+            documented, registered,
+            "README.md's strategy table must list exactly the registered strategies"
+        );
+    }
+
+    /// The Chinese README is a translation, not a summary: a reader who
+    /// switches language must not see a different strategy library.
+    #[test]
+    fn the_chinese_readme_names_exactly_the_registered_strategies() {
+        let documented = documented_ids(&readme("README.zh.md"), "策略");
+        let registered = registered_ids();
+        assert!(!documented.is_empty(), "the README strategy table must not be empty");
+        assert_eq!(
+            documented, registered,
+            "README.zh.md's strategy table must list exactly the registered strategies"
+        );
+    }
+
+    /// Both READMEs must agree with each other, so the two tests above cannot
+    /// pass by each matching a different half of the registry.
+    #[test]
+    fn the_two_readmes_name_the_same_strategies() {
+        assert_eq!(
+            documented_ids(&readme("README.md"), "Strategies"),
+            documented_ids(&readme("README.zh.md"), "策略"),
+            "README.md and README.zh.md must list the same strategies"
+        );
+    }
+}

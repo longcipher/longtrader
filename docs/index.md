@@ -16,6 +16,7 @@ hand-edited wrappers over generated stubs.
 > - [Bare Protocol Guide](bare-protocol-guide.md) — ConnectRPC wire format for clients without an SDK.
 > - [Strategy Author Guide](strategy-author-guide.md) — build and register a portable strategy.
 > - [Contract Style Guide](contract-style-guide.md) — enum/timestamp/pagination/money/error conventions (ADR).
+> - [Risk Controls](risk-controls.md) — the pre-trade risk gate: limits, exposure accounting, bypass rules.
 > - [FAQ](faq.md) — venues, tokens, versioning, production readiness.
 
 ## Packages

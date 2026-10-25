@@ -36,7 +36,7 @@
 | | |
 |---|---|
 | **契约优先 API** | `proto/longtrader/**` 定义了交易、行情、worker/会话、数据、回测、运维与流服务。`buf breaking` 守护每一个 PR。 |
-| **20+ 原生策略** | 网格 / 做市、趋势跟踪、组合再平衡、风控与运维，以及分析类策略 —— 各自隔离于 `ports.rs` 之后。 |
+| **55 个原生策略** | 网格 / 做市、趋势跟踪、套利、执行算法、组合再平衡、风控与运维，以及分析类策略 —— 各自隔离于 `ports.rs` 之后。 |
 | **确定性的会话控制面** | 基于租约的存活检测、原子化的 `ReconcileState`、按会话的 `KillSwitchPolicy`（`session` / `all` / `none`）。 |
 | **轻量且一致的 SDK** | Python、TypeScript 与 Go 的镜像，遵循同一套规范布局。生成代码永不手工修改。 |
 | **加固的策略宿主（worker）** | 仅使用 `tracing` 的可观测性、`eyre`/`thiserror` 的错误分层、`hpx` + `rustls` 传输、`tokio` 异步，以及在 `-D warnings` 下严格的 `clippy::pedantic`/`nursery` 检查。 |
@@ -240,13 +240,35 @@ Topics: `MARKET_LITE`, `MARKET_HEAVY`, `TRADING`, `RUNTIME`, `FUNDING`, `DERIVAT
 
 | 分类 | 策略 |
 |---|---|
-| 网格 / 做市 | `simple_grid`, `boll_grid`, `hedge_grid`, `fixed_maker`, `cross_maker`, `cross_depth_maker`, `cross_fixed_maker` |
-| 趋势跟踪 | `ema_cross`, `supertrend` |
-| 组合与再平衡 | `rebalance`, `market_cap`, `dca_scheduler` |
+| 网格 / 做市 | `simple_grid`, `boll_grid`, `skewed_grid`, `grid_strike`, `fixed_maker`, `cross_maker`, `cross_depth_maker`, `cross_fixed_maker`, `pure_market_making`, `pmm_dynamic`, `avellaneda_mm_v2`, `glft_mm`, `simplified_glft_mm`, `obi_mm`, `basis_mm`, `apt_mm`, `queue_mm`, `perpetual_mm`, `cross_exchange_mm`, `liquidity_mining`, `dman_v3` |
+| 趋势跟踪 | `ema_cross`, `supertrend`, `adx_trend`, `ichimoku`, `darvas_box`, `dual_thrust`, `macd_bb`, `bb_keltner_squeeze` |
+| 均值回归与动量 | `mean_reversion`, `momentum_factor`, `cvd_divergence`, `bollinger_v2` |
+| 套利 | `amm_arb`, `spot_perp_arb`, `stat_arb` |
+| 对冲 | `hedge`, `hedge_grid` |
+| 执行算法 | `twap_executor`, `vwap_executor`, `dca_executor` |
+| 组合与再平衡 | `rebalance`, `market_cap`, `dca_scheduler`, `dca` |
 | 风控与运维 | `sentinel`, `autoborrow`, `balance_align`, `convert`, `deposit_transfer` |
-| 信号与分析 | `irr`, `nav_recorder`, `premium_monitor`, `random_entry`, `xfunding_lite` |
+| 信号与分析 | `irr`, `nav_recorder`, `premium_monitor`, `xfunding_lite` |
+| 模拟与测试 | `random_entry` |
 
 所有策略均为原创的 LongTrader 实现，且仅依赖 `ports::{TradingGateway, MarketDataSource}`（及在注明之处，扩展的 `FundingRateSource` / `VenueOpInvoker` / `WalletGateway` 能力）。传输选择位于 `adapters/`。如需自行编写，请参阅 [docs/strategy-author-guide.md](docs/strategy-author-guide.md)。
+
+`dca` 是 `dca_scheduler` 的历史别名；两个名字都可接受，既有配置无需改动。
+
+### 交易前风控闸门
+
+策略提交的每一笔订单在到达场所之前，都会先经过一道可选的交易前闸门。它由 `[risk]` 配置，**默认关闭** —— 缺失或为空的节即为直通，热路径上不产生任何额外开销。
+
+```toml
+[risk]
+max_order_notional = "50000"   # 拒绝名义额高于此值的单笔订单
+max_order_qty = "1"            # 拒绝数量高于此值的单笔订单
+max_net_qty_per_symbol = "5"   # 某品种的挂单敞口将超过此值时拒绝
+max_open_orders = 200          # 未成交挂单达到此数量后拒绝
+max_orders_per_minute = 120    # 下单速率超过此值后拒绝
+```
+
+被拒绝的订单以 `PortError` 返回给策略，绝不会送达场所；撤单与平仓路径始终放行，因此熔断（kill switch）永远不会被闸门阻塞。详见 [docs/risk-controls.md](docs/risk-controls.md)。
 
 ---
 
@@ -278,6 +300,8 @@ just sdk-generate   # local stub generation (offline-safe via scripts/gen-proto.
 - [Getting Started](docs/getting-started.md) —— 安装、配置并运行你的第一个策略。
 - [Bare Protocol Guide](docs/bare-protocol-guide.md) —— 面向非 SDK 客户端的 ConnectRPC 线格式、认证与流式传输。
 - [Strategy Author Guide](docs/strategy-author-guide.md) —— 构建并注册一个可移植策略。
+- [Contract Style Guide](docs/contract-style-guide.md) —— 枚举 / 时间戳 / 分页 / 金额 / 错误的契约约定。
+- [Risk Controls](docs/risk-controls.md) —— 交易前风控闸门：限额、敞口记账与放行规则。
 - [FAQ](docs/faq.md) —— 场所（venue）、令牌（token）与升级路径。
 
 ---
