@@ -132,10 +132,15 @@ publish-go:
   cd sdks/go && go vet ./...
   cd sdks/go && go test ./...
 
-# Fail unless Cargo.toml, sdks/python/pyproject.toml and
-# sdks/typescript/package.json all carry the release version. The version
+# Fail unless the Cargo workspace carries the release version. The version
 # defaults to the current tag (`v` stripped); pass one explicitly for a local
 # dry run. Run by the release gate so a mismatched tag never ships.
+#
+# Only the Rust workspace is enforced: the tag IS the Rust version. The Python
+# (`sdks/python/pyproject.toml`) and TypeScript (`sdks/typescript/package.json`)
+# SDKs are versioned independently and published only when their own version is
+# new to the registry — bump them only when the SDK or the contract actually
+# changed. Their versions are printed here for visibility, never compared.
 check-release-versions version='':
   #!/usr/bin/env bash
   set -euo pipefail
@@ -146,16 +151,14 @@ check-release-versions version='':
   fi
   echo "release version: $version"
   cargo_v="$(awk '$0=="[workspace.package]"{s=1;next} s&&$1=="version"{gsub(/"/,"",$3);print $3;exit} s&&/^\[/{exit}' Cargo.toml)"
+  if [ "$cargo_v" != "$version" ]; then
+    echo "error: Cargo.toml version ($cargo_v) != release version ($version)" >&2
+    exit 1
+  fi
   py_v="$(grep -m1 '^version' sdks/python/pyproject.toml | sed -E 's/.*"([0-9.]+)".*/\1/')"
   ts_v="$(grep -m1 '"version"' sdks/typescript/package.json | sed -E 's/.*"([0-9.]+)".*/\1/')"
-  for kv in "Cargo.toml:$cargo_v" "sdks/python/pyproject.toml:$py_v" "sdks/typescript/package.json:$ts_v"; do
-    name="${kv%%:*}"; val="${kv##*:}"
-    if [ "$val" != "$version" ]; then
-      echo "error: $name version ($val) != release version ($version)" >&2
-      exit 1
-    fi
-  done
-  echo "ok: all manifest versions match $version"
+  echo "info: python SDK version ($py_v) and typescript SDK version ($ts_v) are independent of the tag"
+  echo "ok: Cargo.toml version matches $version"
 
 # Publish every language package (Rust -> PyPI -> npm)
 publish-all: publish-rs publish-py publish-ts

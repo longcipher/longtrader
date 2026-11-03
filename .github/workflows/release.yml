@@ -4,6 +4,14 @@ name: Release
 # TypeScript (npm) and Go (consumed directly from the git tag). Each publish job
 # is independent and gated on `gate`, so one language failing does not block the
 # others from shipping.
+#
+# Versioning model: the `vX.Y.Z` tag is the Rust workspace version
+# (`[workspace.package] version` in Cargo.toml) — Rust is the source of truth.
+# Python (`sdks/python/pyproject.toml`) and TypeScript
+# (`sdks/typescript/package.json`) carry their own independent versions and are
+# only (re)published when that version is new to the registry, i.e. bump the
+# SDK manifest only when the SDK or the contract actually changed. Go has no
+# registry version; it is consumed directly from the git tag.
 on:
   push:
     tags:
@@ -13,14 +21,28 @@ on:
       tag:
         description: "Tag to release (must already exist, e.g. v0.3.0)"
         required: true
+      force_python:
+        description: "Republish the Python SDK even if its version is already on PyPI"
+        required: false
+        default: false
+        type: boolean
+      force_typescript:
+        description: "Republish the TypeScript SDK even if its version is already on npm"
+        required: false
+        default: false
+        type: boolean
 
-# Needed so the changelog job can create the GitHub release.
+# `contents: write` so the changelog job can create the GitHub release;
+# `id-token: write` enables OIDC trusted publishing (PyPI / npm / crates.io)
+# when the registry is configured for it.
 permissions:
   contents: write
+  id-token: write
 
-# Never run two tag releases at once.
+# Never run two releases for the same tag at once. `github.ref` is the branch
+# on workflow_dispatch, so key on the input tag there.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.inputs.tag || github.ref }}
   cancel-in-progress: false
 
 env:
@@ -61,8 +83,10 @@ jobs:
       - name: Run CI checks
         run: just ci
 
-      - name: Verify release versions match the tag
-        run: just check-release-versions
+      - name: Verify Rust workspace version matches the tag
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          just check-release-versions "${tag#v}"
 
   # ---------------------------------------------------------------------------
   # Changelog + GitHub release (git-cliff). Depends on the gate so a broken tag
@@ -87,11 +111,15 @@ jobs:
         env:
           OUTPUT: CHANGELOG.md
 
+      # `tag_name` is required: on workflow_dispatch `github.ref` is the
+      # branch, not the tag, so the default would attach the release to the
+      # wrong ref. Prerelease detection reads the tag for the same reason.
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           body: ${{ steps.git-cliff.outputs.content }}
-          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}
+          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, 'alpha') || contains(github.event.inputs.tag || github.ref_name, 'beta') || contains(github.event.inputs.tag || github.ref_name, 'rc') }}
 
   # ---------------------------------------------------------------------------
   # Rust: crates.io, in dependency order (contract -> catalog -> proto ->
@@ -124,6 +152,10 @@ jobs:
   # ---------------------------------------------------------------------------
   # Python: PyPI via twine. `just publish-py` regenerates the (gitignored)
   # stubs, builds the sdist+wheel and uploads.
+  #
+  # The Python SDK is versioned independently from the tag: the upload is
+  # skipped when its manifest version is already on PyPI (e.g. a Rust-only
+  # release), unless `force_python` is set on a manual dispatch.
   # ---------------------------------------------------------------------------
   python:
     name: Publish Python SDK (PyPI)
@@ -148,15 +180,36 @@ jobs:
       - name: Install protobuf tooling
         run: pip install grpcio-tools protobuf
 
+      # The Python SDK has its own version: skip the upload when that version
+      # is already on PyPI (Rust-only release), unless forced via dispatch.
+      - name: Check if Python SDK version is already published
+        id: check
+        run: |
+          local_v="$(grep -m1 '^version' sdks/python/pyproject.toml | sed -E 's/.*"([0-9][^"]*)".*/\1/')"
+          published_v="$(curl -fsSL https://pypi.org/pypi/longtrader-sdk/json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])' 2>/dev/null || echo unknown)"
+          echo "local=$local_v published=$published_v"
+          if [ "${{ github.event.inputs.force_python }}" = "true" ]; then
+            echo "skip=false (forced)" >> "$GITHUB_OUTPUT"
+          elif [ "$published_v" = "$local_v" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and publish to PyPI
+        if: steps.check.outputs.skip != 'true'
         run: just publish-py
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          TWINE_NON_INTERACTIVE: "1"
 
   # ---------------------------------------------------------------------------
   # TypeScript: npmjs.com. `just publish-ts` regenerates the stubs, builds and
   # publishes. Auth comes from ~/.npmrc written from NPM_TOKEN.
+  #
+  # Same independent versioning as Python: skip when the manifest version is
+  # already on npm, unless `force_typescript` is set on a manual dispatch.
   # ---------------------------------------------------------------------------
   typescript:
     name: Publish TypeScript SDK (npm)
@@ -186,7 +239,22 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Check if TypeScript SDK version is already published
+        id: check
+        run: |
+          local_v="$(node -p "require('./sdks/typescript/package.json').version")"
+          published_v="$(npm view @longcipher/longtrader-sdk version 2>/dev/null || echo unknown)"
+          echo "local=$local_v published=$published_v"
+          if [ "${{ github.event.inputs.force_typescript }}" = "true" ]; then
+            echo "skip=false (forced)" >> "$GITHUB_OUTPUT"
+          elif [ "$published_v" = "$local_v" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and publish to npm
+        if: steps.check.outputs.skip != 'true'
         run: just publish-ts
 
   # ---------------------------------------------------------------------------
