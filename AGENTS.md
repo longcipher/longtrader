@@ -69,3 +69,11 @@ just mutation
 - `longtrader-worker` has `hotpath` and `hotpath-alloc` feature flags for profiling; they are off by default and must stay zero-cost when disabled.
 - The CLI writes pipeable JSON to stdout with errors and hints on stderr and a non-zero exit code on failure. Keep that split.
 - Property tests (`proptest`) are colocated in the crate they exercise and run in the ordinary `cargo test` path. Fuzz targets cover only the two places that parse bytes they did not produce: the Connect envelope decoder (`envelope`) and the dual-representation decimal codec (`decimal_codec`).
+
+## Release
+
+- A release is a single `vX.Y.Z` tag. `.github/workflows/release.yml` runs on tag push: it gates on `just ci`, generates `CHANGELOG.md` with git-cliff, creates the GitHub release, and publishes every language package.
+- All four manifests must agree on the version: the `v`-stripped tag, `[workspace.package] version` in `Cargo.toml`, `version` in `sdks/python/pyproject.toml`, and `version` in `sdks/typescript/package.json`. `just check-release-versions` enforces this locally and in the release gate; a mismatch fails the release.
+- Rust crates publish to crates.io in dependency order (`just publish-rs`, needs `CARGO_REGISTRY_TOKEN`); Python to PyPI (`just publish-py`, twine + `PYPI_API_TOKEN`); TypeScript to npm (`just publish-ts`, `NPM_TOKEN`). Go is consumed directly from the git tag (module path `github.com/longcipher/longtrader/sdks/go`) — `just publish-go` only verifies the module builds/vets/tests, there is no upload step.
+- Bump every manifest version as one commit before tagging, and never tag a commit whose versions disagree. A wire-breaking contract change also needs the `contract-breaking` PR label and the out-of-repo backends released in lockstep (see `CHANGELOG.md`).
+- `cliff.toml` drives the changelog from conventional commits; do not hand-edit the generated release sections.

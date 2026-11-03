@@ -79,34 +79,83 @@ check:
 publish-check:
   cargo publish --workspace --dry-run --allow-dirty --registry crates-io
 
-# Publish all Rust crates to crates.io in dependency order
+# Publish every Rust crate to crates.io, in dependency order.
 #
 # We publish per-crate (not `cargo publish --workspace`) because path-dependency
 # siblings must already be resolvable from the registry when the next crate is
-# verified. `--config source.crates-io.replace-with=crates-io` disables any local
-# crates.io mirror so the just-published sibling is found immediately on the real
-# crates.io index (the default `cargo publish --workspace` flow breaks behind a
-# mirror that lags the upload).
+# verified. The order below is the crate dependency order:
+# contract -> catalog -> proto -> cli -> worker (worker depends on all three
+# libraries, so it goes last). `sleep 20` lets the index propagate between
+# publishes. `--registry crates-io` disables any local crates.io mirror so the
+# just-published sibling is found immediately on the real index (a mirror that
+# lags the upload otherwise breaks the next publish).
 publish-rs:
-  cargo publish --registry crates-io  -p longtrader-contract
+  cargo publish --registry crates-io -p longtrader-contract
   sleep 20
-  cargo publish --registry crates-io  -p longtrader-proto
+  cargo publish --registry crates-io -p longtrader-catalog
   sleep 20
-  cargo publish --registry crates-io  -p longtrader-cli
+  cargo publish --registry crates-io -p longtrader-proto
   sleep 20
-  cargo publish --registry crates-io  -p longtrader-worker
+  cargo publish --registry crates-io -p longtrader-cli
+  sleep 20
+  cargo publish --registry crates-io -p longtrader-worker
 
-# Build sdist+wheel and upload to PyPI
+# Build sdist+wheel and upload to PyPI.
+#
+# `twine upload` authenticates from `TWINE_USERNAME`/`TWINE_PASSWORD`; in CI set
+# the password to a PyPI API token and the username to `__token__`. `sdk-generate`
+# regenerates the Python protobuf stubs first (they are gitignored).
 publish-py: sdk-generate
   cd sdks/python && rm -rf dist && \
     pip install --quiet build twine && \
     python -m build && \
     twine upload dist/*
 
-# Build and publish the TypeScript SDK to npm (npmjs.com)
+# Build and publish the TypeScript SDK to npm (npmjs.com).
+#
+# Authenticates from `~/.npmrc` (the release job writes the
+# `//registry.npmjs.org/:_authToken` entry from `NPM_TOKEN`). `sdk-generate`
+# regenerates the TS stubs first; `prepublishOnly` runs `npm run build`.
 publish-ts: sdk-generate
   cd sdks/typescript && npm install && npm run build && \
     npm publish --access public --registry https://registry.npmjs.org/
+
+# Go SDK release gate.
+#
+# Go modules are consumed directly from the git tag (module path
+# github.com/longcipher/longtrader/sdks/go): there is no registry to upload to,
+# so "releasing" Go means the vX.Y.Z tag exists and the module still builds,
+# vets and tests cleanly at that commit. The release job runs this; there is no
+# Go upload step.
+publish-go:
+  cd sdks/go && go build ./...
+  cd sdks/go && go vet ./...
+  cd sdks/go && go test ./...
+
+# Fail unless Cargo.toml, sdks/python/pyproject.toml and
+# sdks/typescript/package.json all carry the release version. The version
+# defaults to the current tag (`v` stripped); pass one explicitly for a local
+# dry run. Run by the release gate so a mismatched tag never ships.
+check-release-versions version='':
+  #!/usr/bin/env bash
+  set -euo pipefail
+  if [ -z "{{version}}" ]; then
+    version="$(git describe --tags --abbrev=0 | sed 's/^v//')"
+  else
+    version="{{version}}"
+  fi
+  echo "release version: $version"
+  cargo_v="$(awk '$0=="[workspace.package]"{s=1;next} s&&$1=="version"{gsub(/"/,"",$3);print $3;exit} s&&/^\[/{exit}' Cargo.toml)"
+  py_v="$(grep -m1 '^version' sdks/python/pyproject.toml | sed -E 's/.*"([0-9.]+)".*/\1/')"
+  ts_v="$(grep -m1 '"version"' sdks/typescript/package.json | sed -E 's/.*"([0-9.]+)".*/\1/')"
+  for kv in "Cargo.toml:$cargo_v" "sdks/python/pyproject.toml:$py_v" "sdks/typescript/package.json:$ts_v"; do
+    name="${kv%%:*}"; val="${kv##*:}"
+    if [ "$val" != "$version" ]; then
+      echo "error: $name version ($val) != release version ($version)" >&2
+      exit 1
+    fi
+  done
+  echo "ok: all manifest versions match $version"
 
 # Publish every language package (Rust -> PyPI -> npm)
 publish-all: publish-rs publish-py publish-ts

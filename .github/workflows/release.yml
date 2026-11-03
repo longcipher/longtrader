@@ -1,0 +1,211 @@
+name: Release
+
+# One workflow covers every language: Rust (crates.io), Python (PyPI),
+# TypeScript (npm) and Go (consumed directly from the git tag). Each publish job
+# is independent and gated on `gate`, so one language failing does not block the
+# others from shipping.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (must already exist, e.g. v0.3.0)"
+        required: true
+
+# Needed so the changelog job can create the GitHub release.
+permissions:
+  contents: write
+
+# Never run two tag releases at once.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_RUSTC_WRAPPER: ""
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate: the tagged commit must be clean before anything ships.
+  # Mirrors `just ci` (fmt + lint + test + build, incl. the buf contract lint)
+  # and verifies every language manifest agrees on the version.
+  # ---------------------------------------------------------------------------
+  gate:
+    name: Release gate (CI + version check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          # workflow_dispatch passes an explicit tag; a tag push uses github.ref.
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          toolchain: nightly
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: bufbuild/buf-setup-action@v1
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-shear,cargo-sort,typos-cli,rumdl,cargo-workspace-inheritance-check
+
+      - name: Run CI checks
+        run: just ci
+
+      - name: Verify release versions match the tag
+        run: just check-release-versions
+
+  # ---------------------------------------------------------------------------
+  # Changelog + GitHub release (git-cliff). Depends on the gate so a broken tag
+  # never gets a published release.
+  # ---------------------------------------------------------------------------
+  changelog:
+    name: Changelog + GitHub release
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Generate changelog
+        uses: orhun/git-cliff-action@v4
+        id: git-cliff
+        with:
+          config: cliff.toml
+          args: --verbose --latest --strip header
+        env:
+          OUTPUT: CHANGELOG.md
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          body: ${{ steps.git-cliff.outputs.content }}
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}
+
+  # ---------------------------------------------------------------------------
+  # Rust: crates.io, in dependency order (contract -> catalog -> proto ->
+  # cli -> worker). `just publish-rs` already orders them; this job just runs it.
+  # ---------------------------------------------------------------------------
+  rust:
+    name: Publish Rust crates (crates.io)
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Publish to crates.io
+        run: just publish-rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Python: PyPI via twine. `just publish-py` regenerates the (gitignored)
+  # stubs, builds the sdist+wheel and uploads.
+  # ---------------------------------------------------------------------------
+  python:
+    name: Publish Python SDK (PyPI)
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: bufbuild/buf-setup-action@v1
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # grpcio-tools is required by `just sdk-generate` (Python stubs).
+      - name: Install protobuf tooling
+        run: pip install grpcio-tools protobuf
+
+      - name: Build and publish to PyPI
+        run: just publish-py
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # TypeScript: npmjs.com. `just publish-ts` regenerates the stubs, builds and
+  # publishes. Auth comes from ~/.npmrc written from NPM_TOKEN.
+  # ---------------------------------------------------------------------------
+  typescript:
+    name: Publish TypeScript SDK (npm)
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: bufbuild/buf-setup-action@v1
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      # Installs the @bufbuild/protoc-gen-es dev dep that `sdk-generate` needs.
+      - name: Install Node dependencies
+        run: cd sdks/typescript && npm ci
+
+      - name: Configure npm auth
+        run: echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Build and publish to npm
+        run: just publish-ts
+
+  # ---------------------------------------------------------------------------
+  # Go: consumed directly from the git tag (module path
+  # github.com/longcipher/longtrader/sdks/go), so there is no registry upload.
+  # The "release" only verifies the module still builds, vets and tests.
+  # ---------------------------------------------------------------------------
+  go:
+    name: Verify Go SDK at tag
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Verify Go module
+        run: just publish-go
