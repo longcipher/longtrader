@@ -275,5 +275,9 @@ jobs:
         with:
           go-version: stable
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
       - name: Verify Go module
         run: just publish-go
