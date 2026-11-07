@@ -1,0 +1,51 @@
+name: CodSpeed
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Lets CodSpeed trigger backtest runs to build initial performance history.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OpenID Connect authentication with CodSpeed
+
+env:
+  CARGO_TERM_COLOR: always
+  # `.cargo/config.toml` sets `rustc-wrapper = "kache"`, which is not installed
+  # on CI runners.
+  CARGO_BUILD_RUSTC_WRAPPER: ""
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Benchmarks: divan suites in `longtrader-contract` (envelope framing, decimal
+  # codec, protobuf encode/decode) and `longtrader-worker` (indicators), run
+  # under CodSpeed's CPU simulation instrument.
+  # ---------------------------------------------------------------------------
+  benchmarks:
+    name: Run benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup rust toolchain, cache and cargo-codspeed binary
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: stable
+          cache-target: release
+          bins: cargo-codspeed
+
+      # `longtrader-contract`'s build script compiles the contract with protoc.
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the benchmark targets
+        run: cargo codspeed build -m simulation -p longtrader-contract -p longtrader-worker
+
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          run: cargo codspeed run

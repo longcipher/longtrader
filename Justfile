@@ -28,6 +28,10 @@ lint: proto-lint
 test:
   cargo test --all-features
 
+# Run the divan benchmark suites (contract codecs + worker indicators)
+bench:
+  RUSTC_WRAPPER= cargo bench -p longtrader-contract -p longtrader-worker
+
 # Run mutation tests with cargo-mutants
 mutation:
   cargo mutants
