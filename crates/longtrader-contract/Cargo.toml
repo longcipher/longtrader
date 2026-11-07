@@ -29,7 +29,12 @@ thiserror.workspace = true
 connectrpc-build = { workspace = true }
 
 [dev-dependencies]
+divan.workspace = true
 proptest.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "contract"
+harness = false

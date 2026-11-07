@@ -8,6 +8,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Contract: buf v2](https://img.shields.io/badge/contract-buf%20v2-9cf.svg)](proto/)
 [![CI](https://img.shields.io/badge/CI-clippy%20%2B%20tests%20%2B%20buf%20breaking-2ea043.svg)](#development)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/longcipher/longtrader?utm_source=badge)
 [![Crates.io: longtrader-cli](https://img.shields.io/crates/v/longtrader-cli.svg)](https://crates.io/crates/longtrader-cli)
 [![PyPI: longtrader-sdk](https://img.shields.io/pypi/v/longtrader-sdk.svg)](https://pypi.org/project/longtrader-sdk/)
 [![npm: @longcipher/longtrader-sdk](https://img.shields.io/npm/v/@longcipher/longtrader-sdk.svg)](https://www.npmjs.com/package/@longcipher/longtrader-sdk)
@@ -283,6 +284,7 @@ just fix        # rumdl --fix + clippy --fix
 just mutation   # cargo mutants (focused on library crates)
 just ci         # lint + test + build (mirrors CI)
 just ci-all     # the above plus every SDK lint + test (needs Go/Node/Python)
+just bench      # divan benchmarks (contract codecs + worker indicators), tracked by CodSpeed
 ```
 
 Contract toolchain:

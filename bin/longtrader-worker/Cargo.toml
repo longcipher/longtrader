@@ -53,6 +53,7 @@ bytes = "1.12.1"
 # `client` powers the end-to-end router tests in `session::server`, which drive
 # the real Connect wire path through the generated clients.
 connectrpc = { workspace = true, features = ["axum", "client"] }
+divan.workspace = true
 # Registry-vs-catalog consistency test only; the worker binary never renders UI.
 longtrader-catalog.workspace = true
 proptest.workspace = true
@@ -61,3 +62,7 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "indicators"
+harness = false

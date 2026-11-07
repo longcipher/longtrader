@@ -20,6 +20,7 @@ clap = "4.6.7"
 color-eyre = "0.6.5"
 connectrpc = "0.9.1"
 connectrpc-build = "0.9.0"
+divan = { version = "6.0.0", package = "codspeed-divan-compat" }
 futures-util = "0.3.34"
 gloo-net = "0.7.0"
 hotpath = "0.30.3"
