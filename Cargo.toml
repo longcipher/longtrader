@@ -9,6 +9,7 @@ edition = "2024"
 license = "Apache-2.0"
 authors = ["LongCipher"]
 repository = "https://github.com/longcipher/longtrader"
+rust-version = "1.100"
 
 [workspace.dependencies]
 async-stream = "0.3.6"
@@ -220,12 +221,15 @@ unreachable_pub = "warn"
 unused_must_use = "deny"
 semicolon_in_expressions_from_macros = "allow"
 future_incompatible = { level = "allow", priority = 10 }
+raw_borrows_via_references = "warn"
 
 [workspace.lints.rustdoc]
 all = "warn"
 
-[workspace.metadata.cargo-shear]
-ignored = []
+# Cargo's own lint system (shipped in 1.100): the only unused-dependency
+# check. It runs as part of a normal all-targets `cargo check`/`clippy`.
+[workspace.lints.cargo]
+unused_dependencies = "warn"
 
 [profile.bench]
 debug = true

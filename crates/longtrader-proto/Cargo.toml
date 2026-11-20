@@ -11,9 +11,7 @@ description = "Connect-RPC protocol definitions and client for longtrader.termin
 documentation = "https://docs.rs/longtrader-proto"
 keywords = ["trading", "connectrpc", "protobuf", "grpc", "finance"]
 categories = ["api-bindings", "finance"]
-
-[package.metadata.cargo-shear]
-ignored = ["serde"]
+rust-version.workspace = true
 
 [features]
 default = []

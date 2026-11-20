@@ -20,7 +20,6 @@ lint: proto-lint
   cargo sort -w -g -c
   cargo +nightly fmt --all -- --check
   RUSTC_WRAPPER= cargo +nightly clippy --all -- -D warnings
-  cargo shear
   cargo workspace-inheritance-check
   scripts/sync-contract-proto.sh --check
   just check-mutation-scope
@@ -319,7 +318,6 @@ clean:
 # Install all required development tools
 setup:
   cargo install cargo-mutants
-  cargo install cargo-shear
   cargo install cargo-sort
   cargo install cargo-workspace-inheritance-check
   cargo install typos-cli
@@ -353,10 +351,6 @@ test-nextest:
 # Run miri on unsafe code
 miri:
   cargo +nightly miri test --all-features
-
-# Check for unused dependencies
-unused-deps:
-  cargo shear --check
 
 # Update all dependencies
 update-deps:

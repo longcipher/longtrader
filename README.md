@@ -127,7 +127,7 @@ sdks/{python,typescript,go}/  # thin wrappers over generated stubs (contract/ses
 Rust stable + nightly (`rustfmt`/`clippy`), [`just`](https://github.com/casey/just), and [`buf`](https://buf.build) (for contract lint/generation).
 
 ```bash
-just setup          # installs cargo-mutants, cargo-shear, cargo-sort, typos, rumdl
+just setup          # installs cargo-mutants, cargo-sort, typos, rumdl
 just check          # cargo check --all-targets --all-features
 just lint           # typos + rumdl + cargo sort/fmt + clippy -D warnings + shear
 just test           # cargo test --all-features (unit + proptest)

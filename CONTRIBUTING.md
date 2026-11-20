@@ -3,7 +3,7 @@
 ## Quick start
 
 ```bash
-just setup        # typos, rumdl, cargo-shear, cargo-sort, cargo-mutants
+just setup        # typos, rumdl, cargo-sort, cargo-mutants
 just check        # cargo check --all-targets --all-features
 just lint         # typos + rumdl + cargo sort/fmt + clippy -D warnings + shear
 just test         # cargo test --all-features

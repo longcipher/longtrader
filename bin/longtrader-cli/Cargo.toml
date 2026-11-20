@@ -11,6 +11,7 @@ description = "Connect-RPC CLI client for longtrader-api (longtrader.terminal.v1
 documentation = "https://docs.rs/longtrader-cli"
 keywords = ["trading", "cli", "connectrpc", "finance", "grpc"]
 categories = ["command-line-utilities", "finance"]
+rust-version.workspace = true
 
 [[bin]]
 name = "longtrader"

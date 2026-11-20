@@ -11,6 +11,7 @@ description = "Local strategy host running portable strategies against pluggable
 documentation = "https://docs.rs/longtrader-worker"
 keywords = ["trading", "strategy", "connectrpc", "finance", "backtesting"]
 categories = ["finance", "api-bindings"]
+rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"

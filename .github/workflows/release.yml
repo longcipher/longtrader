@@ -78,7 +78,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: just,cargo-shear,cargo-sort,typos-cli,rumdl,cargo-workspace-inheritance-check
+          tool: just,cargo-sort,typos-cli,rumdl,cargo-workspace-inheritance-check
 
       - name: Run CI checks
         run: just ci

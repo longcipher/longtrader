@@ -40,7 +40,7 @@ temp file and run `cargo mutants --in-diff <diff-file>` for that file only, with
 60 mutants / 300 s. Never add a whole-repo mutation recipe: `just check-mutation-scope` fails
 `just lint` when an unbounded mutation command appears in a build or CI file.
 
-`just lint` is exactly the tool set CI installs: `typos`, `rumdl`, `cargo sort -w -g -c`, `cargo +nightly fmt --check`, `cargo +nightly clippy --all -- -D warnings`, `cargo shear`, `cargo workspace-inheritance-check` and `scripts/sync-contract-proto.sh --check`. `just lint` also runs `just proto-lint`, so `buf` must be on PATH.
+`just lint` is exactly the tool set CI installs: `typos`, `rumdl`, `cargo sort -w -g -c`, `cargo +nightly fmt --check`, `cargo +nightly clippy --all -- -D warnings`, Cargo's native `unused_dependencies` lint, `cargo workspace-inheritance-check` and `scripts/sync-contract-proto.sh --check`. `just lint` also runs `just proto-lint`, so `buf` must be on PATH.
 
 ## Workspace rules
 
@@ -49,12 +49,15 @@ temp file and run `cargo mutants --in-diff <diff-file>` for that file only, with
 - The contract style guide (`docs/contract-style-guide.md`) is binding: one authority per enum, RFC-3339 timestamps, money as `rust_decimal`, one error model. Read it before adding a field.
 - Never hand-edit generated code in `sdks/*/src/gen`, `sdks/python/longtrader_sdk/proto` or `sdks/go/gen`. Regenerate with `just sdk-generate`.
 - Never hand-type dependency versions. Add per-crate deps with `cargo add <crate> -p <crate>`. Shared deps go into root `[workspace.dependencies]` (numeric versions only, no default features) and are referenced with `dep = { workspace = true }`.
-- Sub-crates inherit `version`/`edition`/`license`/`authors`/`repository` via `workspace = true` and must set `[lints] workspace = true`. `cargo workspace-inheritance-check` enforces this in `just lint` and `just check`.
+- Sub-crates inherit `version`/`edition`/`license`/`authors`/`repository`/`rust-version` via `workspace = true` and must set `[lints] workspace = true`. `cargo workspace-inheritance-check` enforces this in `just lint` and `just check`.
 - There is no `rust-toolchain.toml`; CI installs a nightly toolchain, so use `cargo +nightly fmt` and `cargo +nightly clippy` exactly as the Justfile does.
 - `.cargo/config.toml` sets `rustc-wrapper = "kache"`, which breaks clippy's lints and `--fix`: prefix clippy with `RUSTC_WRAPPER=` (the Justfile does).
 - When a native link fails with undefined symbols that survive `cargo clean -p <crate>`, always suspect a poisoned kache `build_script_run` entry: confirm the dep's static lib in `target/debug/build/` is truncated (`ar t`), match it by sha256 to a blob under the kache store, evict that entry, then rebuild.
 - Clippy is `pedantic` plus a curated nursery set; `unwrap_used` and `print_stdout`/`print_stderr` are denied, `expect_used` is allowed, `allow_attributes` is allowed at priority -10.
-- `cargo shear` is told to ignore the crates that only exist for the generated contract (`[package.metadata.cargo-shear] ignored` in `longtrader-contract` and `longtrader-proto`).
+- Cargo's native `unused_dependencies` lint replaces the third-party checker and covers the crates that exist only for the generated contract (`longtrader-contract` and `longtrader-proto`); their ignore lists are gone.
+- Workspace MSRV is Rust 1.100. Prefer newly stabilized features and APIs over older workarounds; do not add feature gates for anything already stable in 1.100.
+- `[workspace.lints.cargo]` enables Cargo's native `unused_dependencies` lint, the only unused-dependency check; do not reintroduce a third-party checker. Its level is `warn`, and `.cargo/config.toml` sets `build.warnings = "deny"`, so a finding fails the gate.
+- `.cargo/config.toml` sets resolver `incompatible-rust-versions = "fallback"` (MSRV-aligned resolution) and `registry.global-min-publish-age = "5 days"` (Rust 1.100 dependency cooldown); keep both.
 
 ## Dependency choices
 

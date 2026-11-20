@@ -35,7 +35,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: just,cargo-shear,cargo-sort,typos-cli,rumdl,cargo-workspace-inheritance-check
+          tool: just,cargo-sort,typos-cli,rumdl,cargo-workspace-inheritance-check
 
       # `just ci` is the Rust gate plus the contract lint (`just lint` folds
       # in `buf lint`). The Go, Python and TypeScript SDKs are checked by their

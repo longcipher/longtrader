@@ -11,9 +11,7 @@ readme = "../../README.md"
 documentation = "https://docs.rs/longtrader-contract"
 keywords = ["trading", "protobuf", "connectrpc", "finance", "grpc"]
 categories = ["api-bindings", "finance"]
-
-[package.metadata.cargo-shear]
-ignored = ["buffa", "buffa-types", "http-body", "serde", "serde_json"]
+rust-version.workspace = true
 
 [dependencies]
 buffa = { workspace = true, features = ["json"] }
