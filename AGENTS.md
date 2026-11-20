@@ -57,7 +57,7 @@ temp file and run `cargo mutants --in-diff <diff-file>` for that file only, with
 - Cargo's native `unused_dependencies` lint replaces the third-party checker and covers the crates that exist only for the generated contract (`longtrader-contract` and `longtrader-proto`); their ignore lists are gone.
 - Workspace MSRV is Rust 1.100. Prefer newly stabilized features and APIs over older workarounds; do not add feature gates for anything already stable in 1.100.
 - `[workspace.lints.cargo]` enables Cargo's native `unused_dependencies` lint, the only unused-dependency check; do not reintroduce a third-party checker. Its level is `warn`, and `.cargo/config.toml` sets `build.warnings = "deny"`, so a finding fails the gate.
-- `.cargo/config.toml` sets resolver `incompatible-rust-versions = "fallback"` (MSRV-aligned resolution) and `registry.global-min-publish-age = "5 days"` (Rust 1.100 dependency cooldown); keep both.
+- `.cargo/config.toml` sets resolver `incompatible-rust-versions = "fallback"` (MSRV-aligned resolution) and `registry.global-min-publish-age = "2 days"` (Rust 1.100 dependency cooldown); keep both.
 
 ## Dependency choices
 
