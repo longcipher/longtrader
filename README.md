@@ -21,6 +21,42 @@
 
 ---
 
+## Pre-commit Hooks
+
+This repository ships a [prek](https://github.com/j178/prek) configuration in
+`.pre-commit-config.yaml` for fast, commit-sized checks. It runs:
+
+- file hygiene: trailing whitespace, final newline, merge conflicts, large
+  files, YAML/TOML/JSON syntax, broken symlinks, and private keys
+- [Kingfisher](https://github.com/mongodb/kingfisher) secret scanning on the
+  staged files, with `--no-validate --redact` so the hook stays offline and
+  never prints a detected secret
+- `typos`, `rumdl`, `cargo fmt --check`, `cargo sort --check`, and `cargo
+  clippy -D warnings`
+
+Tests are deliberately excluded: `cargo test` stays in `just test` and CI.
+The first Kingfisher run downloads and caches the pinned binary; later runs
+reuse it. The auto-download hook needs `bash`, `curl`, and `tar` (`unzip` on
+Windows); on Windows use the Bash shipped with Git for Windows.
+
+The hooks call `typos`, `rumdl`, and the project toolchain directly, so run
+`just setup` once first. Then install the Git hook once per clone (install
+prek with `brew install prek`, `uv tool install prek`, or
+`cargo install --locked prek`):
+
+```bash
+prek install
+```
+
+Run every hook on every tracked file:
+
+```bash
+just hooks
+```
+
+`repo: builtin` is a prek extension, so this configuration is meant to be
+run with prek rather than upstream pre-commit.
+
 ## Why LongTrader
 
 Most trading frameworks lock you into one language, one exchange SDK, and one deploy target. LongTrader takes the opposite stance:

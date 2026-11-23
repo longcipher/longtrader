@@ -34,6 +34,13 @@ just lint
 just test
 ```
 
+Commit hooks run the fast subset (`just hooks`): fmt check, cargo sort,
+clippy, typos, rumdl, file hygiene, Kingfisher secret scanning. Never add
+`cargo test` to the hook; tests stay in `just test`.
+
+Never commit a real credential: keep `.env` and `.envrc` untracked, and
+commit a placeholder `.env.example` instead.
+
 Mutation testing is intentionally absent from the default loop and from CI. When a spec task
 declares `Mutation: <src-glob>`, follow the `/pb-build` gate: write the changed file's diff to a
 temp file and run `cargo mutants --in-diff <diff-file>` for that file only, with at most 3 files /

@@ -1,0 +1,96 @@
+# prek / pre-commit hooks for fast, commit-sized checks.
+# Install once with `prek install`; run everything with `prek run --all-files`.
+# Tests stay in `just test` and CI; this file intentionally does not run `cargo test`.
+#
+# `repo: builtin` is a prek extension. Install prek:
+# https://github.com/j178/prek#installation
+#
+# The cargo hooks mirror this repository's own `just lint` gate, so the hook is
+# always a subset of the gate. `rustup run <toolchain> cargo ...` pins the
+# toolchain explicitly instead of relying on the PATH order of `cargo`.
+
+priorities:
+  fix: 0
+  checks: 10
+  lint: 20
+  compile: 30
+
+repos:
+  - repo: builtin
+    hooks:
+      # Mutating hooks run first, one priority apart, so they never edit the
+      # same file concurrently.
+      - id: trailing-whitespace
+        priority: fix
+      - id: end-of-file-fixer
+        priority: 1
+
+      # Read-only repository hygiene checks.
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+        priority: checks
+      - id: check-case-conflict
+        priority: checks
+      - id: check-illegal-windows-names
+        priority: checks
+      - id: check-merge-conflict
+        priority: checks
+      - id: check-symlinks
+        priority: checks
+      - id: check-yaml
+        priority: checks
+      - id: check-toml
+        priority: checks
+      - id: check-json
+        priority: checks
+      - id: detect-private-key
+        priority: checks
+
+  # Secret scanning: blocks staged API keys, tokens, and credentials.
+  # The first run downloads and caches the pinned Kingfisher binary.
+  - repo: https://github.com/mongodb/kingfisher
+    rev: v2.20.0
+    hooks:
+      - id: kingfisher-auto-files
+        args: ['--no-validate', '--redact', '']
+        env:
+          KINGFISHER_VERSION: v2.20.0
+        priority: checks
+
+  - repo: local
+    hooks:
+      - id: typos
+        name: typos
+        language: system
+        entry: typos
+        types: [text]
+        pass_filenames: false
+        priority: lint
+
+      - id: rumdl
+        name: rumdl
+        language: system
+        entry: rumdl check .
+        files: \.md$
+        pass_filenames: false
+        priority: lint
+
+      - id: cargo-fmt
+        name: cargo fmt
+        language: system
+        entry: rustup run nightly cargo fmt --all -- --check
+        files: \.rs$
+        pass_filenames: false
+        priority: lint
+
+      - id: cargo-sort
+        name: cargo sort
+        language: system
+        entry: cargo sort --workspace --grouped --check
+        files: (^|/)Cargo\.toml$
+        pass_filenames: false
+        priority: 21
+
+      # `cargo clippy` is not hooked here yet: the gate has not been verified green
+      # in this workspace. Run `prek run cargo-clippy --all-files` once, fix what it
+      # reports, then enable this hook. Enabling it now could block every commit.
